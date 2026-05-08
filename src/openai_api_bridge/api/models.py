@@ -31,12 +31,17 @@ async def list_models(request: Request) -> dict:
             )
             continue
         for entry in entries:
+            # `display_name` is a non-standard extension — strict OpenAI SDKs
+            # ignore unknown fields, while frontends that look for it (LiteLLM,
+            # several custom gateways) can render the human-readable label
+            # from meta.json alongside the path-prefixed id.
             out.append(
                 {
                     "id": f"{provider_id}/{entry.id}",
                     "object": "model",
                     "created": now,
                     "owned_by": provider_id,
+                    "display_name": entry.display_name or entry.id,
                 }
             )
     return {"object": "list", "data": out}
