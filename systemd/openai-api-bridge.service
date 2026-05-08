@@ -1,0 +1,48 @@
+[Unit]
+Description=OpenAI-compatible API bridge for ComfyUI and Venice
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# DynamicUser provisions a transient UID and creates StateDirectory under
+# /var/lib/private/<name>, bind-mounted as /var/lib/<name> for the unit.
+DynamicUser=true
+StateDirectory=openai-api-bridge
+
+WorkingDirectory=/opt/openai-api-bridge
+
+# Secrets and required env. See .env.example for the full list.
+EnvironmentFile=/etc/openai-api-bridge.env
+
+# Pinned defaults. Override in the EnvironmentFile if needed.
+Environment="BRIDGE_CONFIG_PATH=/etc/openai-api-bridge/config.toml"
+Environment="FILES_DIR=/var/lib/openai-api-bridge/files"
+Environment="SQLITE_PATH=/var/lib/openai-api-bridge/state.db"
+
+ExecStart=/opt/openai-api-bridge/.venv/bin/openai-api-bridge
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+[Install]
+WantedBy=multi-user.target

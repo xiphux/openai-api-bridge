@@ -1,0 +1,54 @@
+# openai-api-bridge — provider config
+#
+# This file declares the upstream image/video generation backends the bridge
+# fronts. Each [[providers]] block becomes addressable as `{id}/{model_slug}`
+# in the OpenAI `model` field. Adding more ComfyUI instances or future
+# backends is purely a config change — no code edit required.
+#
+# Secrets are stored as the *name of an env var* (any field whose name ends
+# in `_env`). The actual value is read from the process environment, so this
+# file stays safe to check into a private repo.
+
+[defaults]
+cache_workflows = true                 # rescan only when bridge restarts
+
+
+# --- ComfyUI ----------------------------------------------------------------
+# Discovers workflows from a flat directory of `<name>.json` + `<name>.meta.json`
+# pairs. See the existing pipe (or this project's tests/test_workflows.py) for
+# the meta.json schema.
+
+[[providers]]
+id = "comfyui"
+backend = "comfyui"
+url = "http://127.0.0.1:8188"
+workflows_dir = "/var/lib/openai-api-bridge/workflows"
+poll_interval_seconds = 1.0
+poll_timeout_image_seconds = 300
+poll_timeout_video_seconds = 900
+
+
+# Example: a second ComfyUI instance, addressed as "comfyui-experimental/<slug>".
+# Uncomment and adjust to use.
+#
+# [[providers]]
+# id = "comfyui-experimental"
+# backend = "comfyui"
+# url = "http://192.168.1.20:8188"
+# workflows_dir = "/var/lib/openai-api-bridge/workflows-exp"
+
+
+# --- Venice -----------------------------------------------------------------
+# Native API (not OpenAI-compatible upstream — the bridge translates).
+# Set VENICE_API_TOKEN in the environment to enable this provider.
+
+[[providers]]
+id = "venice"
+backend = "venice"
+base_url = "https://api.venice.ai"
+api_token_env = "VENICE_API_TOKEN"
+# Optional diffusion knobs (uncomment to override defaults):
+# steps = 16
+# cfg_scale = 4.0
+# default_width = 1024
+# default_height = 1024

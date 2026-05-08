@@ -1,0 +1,206 @@
+"""Bridge configuration: env-var infrastructure settings + TOML provider definitions.
+
+Two layers:
+
+* `BridgeSettings` — read from env (`BRIDGE_*`, `FILES_DIR`, etc.) via pydantic-settings.
+* `ProvidersFile` — read from a TOML file pointed to by `BRIDGE_CONFIG_PATH`. Each
+  provider is a discriminated union member keyed on `backend`.
+
+Secrets in the TOML are stored by the *name of an env var* (any field whose schema
+name ends in ``_env``). The actual secret is read from `os.environ` at the point of
+use by the backend adapter — never copied into pydantic state.
+"""
+
+from __future__ import annotations
+
+import os
+import tomllib
+from functools import lru_cache
+from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .errors import BridgeError, InvalidRequest
+
+
+class ConfigError(BridgeError):
+    """Raised when the bridge's own config is unusable. Surfaces as 500 if
+    it ever escapes startup, but normally aborts process startup."""
+
+    status_code = 500
+    error_type = "api_error"
+    code = "configuration_error"
+
+
+class BridgeSettings(BaseSettings):
+    """Infrastructure & secrets. Read once at startup."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    api_key: str = Field(..., alias="BRIDGE_API_KEY")
+    host: str = Field(default="0.0.0.0", alias="BRIDGE_HOST")
+    port: int = Field(default=8080, alias="BRIDGE_PORT")
+    public_base_url: str = Field(default="", alias="BRIDGE_PUBLIC_BASE_URL")
+    config_path: Path = Field(
+        default=Path("/etc/openai-api-bridge/config.toml"),
+        alias="BRIDGE_CONFIG_PATH",
+    )
+    files_dir: Path = Field(
+        default=Path("/var/lib/openai-api-bridge/files"),
+        alias="FILES_DIR",
+    )
+    sqlite_path: Path = Field(
+        default=Path("/var/lib/openai-api-bridge/state.db"),
+        alias="SQLITE_PATH",
+    )
+    retention_days: int = Field(default=30, alias="RETENTION_DAYS")
+    max_cache_gb: int = Field(default=50, alias="MAX_CACHE_GB")
+    eviction_interval_seconds: int = Field(default=600, alias="EVICTION_INTERVAL_SECONDS")
+    max_concurrent_video_jobs: int = Field(default=2, alias="MAX_CONCURRENT_VIDEO_JOBS")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @property
+    def max_cache_bytes(self) -> int:
+        return self.max_cache_gb * 1024**3
+
+
+# --- Provider config (TOML-backed) ------------------------------------------
+
+
+class ComfyUIProviderConfig(BaseModel):
+    backend: Literal["comfyui"]
+    id: str
+    url: str = "http://127.0.0.1:8188"
+    workflows_dir: Path
+    poll_interval_seconds: float = 1.0
+    poll_timeout_image_seconds: float = 300.0
+    poll_timeout_video_seconds: float = 900.0
+    cache_workflows: bool = True
+
+
+class VeniceProviderConfig(BaseModel):
+    backend: Literal["venice"]
+    id: str
+    base_url: str = "https://api.venice.ai"
+    api_token_env: str
+    # Venice diffusion knobs. Defaults match the legacy pipe; tunable per
+    # provider in TOML if a user wants higher/lower fidelity by default.
+    steps: int = 16
+    cfg_scale: float = 4.0
+    default_width: int = 1024
+    default_height: int = 1024
+
+    def resolve_api_token(self) -> str:
+        token = os.environ.get(self.api_token_env)
+        if not token:
+            raise ConfigError(
+                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
+            )
+        return token
+
+
+ProviderConfig = Annotated[
+    ComfyUIProviderConfig | VeniceProviderConfig,
+    Field(discriminator="backend"),
+]
+
+
+class Defaults(BaseModel):
+    cache_workflows: bool = True
+
+
+class ProvidersFile(BaseModel):
+    defaults: Defaults = Field(default_factory=Defaults)
+    providers: list[ProviderConfig] = Field(default_factory=list)
+
+    def by_id(self, provider_id: str) -> ProviderConfig | None:
+        for p in self.providers:
+            if p.id == provider_id:
+                return p
+        return None
+
+
+def load_providers(path: Path) -> ProvidersFile:
+    """Read and validate the providers TOML file.
+
+    Raises ConfigError on missing file, parse error, or schema violation.
+    """
+    if not path.exists():
+        raise ConfigError(f"Providers config file not found: {path}")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Failed to parse {path}: {e}") from e
+    file = ProvidersFile.model_validate(data)
+    _enforce_unique_ids(file)
+    return file
+
+
+def _enforce_unique_ids(file: ProvidersFile) -> None:
+    seen: set[str] = set()
+    for p in file.providers:
+        if p.id in seen:
+            raise ConfigError(f"Duplicate provider id: {p.id!r}")
+        seen.add(p.id)
+
+
+# --- Model id parsing -------------------------------------------------------
+
+
+def parse_model_id(model_id: str) -> tuple[str, str]:
+    """Split an OpenAI-shaped `model` field into (provider_id, model_slug).
+
+    Pattern: "{provider_id}/{model_slug}". Both parts must be non-empty.
+    """
+    if "/" not in model_id:
+        raise InvalidRequest(
+            f"Model id must be 'provider/model' (got {model_id!r})",
+            param="model",
+        )
+    provider_id, _, slug = model_id.partition("/")
+    if not provider_id or not slug:
+        raise InvalidRequest(
+            f"Model id must be 'provider/model' (got {model_id!r})",
+            param="model",
+        )
+    return provider_id, slug
+
+
+# --- Singleton accessors (FastAPI dependency-friendly) ----------------------
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> BridgeSettings:
+    return BridgeSettings()  # type: ignore[call-arg]  # required field comes from env
+
+
+_providers_cache: ProvidersFile | None = None
+
+
+def get_providers() -> ProvidersFile:
+    """Return the loaded ProvidersFile. Caller must have called `init_providers` first."""
+    if _providers_cache is None:
+        raise RuntimeError("Providers not loaded — call init_providers() at startup")
+    return _providers_cache
+
+
+def init_providers(path: Path | None = None) -> ProvidersFile:
+    """Load (or reload) the providers TOML and update the module-level cache."""
+    global _providers_cache
+    target = path or get_settings().config_path
+    _providers_cache = load_providers(target)
+    return _providers_cache
+
+
+def reset_caches_for_tests() -> None:
+    """Test hook to clear cached settings/providers."""
+    global _providers_cache
+    get_settings.cache_clear()
+    _providers_cache = None

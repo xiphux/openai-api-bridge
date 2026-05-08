@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+build/
+dist/
+.eggs/
+.tox/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# uv
+.venv/
+
+# Local config & secrets
+.env
+.env.local
+config.toml
+state.db*
+files/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
