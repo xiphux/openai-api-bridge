@@ -1,7 +1,11 @@
 services:
   bridge:
+    # Override BRIDGE_IMAGE to pull the published image from GHCR
+    # (e.g. ghcr.io/<your-username>/openai-api-bridge:latest). Default builds
+    # locally — convenient for dev, but a published image is the right choice
+    # for the NAS deployment so you don't need a build toolchain there.
+    image: ${BRIDGE_IMAGE:-openai-api-bridge:local}
     build: .
-    image: openai-api-bridge:local
     container_name: openai-api-bridge
     ports:
       - "8080:8080"

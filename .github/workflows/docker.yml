@@ -1,0 +1,89 @@
+# Build and publish the bridge container image to GitHub Container Registry.
+#
+# Triggers
+#   - push to main          -> publishes :main and :latest
+#   - tag matching v*       -> publishes :v1.2.3, :1.2, :1, and :latest
+#   - workflow_dispatch     -> manual run (no tag movement, just :sha-XXXXXXX)
+#
+# Pulls multi-arch (amd64 + arm64). Synology NASes split between Atom (amd64)
+# and ARM models; CachyOS is amd64. Building both removes guesswork at deploy.
+#
+# Security note: every templated value below comes from a trusted GitHub
+# context (repository name, actor login, action outputs, env vars) — none are
+# user-controlled inputs that could carry injection payloads.
+
+name: Build and publish container image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags & labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tagging strategy:
+          #   - branch pushes              -> :main (or whatever the branch is)
+          #   - PR builds                  -> :pr-N
+          #   - semver tag pushes (v1.2.3) -> :1.2.3, :1.2, :1, AND :latest
+          #   - every build                -> :sha-abc1234 for traceability
+          # `:latest` is implicitly applied by metadata-action's default
+          # flavor=latest=auto: it moves only on the highest semver tag, never
+          # on branch pushes. Matches the convention used by postgres/nginx/etc.
+          # — pull `:main` if you want the HEAD-of-default-branch image instead.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=openai-api-bridge
+            org.opencontainers.image.description=OpenAI-compatible HTTP bridge for ComfyUI and Venice
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

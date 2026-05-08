@@ -58,6 +58,8 @@ The bridge listens on `0.0.0.0:8080` by default.
 
 ## Docker
 
+### Local build (development)
+
 ```bash
 cp config.toml.example config.toml
 echo "BRIDGE_API_KEY=$(openssl rand -hex 24)" > .env
@@ -66,6 +68,33 @@ echo "BRIDGE_API_KEY=$(openssl rand -hex 24)" > .env
 docker compose up -d --build
 docker compose logs -f bridge
 ```
+
+### Published image from GHCR (deployment)
+
+The repo ships a GitHub Actions workflow (`.github/workflows/docker.yml`) that
+builds and publishes a multi-arch (amd64 + arm64) image to GitHub Container
+Registry on every push to `main` and on `v*.*.*` tags. To pull it:
+
+```bash
+# in your .env
+BRIDGE_IMAGE=ghcr.io/<your-username>/openai-api-bridge:latest
+
+# private package? authenticate the host first with a PAT (read:packages scope):
+echo "$GHCR_PAT" | docker login ghcr.io -u <your-username> --password-stdin
+
+docker compose pull
+docker compose up -d
+```
+
+Tag conventions published by the workflow:
+
+| Tag                | When | Use it for |
+|---|---|---|
+| `latest`           | only when a semver `v*.*.*` tag is pushed (matches `nginx` / `postgres` / `python` convention — *not* HEAD of `main`) | production |
+| `v1.2.3` / `1.2` / `1` | semver tag pushes | pinning to a specific release |
+| `main`             | every push to `main` | bleeding edge / dev integration |
+| `pr-42`            | PR builds (built but not pushed) | n/a |
+| `sha-abc1234`      | every build | rollback / audit |
 
 State (SQLite + cached files) lives in the named volume `bridge-state`.
 
