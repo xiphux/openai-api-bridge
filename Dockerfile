@@ -20,8 +20,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
 
 # 2) Copy the rest of the source and install the project itself.
+# LICENSE must be in the build context for `uv sync` to honor the
+# `license-files = ["LICENSE"]` declaration in pyproject.toml.
 COPY src /app/src
-COPY pyproject.toml uv.lock README.md /app/
+COPY pyproject.toml uv.lock README.md LICENSE /app/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 

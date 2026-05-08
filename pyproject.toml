@@ -3,6 +3,8 @@ name = "openai-api-bridge"
 version = "0.1.0"
 description = "OpenAI-compatible HTTP bridge for ComfyUI and Venice image/video generation"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Chris Han", email = "chris@chrishan.me" }
 ]
@@ -16,6 +18,13 @@ dependencies = [
     "python-multipart>=0.0.27",
     "uvicorn[standard]>=0.46.0",
 ]
+
+[project.urls]
+# These get baked into the wheel's METADATA and (via the "Source" URL) make
+# the GHCR package page auto-link to the repo on first publish.
+Homepage = "https://github.com/xiphux/openai-api-bridge"
+Repository = "https://github.com/xiphux/openai-api-bridge"
+Issues = "https://github.com/xiphux/openai-api-bridge/issues"
 
 [project.scripts]
 openai-api-bridge = "openai_api_bridge.main:run"
