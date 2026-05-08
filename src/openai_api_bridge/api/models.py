@@ -31,10 +31,11 @@ async def list_models(request: Request) -> dict:
             )
             continue
         for entry in entries:
-            # `display_name` is a non-standard extension — strict OpenAI SDKs
-            # ignore unknown fields, while frontends that look for it (LiteLLM,
-            # several custom gateways) can render the human-readable label
-            # from meta.json alongside the path-prefixed id.
+            # `display_name` and `kind` are non-standard extensions — strict
+            # OpenAI SDKs ignore unknown fields, while gateway-aware frontends
+            # (LiteLLM, our own Open WebUI pipe) use `display_name` for a
+            # human-readable label and `kind` to pick the right endpoint
+            # (/v1/images/* vs /v1/videos).
             out.append(
                 {
                     "id": f"{provider_id}/{entry.id}",
@@ -42,6 +43,7 @@ async def list_models(request: Request) -> dict:
                     "created": now,
                     "owned_by": provider_id,
                     "display_name": entry.display_name or entry.id,
+                    "kind": entry.kind,
                 }
             )
     return {"object": "list", "data": out}

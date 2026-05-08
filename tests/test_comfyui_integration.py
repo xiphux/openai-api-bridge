@@ -101,6 +101,8 @@ def test_models_lists_comfyui_workflow(
     assert entry["owned_by"] == "comfyui"
     # The non-standard display_name carries the human-readable label from meta.json.
     assert entry["display_name"] == "Tiny T2I"
+    # `kind` lets gateway-aware clients route to the right endpoint.
+    assert entry["kind"] == "image"
 
 
 @respx.mock
