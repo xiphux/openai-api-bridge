@@ -1,0 +1,58 @@
+# Configuration for GitHub's auto-generated release notes.
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+#
+# When `generate_release_notes: true` is requested (see docker.yml's release
+# job), GitHub builds the body from PRs merged + commits made between the
+# new tag and the previous tag, grouped by these categories. PRs without a
+# matching label fall into "Other Changes" (the wildcard catch-all).
+#
+# This file does nothing if you commit directly to main without PRs — in
+# that case the notes are a flat list of commit messages, which is fine for
+# a personal-project pace. The categorization kicks in the moment you start
+# raising PRs and labelling them.
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - skip-changelog
+    authors:
+      - dependabot
+      - renovate-bot
+
+  categories:
+    - title: 🚀 Features
+      labels:
+        - enhancement
+        - feature
+
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+        - fix
+
+    - title: 📝 Documentation
+      labels:
+        - documentation
+        - docs
+
+    - title: 🏗️ Internals & Refactors
+      labels:
+        - refactor
+        - internal
+        - chore
+
+    - title: 🧪 Tests & CI
+      labels:
+        - test
+        - tests
+        - ci
+
+    - title: 📦 Dependencies
+      labels:
+        - dependencies
+        - deps
+
+    - title: Other Changes
+      labels:
+        - "*"

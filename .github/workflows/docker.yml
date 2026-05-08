@@ -87,3 +87,29 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Create a GitHub Release whenever a v*.*.* tag is pushed. Notes are
+  # auto-generated from PRs/commits since the previous tag (categorization
+  # is configured in `.github/release.yml`). Released as a draft so you can
+  # review and optionally edit before publishing — flip `draft: false` once
+  # you trust the auto-generated notes for your repo's flow.
+  create-release:
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # required to create the release object
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so release notes can compare to prior tag
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: true
+          # Body is left blank so GitHub's auto-generation fills it in based
+          # on `.github/release.yml`. To prepend a hand-written intro, set
+          # `body:` here and GitHub appends the auto-generated notes after it.
