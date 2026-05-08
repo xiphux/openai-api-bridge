@@ -46,6 +46,17 @@ class Database:
 
     async def close(self) -> None:
         if self._conn is not None:
+            # Flush the WAL into the main .db and reset the -wal file to zero
+            # bytes. The -wal/-shm files persist (SQLite recreates them on
+            # next open), but a backup of state.db taken right after shutdown
+            # is now self-contained — no out-of-band WAL replay needed.
+            try:
+                await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                await self._conn.commit()
+            except Exception:
+                # Don't block shutdown on a checkpoint failure; SQLite will
+                # recover the WAL on next open regardless.
+                pass
             await self._conn.close()
             self._conn = None
 
