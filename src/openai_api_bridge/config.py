@@ -106,8 +106,40 @@ class VeniceProviderConfig(BaseModel):
         return token
 
 
+class OpenAIPassthroughProviderConfig(BaseModel):
+    """Generic OpenAI-API-compatible upstream (llama-server, vLLM, OpenAI itself,
+    Venice's chat endpoint, any vendor that speaks the OpenAI wire protocol).
+
+    Requests go through unchanged — we don't translate field names or response
+    shapes. The bridge only routes, prefixes model ids, and aggregates the
+    upstream's /v1/models listing alongside everything else.
+    """
+
+    backend: Literal["openai"]
+    id: str
+    base_url: str
+    # Optional: many local OpenAI-compat servers (llama-server, vLLM with no
+    # auth, lmstudio) require no Authorization header. Leave api_token_env
+    # unset and the bridge sends nothing.
+    api_token_env: str | None = None
+    # Per-request timeout for non-streaming calls (seconds). Streaming ignores
+    # this — the bridge holds the connection open for as long as the upstream
+    # keeps writing.
+    request_timeout_seconds: float = 120.0
+
+    def resolve_api_token(self) -> str | None:
+        if not self.api_token_env:
+            return None
+        token = os.environ.get(self.api_token_env)
+        if not token:
+            raise ConfigError(
+                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
+            )
+        return token
+
+
 ProviderConfig = Annotated[
-    ComfyUIProviderConfig | VeniceProviderConfig,
+    ComfyUIProviderConfig | VeniceProviderConfig | OpenAIPassthroughProviderConfig,
     Field(discriminator="backend"),
 ]
 

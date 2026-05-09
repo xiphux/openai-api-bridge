@@ -1,51 +1,63 @@
 # openai-api-bridge
 
-OpenAI-compatible HTTP gateway for **image and video generation** backends
-that don't natively speak the OpenAI API. Clients (LibreChat, LobeChat,
-custom OpenAI SDK code, `curl`) point at the bridge and use standard
-`/v1/images/*` and `/v1/videos/*` endpoints; the bridge translates each
-request to the upstream provider's native protocol and persists the result.
+OpenAI-compatible HTTP gateway that aggregates multiple generation backends
+behind a single endpoint. Clients (LibreChat, LobeChat, custom OpenAI SDK
+code, `curl`) point at the bridge and use standard OpenAI endpoints; the
+bridge dispatches each request to the right upstream — translating where
+the upstream isn't OpenAI-compatible (ComfyUI, Venice image), pure-passing
+where it is (any OpenAI-compatible chat / embedding server).
 
 ```
 client (LibreChat/LobeChat/curl/...)
-        │  OpenAI API: /v1/{models,images,videos,files}
+        │  OpenAI API: /v1/{models,chat,embeddings,images,videos,files}
         ▼
-   openai-api-bridge   ←  config.toml: [[providers]] = comfyui | venice | ...
+   openai-api-bridge   ←  config.toml: [[providers]] = comfyui | venice | openai | ...
         │
         ├──► ComfyUI workflow (image or video, via user-defined workflow JSON)
-        └──► Venice.ai native /api/v1/image/generate (image only)
+        ├──► Venice.ai native /api/v1/image/generate (image only)
+        └──► Any OpenAI-compatible upstream (llama-server, vLLM, OpenAI, OpenRouter chat, ...)
+              for /v1/chat/completions and /v1/embeddings
 ```
 
 ## Supported providers
 
-| Provider | What this bridge covers | Why the bridge is needed |
+| Provider type | What it covers | Why it's a separate adapter |
 |---|---|---|
-| **ComfyUI** | Image and video generation via user-defined workflow files (any workflow that exports as API JSON) | ComfyUI has no OpenAI-compatible HTTP surface; the bridge is the only path for OpenAI clients to use it |
-| **Venice.ai** | Image generation via Venice's native `/api/v1/image/generate` | Venice's OpenAI-compat surface is **chat-only**; their image API is proprietary, so we wrap it |
+| **ComfyUI** | Image and video generation via user-defined workflow files | ComfyUI has no OpenAI-compatible HTTP surface; bridge translates |
+| **Venice.ai** | Image generation via Venice's native `/api/v1/image/generate` | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
+| **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
 
-Adding a future backend (Replicate, fal.ai, an OpenAI passthrough, a second
+Configure as many of each as you want. The most common deployment fronts a
+single ComfyUI box (image + video), Venice (cloud image), and one or more
+local llama-server / vLLM instances (chat + embedding) — all behind one
+bridge URL.
+
+Adding a future backend (Replicate, fal.ai, OpenRouter image, a second
 ComfyUI instance, etc.) is a single new `[[providers]]` block in
 `config.toml` plus an adapter module — see `src/openai_api_bridge/backends/`
 for the existing implementations.
 
 ## What this bridge does *not* do
 
-Clients should bypass the bridge for these:
-
-- **Chat completions** — Venice already exposes OpenAI-compatible
-  `/v1/chat/completions` directly. Point your chat client at Venice's
-  `https://api.venice.ai/api/v1` (or any other OpenAI-compatible chat
-  provider) for text. The bridge is image/video only.
-- **Embeddings** — same reasoning; not the bridge's concern.
-- **Image gateways that *already* speak OpenAI** (e.g. ImageRouter) —
-  point your client at the gateway directly. Wrapping an OpenAI API in
-  another OpenAI API is pure overhead.
+- **OpenRouter image generation specifically.** OpenRouter handles images via
+  chat-completions with a non-standard `images` array in the response. The
+  generic `openai` passthrough provider type doesn't translate this. Their
+  chat surface works fine through `openai` passthrough; only image-via-chat
+  needs a dedicated `openrouter` adapter (deferred).
+- **Image gateways that already speak OpenAI** (e.g. ImageRouter). Point
+  clients at them directly — wrapping an OpenAI API in another OpenAI API
+  is pure overhead.
+- **Audio (TTS / Whisper), Realtime API, Assistants API, fine-tuning,
+  batch.** Not currently in scope; could be added per the same pattern if
+  needed.
 
 ## API surface
 
 | Method | Path | Notes |
 |---|---|---|
 | GET    | `/v1/models`                       | Aggregate listing across all providers |
+| POST   | `/v1/chat/completions`             | Sync + SSE streaming passthrough to openai-compat upstreams |
+| POST   | `/v1/embeddings`                   | Sync passthrough to openai-compat upstreams |
 | POST   | `/v1/images/generations`           | Sync; JSON body |
 | POST   | `/v1/images/edits`                 | Sync; multipart (`image` + `prompt` + `model`) |
 | POST   | `/v1/videos`                       | Async; multipart; returns `{id, status: "queued"}` |

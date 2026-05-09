@@ -16,6 +16,8 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .api import chat as chat_api
+from .api import embeddings as embeddings_api
 from .api import files as files_api
 from .api import images as images_api
 from .api import models as models_api
@@ -159,6 +161,8 @@ def create_app() -> FastAPI:
     app.include_router(images_api.router)
     app.include_router(videos_api.router)
     app.include_router(files_api.router)
+    app.include_router(chat_api.router)
+    app.include_router(embeddings_api.router)
     return app
 
 

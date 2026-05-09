@@ -52,3 +52,41 @@ api_token_env = "VENICE_API_TOKEN"
 # cfg_scale = 4.0
 # default_width = 1024
 # default_height = 1024
+
+
+# --- OpenAI passthrough -----------------------------------------------------
+# Generic OpenAI-compatible upstream — local llama-server, vLLM, lmstudio,
+# OpenAI itself, or any vendor that speaks the OpenAI wire protocol.
+# Requests pass through unchanged; the bridge only routes and prefixes
+# model ids. Supports /v1/chat/completions (sync + streaming) and
+# /v1/embeddings.
+#
+# Configure as many as you have — each gets a unique id and the bridge
+# aggregates all of their /v1/models into one unified listing.
+
+# Example: a local llama-server with no auth.
+# [[providers]]
+# id = "llama-main"
+# backend = "openai"
+# base_url = "http://192.168.1.10:8080"
+# # api_token_env omitted -> no Authorization header sent upstream
+
+# Example: a second llama-server, addressed as "llama-fast/<model-id>".
+# [[providers]]
+# id = "llama-fast"
+# backend = "openai"
+# base_url = "http://192.168.1.11:8080"
+
+# Example: an OpenAI-compatible hosted provider (Together, Groq, etc.).
+# [[providers]]
+# id = "groq"
+# backend = "openai"
+# base_url = "https://api.groq.com/openai"
+# api_token_env = "GROQ_API_KEY"
+# request_timeout_seconds = 120.0
+
+# Note: for OpenRouter image generation specifically, the openai passthrough
+# is *not* sufficient — OpenRouter exposes image gen via chat-completions
+# with a non-standard `images` array in the response, so a dedicated
+# `openrouter` adapter would be needed. Their chat surface works through
+# this provider type fine.

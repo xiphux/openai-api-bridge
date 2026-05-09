@@ -8,8 +8,9 @@ dispatcher routes incoming requests to the right backend by parsing the
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 from ..errors import UnsupportedOperation
 
@@ -23,11 +24,13 @@ class ModelEntry:
     """One row in the response of `GET /v1/models` for this backend.
 
     The dispatcher prefixes ``id`` with the provider's id before returning to
-    the client. ``kind`` is "image" or "video".
+    the client. ``kind`` is "image", "video", "chat", "embedding", or None
+    when the backend can't tell (e.g. an OpenAI-compat upstream that lists
+    every model uniformly without modality hints).
     """
 
     id: str
-    kind: str
+    kind: str | None = None
     display_name: str | None = None
 
 
@@ -49,7 +52,6 @@ class Backend(ABC):
     async def list_models(self) -> list[ModelEntry]:
         ...
 
-    @abstractmethod
     async def generate_image(
         self,
         *,
@@ -58,7 +60,15 @@ class Backend(ABC):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        ...
+        """Default: not supported. Override in backends that do text-to-image.
+
+        Originally abstract — relaxed when the OpenAI-passthrough backend
+        landed (chat/embedding upstreams have no image surface, but the
+        Backend ABC is a single union of all backend capabilities).
+        """
+        raise UnsupportedOperation(
+            "Image generation is not supported by this provider"
+        )
 
     async def edit_image(
         self,
@@ -95,6 +105,41 @@ class Backend(ABC):
         raise UnsupportedOperation(
             "Video generation is not supported by this provider"
         )
+
+    # --- chat / embedding (OpenAI-passthrough territory) ----------------
+
+    async def chat_completion(
+        self,
+        body: dict[str, Any],
+        *,
+        stream: bool,
+    ) -> dict[str, Any] | AsyncIterator[bytes]:
+        """Forward an OpenAI-shaped chat completion request to the backend.
+
+        Default: not supported. Override in OpenAI-passthrough backends.
+
+        When ``stream=False``, returns the upstream's parsed JSON response.
+        When ``stream=True``, returns an async iterator of raw SSE byte chunks
+        the bridge will pipe straight to the client without re-parsing — so a
+        client's typewriter UI sees tokens land as the upstream emits them.
+        The opaque-bytes shape on the streaming path is deliberate: chat
+        completions chunks include vendor extensions (function calls, vision,
+        tool outputs, JSON mode) we don't need to understand to forward.
+        """
+        raise UnsupportedOperation(
+            "Chat completions are not supported by this provider"
+        )
+
+    async def create_embedding(
+        self,
+        body: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Forward an OpenAI-shaped embeddings request. Default: not supported."""
+        raise UnsupportedOperation(
+            "Embeddings are not supported by this provider"
+        )
+
+    # --- lifecycle -------------------------------------------------------
 
     async def aclose(self) -> None:
         """Optional cleanup hook (e.g. close a shared httpx client)."""
