@@ -24,9 +24,19 @@ log = logging.getLogger(__name__)
 
 # Re-verify the prompt is still queued or running every N seconds. Long enough
 # to not pummel ComfyUI's queue endpoint on busy generations; short enough that
-# a dropped prompt is detected within ~half a minute instead of the full
+# a dropped prompt is detected within ~couple minutes instead of the full
 # poll_timeout_video_seconds (default 900s).
 QUEUE_RECHECK_INTERVAL = 30.0
+
+# A single negative queue check ("not in /queue, not in /history") isn't
+# enough to declare the prompt dropped. ComfyUI's /queue endpoint can briefly
+# misreport during heavy execution — kjnodes preview-node transitions,
+# queue-lock contention while a worker is mid-step, restart-then-recover
+# transients, etc. Require this many consecutive misses (each separated by
+# QUEUE_RECHECK_INTERVAL) before we give up on the prompt. With the default
+# 30s interval that's a ~90s tolerance window — plenty for transient state,
+# still much better than waiting out the full generation timeout.
+QUEUE_MISS_THRESHOLD = 3
 
 
 class ComfyUIClient:
@@ -119,15 +129,20 @@ class ComfyUIClient:
 
         Every ``QUEUE_RECHECK_INTERVAL`` seconds we also verify the prompt is
         still in ComfyUI's queue (running or pending). If history doesn't have
-        it AND the queue doesn't either, ComfyUI has dropped the prompt —
-        most commonly because the upstream restarted or a worker crashed
-        mid-execution. Fail fast in that case instead of waiting out
-        ``timeout_seconds`` (which used to mean we'd hold the bridge's video
-        semaphore for up to 15 minutes per dropped job, eventually starving
-        all subsequent video requests).
+        it AND the queue doesn't either for ``QUEUE_MISS_THRESHOLD`` consecutive
+        checks, ComfyUI has dropped the prompt — most commonly because the
+        upstream restarted or a worker crashed mid-execution. Fail in that case
+        instead of waiting out ``timeout_seconds`` (which used to mean we'd
+        hold the bridge's video semaphore for up to 15 minutes per dropped job,
+        eventually starving all subsequent video requests).
+
+        The multi-miss threshold tolerates transient queue-state weirdness
+        during heavy generation (custom-node transitions, queue-lock
+        contention) without false-positive-failing healthy long-running jobs.
         """
         start = time.time()
         last_queue_check = 0.0
+        queue_miss_streak = 0
         per_request_timeout = 30.0
         history_url = f"{self.base_url}/history/{prompt_id}"
         queue_url = f"{self.base_url}/queue"
@@ -162,15 +177,29 @@ class ComfyUIClient:
                     httpx.RemoteProtocolError,
                 ) as e:
                     # Don't fail just because the queue check itself was flaky;
-                    # the main loop will retry on the next interval.
+                    # the main loop will retry on the next interval. Don't
+                    # update the miss streak either — a network blip isn't a
+                    # signal about whether the prompt is alive.
                     log.debug("Queue recheck failed (will retry): %s", type(e).__name__)
                 else:
-                    if not tracked:
-                        raise UpstreamError(
-                            f"ComfyUI dropped prompt {prompt_id}: not in history or "
-                            "queue. The upstream likely restarted or a worker crashed "
-                            "mid-execution."
+                    if tracked:
+                        queue_miss_streak = 0
+                    else:
+                        queue_miss_streak += 1
+                        log.info(
+                            "ComfyUI prompt %s missing from /queue (%d/%d misses)",
+                            prompt_id,
+                            queue_miss_streak,
+                            QUEUE_MISS_THRESHOLD,
                         )
+                        if queue_miss_streak >= QUEUE_MISS_THRESHOLD:
+                            raise UpstreamError(
+                                f"ComfyUI dropped prompt {prompt_id}: missing from "
+                                f"history and queue for {QUEUE_MISS_THRESHOLD} "
+                                f"consecutive checks (~{QUEUE_MISS_THRESHOLD * QUEUE_RECHECK_INTERVAL:.0f}s). "
+                                "The upstream likely restarted or a worker crashed "
+                                "mid-execution."
+                            )
 
             await asyncio.sleep(self.poll_interval)
 

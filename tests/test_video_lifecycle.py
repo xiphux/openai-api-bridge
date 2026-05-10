@@ -33,16 +33,16 @@ from openai_api_bridge.infra.tasks import TaskScheduler
 async def test_poll_completion_fails_fast_when_comfyui_drops_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Tighten the recheck interval so the test runs in well under a second
-    # instead of waiting the production 30s window.
+    # Tighten both the recheck interval and the miss threshold so the test
+    # runs in well under a second instead of waiting the production 30s x 3.
     monkeypatch.setattr(comfy_client_module, "QUEUE_RECHECK_INTERVAL", 0.05)
+    monkeypatch.setattr(comfy_client_module, "QUEUE_MISS_THRESHOLD", 2)
 
     # /history always 200 with empty body — the prompt isn't there.
     respx.get("http://comfy/history/dropped-id").mock(
         return_value=httpx.Response(200, json={})
     )
-    # /queue returns no record of our prompt — comfyui has dropped it
-    # (e.g. server restart wiped its in-memory queue).
+    # /queue returns no record of our prompt for every check.
     respx.get("http://comfy/queue").mock(
         return_value=httpx.Response(
             200,
@@ -59,6 +59,50 @@ async def test_poll_completion_fails_fast_when_comfyui_drops_prompt(
             # Generous outer timeout so a slow CI doesn't false-positive on the
             # GenerationTimeout path; the queue check should fire well before this.
             await client.poll_completion("dropped-id", timeout_seconds=10.0)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_poll_completion_tolerates_transient_queue_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One queue miss isn't enough to declare a drop — the streak resets if
+    the prompt reappears. Defends against custom-node transitions where the
+    /queue endpoint briefly misreports during heavy execution."""
+    monkeypatch.setattr(comfy_client_module, "QUEUE_RECHECK_INTERVAL", 0.05)
+    monkeypatch.setattr(comfy_client_module, "QUEUE_MISS_THRESHOLD", 3)
+
+    # /history empty for a while, then returns the result.
+    respx.get("http://comfy/history/transient-id").mock(
+        side_effect=[
+            httpx.Response(200, json={}),
+            httpx.Response(200, json={}),
+            httpx.Response(200, json={}),
+            httpx.Response(200, json={}),
+            httpx.Response(200, json={}),
+            httpx.Response(200, json={"transient-id": {"outputs": {}}}),
+        ]
+    )
+    # /queue alternates: present, missing, present, missing, present.
+    # Never 3 misses in a row, so the streak should reset and we should NOT
+    # raise UpstreamError; eventually history returns success.
+    present = httpx.Response(
+        200,
+        json={"queue_running": [[0, "transient-id", {}, {}]], "queue_pending": []},
+    )
+    missing = httpx.Response(
+        200, json={"queue_running": [], "queue_pending": []}
+    )
+    respx.get("http://comfy/queue").mock(
+        side_effect=[present, missing, present, missing, present, missing]
+    )
+
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=0.01)
+    try:
+        result = await client.poll_completion("transient-id", timeout_seconds=10.0)
+        assert result == {"outputs": {}}
     finally:
         await client.aclose()
 
