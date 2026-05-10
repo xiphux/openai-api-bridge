@@ -1,10 +1,17 @@
-# Multi-stage build using uv. The first stage installs deps + the package
-# into a venv; the second stage copies the venv into a slim runtime image.
-# The cache mount keeps `uv sync` fast across builds without bloating layers.
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build using uv. Builder installs deps + the package into a
+# venv; runtime copies the venv into a fresh image. Both stages run on
+# python:3.12-alpine for a ~100MB savings over python:3.12-slim — every
+# native dep in this project (pydantic_core, uvloop, httptools,
+# watchfiles) ships a musllinux wheel, so `uv sync` pulls pre-built
+# wheels and never has to compile from source.
 
-FROM python:3.12-slim AS builder
+FROM python:3.12-alpine AS builder
 
-# Pin uv from the official image. Renovate-friendly tag.
+# uv ships as a statically-linked musl binary in the scratch image, so
+# the same artifact runs on alpine just as it would on glibc — no need
+# to switch to an alpine-tagged uv image.
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
@@ -28,12 +35,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-alpine AS runtime
 
-# Run as a non-root user. Image-time UID/GID; the actual data volume should
-# be owned by this UID on the host, OR the user can override via --user.
-RUN groupadd --system --gid 10001 bridge \
- && useradd  --system --uid 10001 --gid 10001 --no-create-home bridge
+# sqlite CLI for ad-hoc inspection of the state.db (file metadata, job
+# tracking, eviction queue). ~1.5 MB and doesn't run unless invoked —
+# avoids needing to docker cp the file out to look at it.
+RUN apk add --no-cache sqlite
+
+# Run as a non-root user. Image-time UID/GID; the actual data volume
+# should be owned by this UID on the host, OR overridden via --user.
+# Alpine's BusyBox provides addgroup/adduser (not the util-linux
+# groupadd/useradd we'd use on debian); flag names differ.
+RUN addgroup -S -g 10001 bridge \
+ && adduser  -S -u 10001 -G bridge -H -D bridge
 
 COPY --from=builder --chown=bridge:bridge /app /app
 
@@ -44,8 +58,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     FILES_DIR=/var/lib/openai-api-bridge/files \
     SQLITE_PATH=/var/lib/openai-api-bridge/state.db
 
-# Pre-create runtime data dir so a tmpfs-only deployment still has a writable
-# location. Real deployments should mount a persistent volume here.
+# Pre-create runtime data dir so a tmpfs-only deployment still has a
+# writable location. Real deployments should mount a persistent volume.
 RUN mkdir -p /var/lib/openai-api-bridge \
  && chown -R bridge:bridge /var/lib/openai-api-bridge
 
