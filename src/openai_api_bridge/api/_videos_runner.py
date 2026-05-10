@@ -7,6 +7,7 @@ mid-flight, the row is cleaned up by ``JobStore.mark_stale_failed`` at startup.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from ..config import BridgeSettings
@@ -68,6 +69,18 @@ async def run_video_job(
             job_id, status="completed", file_id=file_id, progress_pct=100
         )
         log.info("Video job %s completed; file_id=%s", job_id, file_id)
+    except asyncio.CancelledError:
+        log.info("Video job %s cancelled; marking failed", job_id)
+        # Best-effort: mark the row failed so it doesn't sit in_progress
+        # forever. We swallow errors here so the cancellation propagates
+        # cleanly even if the DB write itself races with shutdown.
+        try:
+            await jobstore.update(
+                job_id, status="failed", error_message="Job cancelled"
+            )
+        except Exception:
+            log.exception("Failed to mark cancelled job %s as failed", job_id)
+        raise
     except BridgeError as e:
         log.warning("Video job %s failed (bridge error): %s", job_id, e.message)
         await jobstore.update(job_id, status="failed", error_message=e.message)

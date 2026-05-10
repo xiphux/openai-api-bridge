@@ -22,6 +22,12 @@ from ...errors import GenerationTimeout, UpstreamError, WorkflowInvalid
 
 log = logging.getLogger(__name__)
 
+# Re-verify the prompt is still queued or running every N seconds. Long enough
+# to not pummel ComfyUI's queue endpoint on busy generations; short enough that
+# a dropped prompt is detected within ~half a minute instead of the full
+# poll_timeout_video_seconds (default 900s).
+QUEUE_RECHECK_INTERVAL = 30.0
+
 
 class ComfyUIClient:
     def __init__(
@@ -110,10 +116,21 @@ class ComfyUIClient:
         be CPU-starved during heavy generation. Transient network failures are
         treated as "not ready yet" — the overall ``timeout_seconds`` is what
         actually bounds us.
+
+        Every ``QUEUE_RECHECK_INTERVAL`` seconds we also verify the prompt is
+        still in ComfyUI's queue (running or pending). If history doesn't have
+        it AND the queue doesn't either, ComfyUI has dropped the prompt —
+        most commonly because the upstream restarted or a worker crashed
+        mid-execution. Fail fast in that case instead of waiting out
+        ``timeout_seconds`` (which used to mean we'd hold the bridge's video
+        semaphore for up to 15 minutes per dropped job, eventually starving
+        all subsequent video requests).
         """
         start = time.time()
+        last_queue_check = 0.0
         per_request_timeout = 30.0
-        url = f"{self.base_url}/history/{prompt_id}"
+        history_url = f"{self.base_url}/history/{prompt_id}"
+        queue_url = f"{self.base_url}/queue"
         while True:
             elapsed = time.time() - start
             if elapsed > timeout_seconds:
@@ -121,7 +138,7 @@ class ComfyUIClient:
                     f"ComfyUI generation timed out after {timeout_seconds:.0f}s"
                 )
             try:
-                response = await self._client.get(url, timeout=per_request_timeout)
+                response = await self._client.get(history_url, timeout=per_request_timeout)
                 if response.status_code == 200:
                     history = response.json()
                     if prompt_id in history:
@@ -131,8 +148,56 @@ class ComfyUIClient:
                 httpx.ConnectError,
                 httpx.RemoteProtocolError,
             ) as e:
-                log.debug("Transient poll error (will retry): %s", type(e).__name__)
+                log.debug("Transient history poll error (will retry): %s", type(e).__name__)
+
+            if elapsed - last_queue_check > QUEUE_RECHECK_INTERVAL:
+                last_queue_check = elapsed
+                try:
+                    tracked = await self._is_prompt_tracked(
+                        queue_url, prompt_id, per_request_timeout
+                    )
+                except (
+                    httpx.ReadTimeout,
+                    httpx.ConnectError,
+                    httpx.RemoteProtocolError,
+                ) as e:
+                    # Don't fail just because the queue check itself was flaky;
+                    # the main loop will retry on the next interval.
+                    log.debug("Queue recheck failed (will retry): %s", type(e).__name__)
+                else:
+                    if not tracked:
+                        raise UpstreamError(
+                            f"ComfyUI dropped prompt {prompt_id}: not in history or "
+                            "queue. The upstream likely restarted or a worker crashed "
+                            "mid-execution."
+                        )
+
             await asyncio.sleep(self.poll_interval)
+
+    async def _is_prompt_tracked(
+        self, queue_url: str, prompt_id: str, timeout: float
+    ) -> bool:
+        """Return True if ``prompt_id`` is in ComfyUI's running or pending queue.
+
+        ComfyUI's /queue response shape is:
+          ``{"queue_running": [[prio, prompt_id, prompt, extra], ...],
+              "queue_pending": [[...], ...]}``
+        On any non-200 / non-JSON / unexpected shape we err on the side of
+        "still tracked" — we'd rather wait out the overall timeout than abort
+        a healthy job because of one weird queue snapshot.
+        """
+        response = await self._client.get(queue_url, timeout=timeout)
+        if response.status_code != 200:
+            return True
+        try:
+            queue = response.json()
+        except ValueError:
+            return True
+        for key in ("queue_running", "queue_pending"):
+            for item in queue.get(key) or []:
+                if isinstance(item, list) and len(item) >= 2 and item[1] == prompt_id:
+                    return True
+        return False
 
     async def retrieve_media(
         self, history_entry: dict[str, Any], *, output_type: str

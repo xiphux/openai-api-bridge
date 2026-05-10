@@ -125,6 +125,41 @@ async def videos_get(video_id: str, request: Request) -> dict:
     return _video_to_dict(job)
 
 
+@router.delete("/v1/videos/{video_id}", dependencies=[Depends(require_api_key)])
+async def videos_cancel(video_id: str, request: Request) -> dict:
+    """Cancel a queued or in-progress video job.
+
+    Returns the job's current state (200) regardless of whether cancellation
+    was actually possible. Already-terminal jobs are returned as-is. For
+    in-flight jobs we ask the scheduler to cancel the asyncio.Task; the
+    runner's CancelledError handler then marks the row failed and releases
+    the semaphore permit. If the task can't be found (e.g. the bridge was
+    restarted since the job was submitted), we still mark the DB row failed
+    so callers see a consistent terminal state.
+    """
+    jobstore: JobStore = request.app.state.jobstore
+    scheduler: TaskScheduler = request.app.state.scheduler
+
+    job = await jobstore.get(video_id)
+    if job is None:
+        raise JobNotFound(f"Video job {video_id!r} not found")
+    if job.status in ("completed", "failed"):
+        return _video_to_dict(job)
+
+    # Always mark the row failed synchronously so the caller's poll sees a
+    # terminal state immediately. Then ask the scheduler to cancel any live
+    # task — its CancelledError handler in _videos_runner will try to update
+    # the row again, but that's idempotent (the row is already terminal).
+    await jobstore.update(
+        video_id, status="failed", error_message="Cancelled by user"
+    )
+    scheduler.cancel(f"video-job-{video_id}")
+
+    refreshed = await jobstore.get(video_id)
+    assert refreshed is not None
+    return _video_to_dict(refreshed)
+
+
 @router.get(
     "/v1/videos/{video_id}/content", dependencies=[Depends(require_api_key)]
 )

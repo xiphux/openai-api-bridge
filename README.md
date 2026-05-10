@@ -63,6 +63,7 @@ for the existing implementations.
 | POST   | `/v1/videos`                       | Async; multipart; returns `{id, status: "queued"}` |
 | GET    | `/v1/videos/{id}`                  | Poll job status |
 | GET    | `/v1/videos/{id}/content`          | Stream final mp4 once `status: "completed"` |
+| DELETE | `/v1/videos/{id}`                  | Cancel a queued/in-progress job; releases the runner slot |
 | GET    | `/v1/files/{id}/content`           | Bridge-internal asset URLs returned in responses |
 
 Auth: `Authorization: Bearer ${BRIDGE_API_KEY}`.
