@@ -7,6 +7,13 @@ bridge dispatches each request to the right upstream — translating where
 the upstream isn't OpenAI-compatible (ComfyUI, Venice image), pure-passing
 where it is (any OpenAI-compatible chat / embedding server).
 
+> **Need a chat UI to drive this?** [GlyphStream][glyphstream] is a
+> companion project — a lightweight self-hostable SvelteKit chat
+> frontend designed against the OpenAI spec, with first-class support
+> for inline image and video rendering when the upstream serves them.
+
+[glyphstream]: https://github.com/xiphux/glyphstream
+
 ```
 client (LibreChat/LobeChat/curl/...)
         │  OpenAI API: /v1/{models,chat,embeddings,images,videos,files}
