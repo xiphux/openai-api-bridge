@@ -11,6 +11,7 @@ import pytest
 from openai_api_bridge.config import (
     ComfyUIProviderConfig,
     ConfigError,
+    ImageRouterProviderConfig,
     VeniceProviderConfig,
     load_providers,
     parse_model_id,
@@ -100,6 +101,39 @@ def test_venice_resolve_api_token_raises_when_unset() -> None:
         del os.environ["MISSING_VAR_FOR_TESTING"]
     cfg = VeniceProviderConfig(
         backend="venice", id="v", api_token_env="MISSING_VAR_FOR_TESTING"
+    )
+    with pytest.raises(ConfigError, match="not set"):
+        cfg.resolve_api_token()
+
+
+def test_imagerouter_provider_loads_from_toml(tmp_path: Path) -> None:
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(textwrap.dedent("""
+        [[providers]]
+        id = "ir"
+        backend = "imagerouter"
+        api_token_env = "TEST_IR_TOKEN"
+    """))
+    providers = load_providers(cfg)
+    by_id = {p.id: p for p in providers.providers}
+    assert isinstance(by_id["ir"], ImageRouterProviderConfig)
+    # base_url is optional with a default — confirm we get the expected one.
+    assert by_id["ir"].base_url == "https://api.imagerouter.io"
+
+
+def test_imagerouter_resolve_api_token_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_IR", "ir-secret")
+    cfg = ImageRouterProviderConfig(
+        backend="imagerouter", id="ir", api_token_env="MY_IR"
+    )
+    assert cfg.resolve_api_token() == "ir-secret"
+
+
+def test_imagerouter_resolve_api_token_raises_when_unset() -> None:
+    if "MISSING_IR_VAR" in os.environ:
+        del os.environ["MISSING_IR_VAR"]
+    cfg = ImageRouterProviderConfig(
+        backend="imagerouter", id="ir", api_token_env="MISSING_IR_VAR"
     )
     with pytest.raises(ConfigError, match="not set"):
         cfg.resolve_api_token()

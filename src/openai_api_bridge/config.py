@@ -106,6 +106,30 @@ class VeniceProviderConfig(BaseModel):
         return token
 
 
+class ImageRouterProviderConfig(BaseModel):
+    """ImageRouter (https://imagerouter.io) — partial-OpenAI gateway with
+    image + video generation across many providers.
+
+    Path-divergent: model catalog at ``/v1/models``, inference under
+    ``/v1/openai/{images,videos}/...``, video endpoint is sync. The
+    bridge's imagerouter backend smooths these over so clients see
+    OpenAI-shaped traffic.
+    """
+
+    backend: Literal["imagerouter"]
+    id: str
+    base_url: str = "https://api.imagerouter.io"
+    api_token_env: str
+
+    def resolve_api_token(self) -> str:
+        token = os.environ.get(self.api_token_env)
+        if not token:
+            raise ConfigError(
+                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
+            )
+        return token
+
+
 class OpenAIPassthroughProviderConfig(BaseModel):
     """Generic OpenAI-API-compatible upstream (llama-server, vLLM, OpenAI itself,
     Venice's chat endpoint, any vendor that speaks the OpenAI wire protocol).
@@ -139,7 +163,10 @@ class OpenAIPassthroughProviderConfig(BaseModel):
 
 
 ProviderConfig = Annotated[
-    ComfyUIProviderConfig | VeniceProviderConfig | OpenAIPassthroughProviderConfig,
+    ComfyUIProviderConfig
+    | VeniceProviderConfig
+    | ImageRouterProviderConfig
+    | OpenAIPassthroughProviderConfig,
     Field(discriminator="backend"),
 ]
 

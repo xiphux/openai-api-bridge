@@ -32,12 +32,13 @@ client (LibreChat/LobeChat/curl/...)
 |---|---|---|
 | **ComfyUI** | Image and video generation via user-defined workflow files | ComfyUI has no OpenAI-compatible HTTP surface; bridge translates |
 | **Venice.ai** | Image generation via Venice's native `/api/v1/image/generate` | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
+| **ImageRouter** | Image and video generation across many providers | OpenAI-compat *content* but path-divergent — model catalog is at `/v2/models`, inference at `/v1/openai/...`, and the video endpoint is sync (single POST) rather than OpenAI's async `/v1/videos` lifecycle |
 | **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
 
 Configure as many of each as you want. The most common deployment fronts a
-single ComfyUI box (image + video), Venice (cloud image), and one or more
-local llama-server / vLLM instances (chat + embedding) — all behind one
-bridge URL.
+single ComfyUI box (image + video), Venice or ImageRouter (cloud image /
+video), and one or more local llama-server / vLLM instances (chat +
+embedding) — all behind one bridge URL.
 
 Adding a future backend (Replicate, fal.ai, OpenRouter image, a second
 ComfyUI instance, etc.) is a single new `[[providers]]` block in
@@ -51,9 +52,6 @@ for the existing implementations.
   generic `openai` passthrough provider type doesn't translate this. Their
   chat surface works fine through `openai` passthrough; only image-via-chat
   needs a dedicated `openrouter` adapter (deferred).
-- **Image gateways that already speak OpenAI** (e.g. ImageRouter). Point
-  clients at them directly — wrapping an OpenAI API in another OpenAI API
-  is pure overhead.
 - **Audio (TTS / Whisper), Realtime API, Assistants API, fine-tuning,
   batch.** Not currently in scope; could be added per the same pattern if
   needed.

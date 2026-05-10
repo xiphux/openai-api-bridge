@@ -54,6 +54,20 @@ api_token_env = "VENICE_API_TOKEN"
 # default_height = 1024
 
 
+# --- ImageRouter ------------------------------------------------------------
+# Cloud aggregator covering image and video models from many providers
+# (FLUX, GPT-Image, Stable Diffusion, Stable Video, etc.). OpenAI-compat
+# *content* but path-divergent — the bridge translates: model catalog at
+# /v2/models, inference at /v1/openai/{images,videos}/..., video sync.
+# Set IMAGEROUTER_API_KEY in the environment to enable this provider.
+
+# [[providers]]
+# id = "imagerouter"
+# backend = "imagerouter"
+# api_token_env = "IMAGEROUTER_API_KEY"
+# # base_url defaults to https://api.imagerouter.io and rarely needs override
+
+
 # --- OpenAI passthrough -----------------------------------------------------
 # Generic OpenAI-compatible upstream — local llama-server, vLLM, lmstudio,
 # OpenAI itself, or any vendor that speaks the OpenAI wire protocol.

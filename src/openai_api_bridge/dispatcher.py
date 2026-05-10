@@ -11,11 +11,13 @@ from collections.abc import Iterable
 
 from .backends.base import Backend
 from .backends.comfyui.adapter import ComfyUIBackend
+from .backends.imagerouter.adapter import ImageRouterBackend
 from .backends.openai.adapter import OpenAIPassthroughBackend
 from .backends.venice.adapter import VeniceBackend
 from .config import (
     ComfyUIProviderConfig,
     ConfigError,
+    ImageRouterProviderConfig,
     OpenAIPassthroughProviderConfig,
     ProvidersFile,
     VeniceProviderConfig,
@@ -30,6 +32,8 @@ def _build_backend(cfg) -> Backend:
         return ComfyUIBackend(cfg)
     if isinstance(cfg, VeniceProviderConfig):
         return VeniceBackend(cfg)
+    if isinstance(cfg, ImageRouterProviderConfig):
+        return ImageRouterBackend(cfg)
     if isinstance(cfg, OpenAIPassthroughProviderConfig):
         return OpenAIPassthroughBackend(cfg)
     raise ConfigError(f"Unhandled provider backend type: {type(cfg).__name__}")
