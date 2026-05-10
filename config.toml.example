@@ -99,8 +99,24 @@ api_token_env = "VENICE_API_TOKEN"
 # api_token_env = "GROQ_API_KEY"
 # request_timeout_seconds = 120.0
 
-# Note: for OpenRouter image generation specifically, the openai passthrough
-# is *not* sufficient — OpenRouter exposes image gen via chat-completions
-# with a non-standard `images` array in the response, so a dedicated
-# `openrouter` adapter would be needed. Their chat surface works through
-# this provider type fine.
+# Note: for OpenRouter, prefer the dedicated `openrouter` backend below
+# rather than configuring it as openai-passthrough. OpenRouter's image
+# generation uses a non-standard chat-completions shape that the
+# passthrough doesn't translate — image models would appear in the
+# catalog but silently return text-only.
+
+
+# --- OpenRouter -------------------------------------------------------------
+# Multi-vendor aggregator with chat, embeddings, and image generation.
+# Chat + embeddings are spec-compliant; the bridge translates image gen
+# (which OpenRouter exposes via chat completions with non-standard
+# `message.images` array on the response) into standard /v1/images
+# endpoints for clients.
+# Set OPENROUTER_API_KEY in the environment to enable this provider.
+
+# [[providers]]
+# id = "openrouter"
+# backend = "openrouter"
+# api_token_env = "OPENROUTER_API_KEY"
+# # base_url defaults to https://openrouter.ai/api and rarely needs override
+# # request_timeout_seconds = 120.0

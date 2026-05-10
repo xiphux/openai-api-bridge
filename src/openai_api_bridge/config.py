@@ -130,6 +130,30 @@ class ImageRouterProviderConfig(BaseModel):
         return token
 
 
+class OpenRouterProviderConfig(BaseModel):
+    """OpenRouter (https://openrouter.ai) — multi-vendor aggregator that's
+    OpenAI-compatible for chat and embeddings but routes image generation
+    through chat completions with a non-standard ``message.images``
+    response field. The bridge's openrouter backend composes the OpenAI
+    passthrough client for spec-compliant surfaces and layers image-via-
+    chat translation on top, so clients see a single OpenAI-shaped API.
+    """
+
+    backend: Literal["openrouter"]
+    id: str
+    base_url: str = "https://openrouter.ai/api"
+    api_token_env: str
+    request_timeout_seconds: float = 120.0
+
+    def resolve_api_token(self) -> str:
+        token = os.environ.get(self.api_token_env)
+        if not token:
+            raise ConfigError(
+                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
+            )
+        return token
+
+
 class OpenAIPassthroughProviderConfig(BaseModel):
     """Generic OpenAI-API-compatible upstream (llama-server, vLLM, OpenAI itself,
     Venice's chat endpoint, any vendor that speaks the OpenAI wire protocol).
@@ -166,6 +190,7 @@ ProviderConfig = Annotated[
     ComfyUIProviderConfig
     | VeniceProviderConfig
     | ImageRouterProviderConfig
+    | OpenRouterProviderConfig
     | OpenAIPassthroughProviderConfig,
     Field(discriminator="backend"),
 ]

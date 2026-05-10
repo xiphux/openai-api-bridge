@@ -33,6 +33,7 @@ client (LibreChat/LobeChat/curl/...)
 | **ComfyUI** | Image and video generation via user-defined workflow files | ComfyUI has no OpenAI-compatible HTTP surface; bridge translates |
 | **Venice.ai** | Image generation via Venice's native `/api/v1/image/generate` | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
 | **ImageRouter** | Image and video generation across many providers | OpenAI-compat *content* but path-divergent — model catalog is at `/v2/models`, inference at `/v1/openai/...`, and the video endpoint is sync (single POST) rather than OpenAI's async `/v1/videos` lifecycle |
+| **OpenRouter** | Chat, embeddings, and image generation across many vendors | Chat/embeddings are spec-compliant; image generation diverges — OpenRouter exposes it via chat completions with a non-standard `message.images` array on the response. The bridge translates so clients see standard `/v1/images/generations` and `/v1/images/edits` |
 | **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
 
 Configure as many of each as you want. The most common deployment fronts a
@@ -47,11 +48,6 @@ for the existing implementations.
 
 ## What this bridge does *not* do
 
-- **OpenRouter image generation specifically.** OpenRouter handles images via
-  chat-completions with a non-standard `images` array in the response. The
-  generic `openai` passthrough provider type doesn't translate this. Their
-  chat surface works fine through `openai` passthrough; only image-via-chat
-  needs a dedicated `openrouter` adapter (deferred).
 - **Audio (TTS / Whisper), Realtime API, Assistants API, fine-tuning,
   batch.** Not currently in scope; could be added per the same pattern if
   needed.
