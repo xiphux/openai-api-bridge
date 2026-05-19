@@ -245,11 +245,22 @@ class ImageRouterClient:
 		ImageRouter's ``response_format=url`` envelope into the byte
 		payload the bridge's FileStore expects.
 		"""
-		# Auth header isn't needed for asset URLs (CDN-hosted), but sending
-		# it doesn't hurt and avoids a separate AsyncClient instance.
+		# ImageRouter's asset URLs (``storage.imagerouter.io/...``) are
+		# auth-gated despite looking like CDN paths — fetching them
+		# without the Bearer token returns 401. Pass the same auth
+		# headers we use against the API host explicitly per-request
+		# rather than relying on the client-level defaults, so the
+		# intent is unambiguous and survives any cross-origin
+		# header-stripping behavior (httpx's default redirect handling
+		# strips Authorization when crossing origins, and even when no
+		# redirect happens we'd rather have the auth call out
+		# explicitly in code than depend on implicit client config).
 		try:
 			resp = await self._client.get(
-				url, timeout=_FETCH_ASSET_TIMEOUT_S, follow_redirects=True
+				url,
+				timeout=_FETCH_ASSET_TIMEOUT_S,
+				follow_redirects=True,
+				headers=self._auth_headers,
 			)
 			resp.raise_for_status()
 		except httpx.HTTPStatusError as e:

@@ -108,7 +108,7 @@ def test_images_generations_round_trip(
 		)
 	)
 	img_bytes = b"\x89PNG\r\n\x1a\nfake-png-bytes"
-	respx.get("https://cdn.example/imgs/abc.png").mock(
+	asset_route = respx.get("https://cdn.example/imgs/abc.png").mock(
 		return_value=httpx.Response(
 			200, content=img_bytes, headers={"content-type": "image/png"}
 		)
@@ -142,6 +142,16 @@ def test_images_generations_round_trip(
 	assert sent["prompt"] == "a red panda"
 	assert sent["size"] == "1024x1024"
 	assert sent["response_format"] == "url"
+
+	# Asset-fetch must carry the Bearer auth — ImageRouter's storage host
+	# is auth-gated and returns 401 without it. Regression guard for the
+	# original "auth not needed for CDN URLs" misconception that caused
+	# real production breakage; respx doesn't filter by headers, so the
+	# previous bug ran green here even though the asset fetch was
+	# unauthenticated in production.
+	assert asset_route.called
+	asset_req = asset_route.calls.last.request
+	assert asset_req.headers.get("authorization") == "Bearer ir-secret"
 
 
 @respx.mock
