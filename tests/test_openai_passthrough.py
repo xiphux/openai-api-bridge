@@ -80,6 +80,11 @@ def test_models_lists_upstream_models_with_prefix(
     # We don't classify openai-passthrough models — kind is None so the pipe
     # doesn't accidentally surface them as image/video.
     assert by_id["llama/llama-3.1-8b"]["kind"] is None
+    # supports_tools is also omitted — this backend multiplexes for any
+    # OpenAI-compatible upstream (real OpenAI, local llama, vLLM, etc.)
+    # where per-model tool support varies wildly. The bridge can't tell
+    # from the catalog; the client's per-endpoint fallback decides.
+    assert "supports_tools" not in by_id["llama/llama-3.1-8b"]
 
 
 @respx.mock

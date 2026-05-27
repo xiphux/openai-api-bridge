@@ -132,6 +132,44 @@ def test_models_classifies_by_output_modalities(
 	assert "or/no-arch/model" not in by_id
 	# display_name surfaces from the upstream's ``name`` field when present
 	assert by_id["or/openai/gpt-4o"]["display_name"] == "GPT-4o"
+	# supports_tools omitted from rows where upstream didn't set
+	# `supported_parameters` (the bridge doesn't guess).
+	assert "supports_tools" not in by_id["or/openai/gpt-4o"]
+
+
+# Fixture exercising the `supported_parameters` field — OpenRouter's
+# per-model capability hint we use to derive supports_tools.
+_MODELS_WITH_PARAMS_FIXTURE = {
+	"data": [
+		{
+			"id": "openai/gpt-4o",
+			"name": "GPT-4o",
+			"architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+			"supported_parameters": ["tools", "tool_choice", "temperature"],
+		},
+		{
+			"id": "old-vendor/no-tools-model",
+			"architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+			"supported_parameters": ["temperature", "top_p"],
+		},
+	]
+}
+
+
+@respx.mock
+def test_models_surfaces_supports_tools_from_supported_parameters(
+	client_with_openrouter: TestClient,
+) -> None:
+	respx.get(f"{UPSTREAM}/v1/models").mock(
+		return_value=httpx.Response(200, json=_MODELS_WITH_PARAMS_FIXTURE)
+	)
+	r = client_with_openrouter.get("/v1/models", headers=HEADERS)
+	assert r.status_code == 200
+	by_id = {m["id"]: m for m in r.json()["data"]}
+	# True when "tools" is in supported_parameters
+	assert by_id["or/openai/gpt-4o"]["supports_tools"] is True
+	# False when supported_parameters is present but lacks "tools"
+	assert by_id["or/old-vendor/no-tools-model"]["supports_tools"] is False
 
 
 @respx.mock

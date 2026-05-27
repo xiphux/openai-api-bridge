@@ -72,7 +72,23 @@ class OpenRouterBackend(Backend):
 			# human-readable than the slug-shaped id; surface it as
 			# display_name when present.
 			display = m.get("name") if isinstance(m.get("name"), str) else model_id
-			entries.append(ModelEntry(id=model_id, kind=kind, display_name=display))
+			# OpenRouter publishes per-model `supported_parameters` (an
+			# array of OpenAI parameter names the model accepts). When
+			# present we can definitively answer the tool-support
+			# question; when absent we leave it None so the client falls
+			# back to its per-endpoint config.
+			supports_tools: bool | None = None
+			params = m.get("supported_parameters")
+			if isinstance(params, list):
+				supports_tools = "tools" in params
+			entries.append(
+				ModelEntry(
+					id=model_id,
+					kind=kind,
+					display_name=display,
+					supports_tools=supports_tools,
+				)
+			)
 		return entries
 
 	# --- chat / embedding passthrough ------------------------------------

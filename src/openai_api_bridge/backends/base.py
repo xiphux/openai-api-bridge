@@ -27,11 +27,17 @@ class ModelEntry:
     the client. ``kind`` is "image", "video", "chat", "embedding", or None
     when the backend can't tell (e.g. an OpenAI-compat upstream that lists
     every model uniformly without modality hints).
+
+    ``supports_tools`` is a non-standard extension surfaced for gateway-aware
+    frontends — the bridge knows per-backend (and sometimes per-model) which
+    models accept the OpenAI ``tools`` array. ``None`` means the backend
+    didn't say; the client can fall back to its own per-endpoint default.
     """
 
     id: str
     kind: str | None = None
     display_name: str | None = None
+    supports_tools: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

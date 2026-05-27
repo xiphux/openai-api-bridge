@@ -41,6 +41,13 @@ class OpenAIPassthroughBackend(Backend):
         # → embedding) is fragile. Routing happens by *endpoint*, not kind:
         # /v1/chat/completions handles chat models, /v1/embeddings handles
         # embedding models, and the upstream sorts out which is which.
+        #
+        # `supports_tools` is also intentionally None: this backend
+        # multiplexes for *any* OpenAI-compatible upstream — actual OpenAI
+        # (where all chat models support tools), local llama-server (where
+        # small models often don't), vLLM, OpenRouter's chat surface, etc.
+        # The bridge can't tell from the upstream's catalog. Clients fall
+        # back to their per-endpoint config flag.
         return [
             ModelEntry(id=m["id"], display_name=m.get("id"))
             for m in raw

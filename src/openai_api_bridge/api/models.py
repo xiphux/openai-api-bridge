@@ -31,19 +31,25 @@ async def list_models(request: Request) -> dict:
             )
             continue
         for entry in entries:
-            # `display_name` and `kind` are non-standard extensions — strict
-            # OpenAI SDKs ignore unknown fields, while gateway-aware frontends
-            # (LiteLLM, our own Open WebUI pipe) use `display_name` for a
-            # human-readable label and `kind` to pick the right endpoint
-            # (/v1/images/* vs /v1/videos).
-            out.append(
-                {
-                    "id": f"{provider_id}/{entry.id}",
-                    "object": "model",
-                    "created": now,
-                    "owned_by": provider_id,
-                    "display_name": entry.display_name or entry.id,
-                    "kind": entry.kind,
-                }
-            )
+            # `display_name`, `kind`, and `supports_tools` are non-standard
+            # extensions — strict OpenAI SDKs ignore unknown fields, while
+            # gateway-aware frontends (LiteLLM, our own Open WebUI pipe,
+            # GlyphStream) use `display_name` for a human-readable label,
+            # `kind` to pick the right endpoint (/v1/images/* vs /v1/videos),
+            # and `supports_tools` to know whether to send the OpenAI
+            # `tools` array on chat completions.
+            row: dict = {
+                "id": f"{provider_id}/{entry.id}",
+                "object": "model",
+                "created": now,
+                "owned_by": provider_id,
+                "display_name": entry.display_name or entry.id,
+                "kind": entry.kind,
+            }
+            # Only surface the field when the backend actually set it —
+            # `None` (unknown) is conveyed by omission so clients can
+            # apply their own fallback policy.
+            if entry.supports_tools is not None:
+                row["supports_tools"] = entry.supports_tools
+            out.append(row)
     return {"object": "list", "data": out}
