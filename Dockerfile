@@ -67,4 +67,10 @@ USER bridge
 WORKDIR /app
 EXPOSE 8080
 
+# Built-in healthcheck so docker compose / Kubernetes get it for free.
+# Uses a raw Python socket — no curl/wget needed in the slim image and no
+# API key to leak. Matches the compose-file healthcheck that used to live here.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=5s \
+  CMD python -c "import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8080)); s.close(); sys.exit(0)"
+
 CMD ["openai-api-bridge"]

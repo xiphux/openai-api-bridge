@@ -31,14 +31,6 @@ services:
       # match each `workflows_dir` in config.toml.
       - ${COMFYUI_WORKFLOWS_HOST_DIR:-./workflows}:/var/lib/openai-api-bridge/workflows:ro
     restart: unless-stopped
-    healthcheck:
-      # Just verify the bridge is listening. Avoids needing curl in the slim
-      # image and avoids leaking the API key into compose files just for a HC.
-      test: ["CMD-SHELL", "python -c \"import socket,sys; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8080)); s.close(); sys.exit(0)\""]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
 
 volumes:
   bridge-state:
