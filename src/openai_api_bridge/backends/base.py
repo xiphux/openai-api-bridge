@@ -55,8 +55,7 @@ class Backend(ABC):
     a single configured provider."""
 
     @abstractmethod
-    async def list_models(self) -> list[ModelEntry]:
-        ...
+    async def list_models(self) -> list[ModelEntry]: ...
 
     async def generate_image(
         self,
@@ -72,9 +71,7 @@ class Backend(ABC):
         landed (chat/embedding upstreams have no image surface, but the
         Backend ABC is a single union of all backend capabilities).
         """
-        raise UnsupportedOperation(
-            "Image generation is not supported by this provider"
-        )
+        raise UnsupportedOperation("Image generation is not supported by this provider")
 
     async def edit_image(
         self,
@@ -87,9 +84,7 @@ class Backend(ABC):
         n: int = 1,
     ) -> list[GeneratedAsset]:
         """Default: not supported. Override in backends that do img2img."""
-        raise UnsupportedOperation(
-            "Image edits are not supported by this provider"
-        )
+        raise UnsupportedOperation("Image edits are not supported by this provider")
 
     async def generate_video(
         self,
@@ -108,9 +103,7 @@ class Backend(ABC):
         ComfyUI's prompt_id) as soon as it's known, so the runner can persist
         it to the video_jobs row for resume/debug.
         """
-        raise UnsupportedOperation(
-            "Video generation is not supported by this provider"
-        )
+        raise UnsupportedOperation("Video generation is not supported by this provider")
 
     # --- chat / embedding (OpenAI-passthrough territory) ----------------
 
@@ -132,18 +125,14 @@ class Backend(ABC):
         completions chunks include vendor extensions (function calls, vision,
         tool outputs, JSON mode) we don't need to understand to forward.
         """
-        raise UnsupportedOperation(
-            "Chat completions are not supported by this provider"
-        )
+        raise UnsupportedOperation("Chat completions are not supported by this provider")
 
     async def create_embedding(
         self,
         body: dict[str, Any],
     ) -> dict[str, Any]:
         """Forward an OpenAI-shaped embeddings request. Default: not supported."""
-        raise UnsupportedOperation(
-            "Embeddings are not supported by this provider"
-        )
+        raise UnsupportedOperation("Embeddings are not supported by this provider")
 
     # --- lifecycle -------------------------------------------------------
 

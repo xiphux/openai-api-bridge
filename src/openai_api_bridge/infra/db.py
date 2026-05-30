@@ -70,15 +70,11 @@ class Database:
         await self.conn.execute(sql, params)
         await self.conn.commit()
 
-    async def fetchone(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> aiosqlite.Row | None:
+    async def fetchone(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Row | None:
         async with self.conn.execute(sql, params) as cur:
             return await cur.fetchone()
 
-    async def fetchall(
-        self, sql: str, params: Sequence[Any] = ()
-    ) -> list[aiosqlite.Row]:
+    async def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[aiosqlite.Row]:
         async with self.conn.execute(sql, params) as cur:
             return list(await cur.fetchall())
 
@@ -140,9 +136,7 @@ async def run_migrations(db: Database) -> int:
     Returns the version after applying. Add new migrations to ``_MIGRATIONS``
     in ascending version order; never edit a previously-shipped migration.
     """
-    await db.execute(
-        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    )
+    await db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     row = await db.fetchone("SELECT value FROM meta WHERE key = 'schema_version'")
     current = int(row["value"]) if row else 0
 

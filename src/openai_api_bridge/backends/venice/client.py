@@ -43,8 +43,7 @@ class VeniceClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise UpstreamError(
-                f"Venice /models returned {e.response.status_code}: "
-                f"{e.response.text[:300]}"
+                f"Venice /models returned {e.response.status_code}: {e.response.text[:300]}"
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /models failed: {e}") from e
@@ -80,8 +79,7 @@ class VeniceClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise UpstreamError(
-                f"Venice /image/generate returned {e.response.status_code}: "
-                f"{e.response.text[:300]}"
+                f"Venice /image/generate returned {e.response.status_code}: {e.response.text[:300]}"
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /image/generate failed: {e}") from e
@@ -89,9 +87,7 @@ class VeniceClient:
         body = response.json()
         images = body.get("images") or []
         if not images:
-            raise UpstreamError(
-                f"Venice response contained no images: {str(body)[:200]}"
-            )
+            raise UpstreamError(f"Venice response contained no images: {str(body)[:200]}")
         try:
             return base64.b64decode(images[0])
         except (ValueError, TypeError) as e:

@@ -114,9 +114,7 @@ class EvictionLoop:
                 max_cache_bytes=self.max_cache_bytes,
             )
             if ttl or lru:
-                log.info(
-                    "Eviction pass: TTL=%d LRU=%d", ttl, lru
-                )
+                log.info("Eviction pass: TTL=%d LRU=%d", ttl, lru)
             else:
                 log.debug("Eviction pass: nothing to do")
         except Exception:

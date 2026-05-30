@@ -63,8 +63,7 @@ class OpenAIClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise UpstreamError(
-                f"Upstream /v1/models returned {e.response.status_code}: "
-                f"{e.response.text[:300]}"
+                f"Upstream /v1/models returned {e.response.status_code}: {e.response.text[:300]}"
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/models failed: {e}") from e
@@ -74,18 +73,12 @@ class OpenAIClient:
     async def chat_completion(self, body: dict[str, Any]) -> dict[str, Any]:
         """Non-streaming chat completion. Returns the parsed JSON response."""
         try:
-            response = await self._client.post(
-                f"{self.base_url}/v1/chat/completions", json=body
-            )
+            response = await self._client.post(f"{self.base_url}/v1/chat/completions", json=body)
         except httpx.HTTPError as e:
-            raise UpstreamError(
-                f"Upstream /v1/chat/completions failed: {e}"
-            ) from e
+            raise UpstreamError(f"Upstream /v1/chat/completions failed: {e}") from e
         return self._parse_response(response, "/v1/chat/completions")
 
-    async def chat_completion_stream(
-        self, body: dict[str, Any]
-    ) -> AsyncIterator[bytes]:
+    async def chat_completion_stream(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
         """Streaming chat completion. Yields raw SSE byte chunks until the
         upstream signals ``data: [DONE]``.
 
@@ -103,9 +96,7 @@ class OpenAIClient:
             )
             response = await self._streaming_client.send(req, stream=True)
         except httpx.HTTPError as e:
-            raise UpstreamError(
-                f"Upstream /v1/chat/completions stream failed to open: {e}"
-            ) from e
+            raise UpstreamError(f"Upstream /v1/chat/completions stream failed to open: {e}") from e
 
         if response.status_code != 200:
             # Read the (small) error body so we can surface a useful message.
@@ -125,25 +116,20 @@ class OpenAIClient:
 
     async def create_embedding(self, body: dict[str, Any]) -> dict[str, Any]:
         try:
-            response = await self._client.post(
-                f"{self.base_url}/v1/embeddings", json=body
-            )
+            response = await self._client.post(f"{self.base_url}/v1/embeddings", json=body)
         except httpx.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/embeddings failed: {e}") from e
         return self._parse_response(response, "/v1/embeddings")
 
     # --- helpers ----------------------------------------------------------
 
-    def _parse_response(
-        self, response: httpx.Response, endpoint: str
-    ) -> dict[str, Any]:
+    def _parse_response(self, response: httpx.Response, endpoint: str) -> dict[str, Any]:
         if response.status_code == 200:
             try:
                 return dict(response.json())
             except ValueError as e:
                 raise UpstreamError(
-                    f"Upstream {endpoint} returned non-JSON 200: "
-                    f"{response.text[:200]!r}"
+                    f"Upstream {endpoint} returned non-JSON 200: {response.text[:200]!r}"
                 ) from e
         self._raise_for_status(response.status_code, response.text[:500], endpoint)
         # Unreachable, but mypy needs it
@@ -154,20 +140,14 @@ class OpenAIClient:
         if status == 401:
             # Re-frame as a bridge config error rather than passing the
             # upstream's auth complaint to the chat client.
-            raise UpstreamError(
-                f"Upstream {endpoint} rejected our credentials (401)"
-            )
+            raise UpstreamError(f"Upstream {endpoint} rejected our credentials (401)")
         if status == 404:
             # Most likely the model id slug doesn't exist on this upstream
             # (e.g. user typed it wrong, or it was removed from the upstream's
             # catalog). Surface as a 404-equivalent for the client.
-            raise InvalidRequest(
-                f"Upstream {endpoint} returned 404 — model not found upstream"
-            )
+            raise InvalidRequest(f"Upstream {endpoint} returned 404 — model not found upstream")
         if status == 405:
-            raise UnsupportedOperation(
-                f"Upstream does not implement {endpoint}"
-            )
+            raise UnsupportedOperation(f"Upstream does not implement {endpoint}")
         if 400 <= status < 500:
             raise InvalidRequest(f"Upstream {endpoint} returned {status}: {text}")
         raise UpstreamError(f"Upstream {endpoint} returned {status}: {text}")

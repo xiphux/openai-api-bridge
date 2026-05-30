@@ -56,9 +56,7 @@ def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
             continue
         # Use removesuffix() so filenames containing dots (e.g. "Flux.2 Klein.json")
         # are handled correctly. Path.with_suffix() would mangle them.
-        meta_path = json_path.parent / (
-            json_path.name.removesuffix(".json") + ".meta.json"
-        )
+        meta_path = json_path.parent / (json_path.name.removesuffix(".json") + ".meta.json")
         if not meta_path.exists():
             log.debug("Skipping %s: no companion .meta.json", json_path.name)
             continue
@@ -68,9 +66,7 @@ def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
             log.warning("Skipping %s: meta read failed: %s", json_path.name, e)
             continue
         if "positive_prompt_node" not in meta:
-            log.warning(
-                "Skipping %s: meta missing 'positive_prompt_node'", json_path.name
-            )
+            log.warning("Skipping %s: meta missing 'positive_prompt_node'", json_path.name)
             continue
 
         output_type = meta.get("output_type")
@@ -89,7 +85,8 @@ def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
         if slug in out:
             log.warning(
                 "Duplicate workflow slug %r — keeping first, dropping %s",
-                slug, json_path.name,
+                slug,
+                json_path.name,
             )
             continue
 
@@ -102,7 +99,9 @@ def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
         )
         log.info(
             "Discovered workflow %r (%s) — output_type=%s",
-            display_name, json_path.name, output_type,
+            display_name,
+            json_path.name,
+            output_type,
         )
     return out
 
@@ -175,9 +174,7 @@ def prepare_workflow(
     # circuit identical-input runs and return the same output every time.
     seed_nodes = meta.get("seed_nodes")
     nodes_to_seed: dict[str, Any] = (
-        {nid: workflow[nid] for nid in seed_nodes if nid in workflow}
-        if seed_nodes
-        else workflow
+        {nid: workflow[nid] for nid in seed_nodes if nid in workflow} if seed_nodes else workflow
     )
     for node in nodes_to_seed.values():
         if not isinstance(node, dict):

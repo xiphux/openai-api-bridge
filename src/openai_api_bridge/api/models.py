@@ -26,9 +26,7 @@ async def list_models(request: Request) -> dict:
             entries = await backend.list_models()
         except BridgeError as e:
             # One flaky provider shouldn't break the whole listing.
-            log.warning(
-                "Provider %r list_models failed: %s", provider_id, e.message
-            )
+            log.warning("Provider %r list_models failed: %s", provider_id, e.message)
             continue
         for entry in entries:
             # `display_name`, `kind`, and `supports_tools` are non-standard

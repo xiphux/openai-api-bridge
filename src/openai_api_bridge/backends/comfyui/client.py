@@ -69,9 +69,7 @@ class ComfyUIClient:
             result = response.json()
             return str(result.get("name", filename))
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"ComfyUI image upload returned {e.response.status_code}"
-            ) from e
+            raise UpstreamError(f"ComfyUI image upload returned {e.response.status_code}") from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"ComfyUI image upload failed: {e}") from e
 
@@ -105,21 +103,13 @@ class ComfyUIClient:
                 raise WorkflowInvalid(f"ComfyUI rejected workflow: {result['error']}")
             prompt_id = result.get("prompt_id")
             if not prompt_id:
-                raise UpstreamError(
-                    f"ComfyUI /prompt response missing prompt_id: {result!r}"
-                )
+                raise UpstreamError(f"ComfyUI /prompt response missing prompt_id: {result!r}")
             return str(prompt_id)
         if 400 <= response.status_code < 500:
-            raise WorkflowInvalid(
-                f"ComfyUI returned {response.status_code}: {response.text[:500]}"
-            )
-        raise UpstreamError(
-            f"ComfyUI returned {response.status_code}: {response.text[:500]}"
-        )
+            raise WorkflowInvalid(f"ComfyUI returned {response.status_code}: {response.text[:500]}")
+        raise UpstreamError(f"ComfyUI returned {response.status_code}: {response.text[:500]}")
 
-    async def poll_completion(
-        self, prompt_id: str, *, timeout_seconds: float
-    ) -> dict[str, Any]:
+    async def poll_completion(self, prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
         """Poll ``/history/{prompt_id}`` until the entry appears or we time out.
 
         Per-request timeout is generous (30s) because ComfyUI's web thread can
@@ -203,9 +193,7 @@ class ComfyUIClient:
 
             await asyncio.sleep(self.poll_interval)
 
-    async def _is_prompt_tracked(
-        self, queue_url: str, prompt_id: str, timeout: float
-    ) -> bool:
+    async def _is_prompt_tracked(self, queue_url: str, prompt_id: str, timeout: float) -> bool:
         """Return True if ``prompt_id`` is in ComfyUI's running or pending queue.
 
         ComfyUI's /queue response shape is:
@@ -253,9 +241,7 @@ class ComfyUIClient:
                     candidates.append(items[0])
 
         if not candidates:
-            raise UpstreamError(
-                "ComfyUI history entry contained no output media"
-            )
+            raise UpstreamError("ComfyUI history entry contained no output media")
 
         candidates.sort(key=lambda x: 0 if x.get("type") == "output" else 1)
         media = candidates[0]
@@ -275,9 +261,7 @@ class ComfyUIClient:
             raise UpstreamError(f"ComfyUI /view fetch failed: {e}") from e
 
         content_type = (
-            response.headers.get("content-type", default_content_type)
-            .split(";")[0]
-            .strip()
+            response.headers.get("content-type", default_content_type).split(";")[0].strip()
             or default_content_type
         )
         return response.content, content_type

@@ -88,15 +88,11 @@ class ComfyUIBackend(Backend):
             if record.output_type == "video"
             else self.cfg.poll_timeout_image_seconds
         )
-        history = await self.client.poll_completion(
-            prompt_id, timeout_seconds=timeout
-        )
+        history = await self.client.poll_completion(prompt_id, timeout_seconds=timeout)
         data, content_type = await self.client.retrieve_media(
             history, output_type=record.output_type
         )
-        return GeneratedAsset(
-            data=data, content_type=content_type, kind=record.output_type
-        )
+        return GeneratedAsset(data=data, content_type=content_type, kind=record.output_type)
 
     async def generate_image(
         self,
@@ -116,9 +112,7 @@ class ComfyUIBackend(Backend):
                 f"Model {model_slug!r} requires an input image; use /v1/images/edits",
                 param="image",
             )
-        return [
-            await self._run_one(record, prompt=prompt, size=size) for _ in range(n)
-        ]
+        return [await self._run_one(record, prompt=prompt, size=size) for _ in range(n)]
 
     async def edit_image(
         self,
@@ -136,9 +130,7 @@ class ComfyUIBackend(Backend):
                 f"Model {model_slug!r} produces {record.output_type}, not image"
             )
         if not record.meta.get("image_inputs"):
-            raise UnsupportedOperation(
-                f"Workflow {model_slug!r} does not accept image input"
-            )
+            raise UnsupportedOperation(f"Workflow {model_slug!r} does not accept image input")
         comfy_filename = await self.client.upload_image(image, image_content_type)
         return [
             await self._run_one(

@@ -38,7 +38,10 @@ from openai_api_bridge.errors import (
     ],
 )
 def test_typed_exceptions_have_correct_envelope(
-    exc_cls: type[BridgeError], status: int, type_: str, code: str,
+    exc_cls: type[BridgeError],
+    status: int,
+    type_: str,
+    code: str,
 ) -> None:
     e = exc_cls("test message", param="x")
     assert e.status_code == status

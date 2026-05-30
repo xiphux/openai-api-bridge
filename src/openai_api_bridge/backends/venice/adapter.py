@@ -36,9 +36,7 @@ class VeniceBackend(Backend):
     async def list_models(self) -> list[ModelEntry]:
         raw = await self.client.list_image_models()
         return [
-            ModelEntry(id=m["id"], kind="image", display_name=m.get("id"))
-            for m in raw
-            if "id" in m
+            ModelEntry(id=m["id"], kind="image", display_name=m.get("id")) for m in raw if "id" in m
         ]
 
     async def generate_image(
@@ -63,11 +61,7 @@ class VeniceBackend(Backend):
                 steps=self.cfg.steps,
                 cfg_scale=self.cfg.cfg_scale,
             )
-            out.append(
-                GeneratedAsset(
-                    data=data, content_type=_VENICE_CONTENT_TYPE, kind="image"
-                )
-            )
+            out.append(GeneratedAsset(data=data, content_type=_VENICE_CONTENT_TYPE, kind="image"))
         return out
 
     async def edit_image(

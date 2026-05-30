@@ -239,8 +239,8 @@ def test_prepare_seeds_only_named_nodes_when_specified(tmp_path: Path) -> None:
     rec = scan_workflows(tmp_path)["s"]
     rng = random.Random(0)
     out = prepare_workflow(rec, prompt_text="x", rng=rng)
-    assert out["11"]["inputs"]["seed"] != 1   # randomized
-    assert out["12"]["inputs"]["seed"] == 2   # left alone
+    assert out["11"]["inputs"]["seed"] != 1  # randomized
+    assert out["12"]["inputs"]["seed"] == 2  # left alone
 
 
 def test_prepare_seeds_all_nodes_when_no_seed_nodes_meta(tmp_path: Path) -> None:

@@ -48,11 +48,7 @@ class OpenAIPassthroughBackend(Backend):
         # small models often don't), vLLM, OpenRouter's chat surface, etc.
         # The bridge can't tell from the upstream's catalog. Clients fall
         # back to their per-endpoint config flag.
-        return [
-            ModelEntry(id=m["id"], display_name=m.get("id"))
-            for m in raw
-            if "id" in m
-        ]
+        return [ModelEntry(id=m["id"], display_name=m.get("id")) for m in raw if "id" in m]
 
     async def chat_completion(
         self,

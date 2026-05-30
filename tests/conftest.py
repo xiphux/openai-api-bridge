@@ -63,10 +63,12 @@ async def jobstore(db: Database) -> JobStore:
 @pytest.fixture
 def empty_config(tmp_path: Path) -> Path:
     config = tmp_path / "config.toml"
-    config.write_text(textwrap.dedent("""
+    config.write_text(
+        textwrap.dedent("""
         [defaults]
         cache_workflows = true
-    """))
+    """)
+    )
     return config
 
 

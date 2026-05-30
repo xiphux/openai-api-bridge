@@ -64,9 +64,7 @@ async def lifespan(app: FastAPI):
     settings.files_dir.mkdir(parents=True, exist_ok=True)
     jobstore = JobStore(db)
 
-    stale = await jobstore.mark_stale_failed(
-        "Bridge restarted before this job completed"
-    )
+    stale = await jobstore.mark_stale_failed("Bridge restarted before this job completed")
     if stale:
         log.warning("Marked %d stale video jobs as failed on startup", stale)
 

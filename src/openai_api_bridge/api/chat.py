@@ -55,9 +55,7 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
     stream_requested = bool(body.get("stream"))
 
     if not _backend_supports_chat(backend):
-        raise UnsupportedOperation(
-            f"Provider {provider_id!r} does not support chat completions"
-        )
+        raise UnsupportedOperation(f"Provider {provider_id!r} does not support chat completions")
 
     if stream_requested:
         sse_iterator = await backend.chat_completion(forwarded_body, stream=True)

@@ -65,9 +65,7 @@ async def run_video_job(
             prompt_excerpt=prompt,
             pinned=False,
         )
-        await jobstore.update(
-            job_id, status="completed", file_id=file_id, progress_pct=100
-        )
+        await jobstore.update(job_id, status="completed", file_id=file_id, progress_pct=100)
         log.info("Video job %s completed; file_id=%s", job_id, file_id)
     except asyncio.CancelledError:
         log.info("Video job %s cancelled; marking failed", job_id)
@@ -75,9 +73,7 @@ async def run_video_job(
         # forever. We swallow errors here so the cancellation propagates
         # cleanly even if the DB write itself races with shutdown.
         try:
-            await jobstore.update(
-                job_id, status="failed", error_message="Job cancelled"
-            )
+            await jobstore.update(job_id, status="failed", error_message="Job cancelled")
         except Exception:
             log.exception("Failed to mark cancelled job %s as failed", job_id)
         raise

@@ -73,9 +73,7 @@ class JobStore:
         return job
 
     async def get(self, job_id: str) -> VideoJob | None:
-        row = await self.db.fetchone(
-            "SELECT * FROM video_jobs WHERE id = ?", (job_id,)
-        )
+        row = await self.db.fetchone("SELECT * FROM video_jobs WHERE id = ?", (job_id,))
         return self._row_to_job(row) if row else None
 
     async def update(

@@ -40,9 +40,7 @@ async def embeddings(request: Request) -> JSONResponse:
     backend = dispatcher.for_provider(provider_id)
 
     if not _backend_supports_embeddings(backend):
-        raise UnsupportedOperation(
-            f"Provider {provider_id!r} does not support embeddings"
-        )
+        raise UnsupportedOperation(f"Provider {provider_id!r} does not support embeddings")
 
     forwarded_body = {**body, "model": model_slug}
     result = await backend.create_embedding(forwarded_body)

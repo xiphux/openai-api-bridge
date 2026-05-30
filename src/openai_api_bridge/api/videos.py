@@ -75,9 +75,7 @@ async def videos_create(
     if input_reference is not None:
         input_ref_bytes = await input_reference.read()
         if not input_ref_bytes:
-            raise InvalidRequest(
-                "input_reference upload was empty", param="input_reference"
-            )
+            raise InvalidRequest("input_reference upload was empty", param="input_reference")
         input_ref_ct = input_reference.content_type or "image/png"
 
     job_id = secrets.token_hex(16)
@@ -150,9 +148,7 @@ async def videos_cancel(video_id: str, request: Request) -> dict:
     # terminal state immediately. Then ask the scheduler to cancel any live
     # task — its CancelledError handler in _videos_runner will try to update
     # the row again, but that's idempotent (the row is already terminal).
-    await jobstore.update(
-        video_id, status="failed", error_message="Cancelled by user"
-    )
+    await jobstore.update(video_id, status="failed", error_message="Cancelled by user")
     scheduler.cancel(f"video-job-{video_id}")
 
     refreshed = await jobstore.get(video_id)
@@ -160,9 +156,7 @@ async def videos_cancel(video_id: str, request: Request) -> dict:
     return _video_to_dict(refreshed)
 
 
-@router.get(
-    "/v1/videos/{video_id}/content", dependencies=[Depends(require_api_key)]
-)
+@router.get("/v1/videos/{video_id}/content", dependencies=[Depends(require_api_key)])
 async def videos_get_content(video_id: str, request: Request) -> FileResponse:
     jobstore: JobStore = request.app.state.jobstore
     filestore: FileStore = request.app.state.filestore

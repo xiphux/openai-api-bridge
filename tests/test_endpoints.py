@@ -22,7 +22,8 @@ def test_models_lists_empty(client: TestClient, auth_headers: dict[str, str]) ->
 
 
 def test_images_generations_malformed_model(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.post(
         "/v1/images/generations",
@@ -35,7 +36,8 @@ def test_images_generations_malformed_model(
 
 
 def test_images_generations_unknown_provider(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.post(
         "/v1/images/generations",
@@ -47,7 +49,8 @@ def test_images_generations_unknown_provider(
 
 
 def test_images_generations_n_too_large_via_pydantic(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.post(
         "/v1/images/generations",
@@ -61,7 +64,8 @@ def test_images_generations_n_too_large_via_pydantic(
 
 
 def test_images_edits_empty_image(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.post(
         "/v1/images/edits",
@@ -74,7 +78,8 @@ def test_images_edits_empty_image(
 
 
 def test_videos_get_nonexistent(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.get("/v1/videos/abcdef", headers=auth_headers)
     assert r.status_code == 404
@@ -82,14 +87,16 @@ def test_videos_get_nonexistent(
 
 
 def test_videos_content_nonexistent(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.get("/v1/videos/abcdef/content", headers=auth_headers)
     assert r.status_code == 404
 
 
 def test_files_content_nonexistent(
-    client: TestClient, auth_headers: dict[str, str],
+    client: TestClient,
+    auth_headers: dict[str, str],
 ) -> None:
     r = client.get("/v1/files/abcdef/content", headers=auth_headers)
     assert r.status_code == 404

@@ -26,16 +26,16 @@ UPSTREAM = "http://upstream.test"
 
 
 @pytest.fixture
-def client_with_openai(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> Iterator[TestClient]:
+def client_with_openai(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
     config = tmp_path / "config.toml"
-    config.write_text(textwrap.dedent(f"""
+    config.write_text(
+        textwrap.dedent(f"""
         [[providers]]
         id = "llama"
         backend = "openai"
         base_url = "{UPSTREAM}"
-    """))
+    """)
+    )
 
     monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
@@ -236,13 +236,15 @@ def test_chat_against_comfyui_provider_returns_unsupported(
     """A user picking a ComfyUI workflow id for chat completions gets a clean
     400 instead of an internal traceback."""
     config = tmp_path / "config.toml"
-    config.write_text(textwrap.dedent(f"""
+    config.write_text(
+        textwrap.dedent(f"""
         [[providers]]
         id = "comfyui"
         backend = "comfyui"
         url = "http://127.0.0.1:8188"
         workflows_dir = "{tmp_path}"
-    """))
+    """)
+    )
 
     monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
@@ -288,9 +290,7 @@ def test_upstream_4xx_propagates_as_400(
     client_with_openai: TestClient,
 ) -> None:
     respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
-        return_value=httpx.Response(
-            400, json={"error": {"message": "bad model"}}
-        )
+        return_value=httpx.Response(400, json={"error": {"message": "bad model"}})
     )
     r = client_with_openai.post(
         "/v1/chat/completions",

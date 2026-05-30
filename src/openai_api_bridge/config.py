@@ -100,9 +100,7 @@ class VeniceProviderConfig(BaseModel):
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
         if not token:
-            raise ConfigError(
-                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
-            )
+            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
         return token
 
 
@@ -124,9 +122,7 @@ class ImageRouterProviderConfig(BaseModel):
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
         if not token:
-            raise ConfigError(
-                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
-            )
+            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
         return token
 
 
@@ -148,9 +144,7 @@ class OpenRouterProviderConfig(BaseModel):
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
         if not token:
-            raise ConfigError(
-                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
-            )
+            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
         return token
 
 
@@ -180,9 +174,7 @@ class OpenAIPassthroughProviderConfig(BaseModel):
             return None
         token = os.environ.get(self.api_token_env)
         if not token:
-            raise ConfigError(
-                f"Provider '{self.id}': env var '{self.api_token_env}' is not set"
-            )
+            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
         return token
 
 

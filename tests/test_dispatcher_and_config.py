@@ -42,7 +42,8 @@ def test_parse_model_id_rejects_malformed(bad: str) -> None:
 
 def test_load_providers_round_trip(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(textwrap.dedent("""
+    cfg.write_text(
+        textwrap.dedent("""
         [defaults]
         cache_workflows = true
 
@@ -56,7 +57,8 @@ def test_load_providers_round_trip(tmp_path: Path) -> None:
         id = "venice"
         backend = "venice"
         api_token_env = "TEST_VENICE_TOKEN"
-    """))
+    """)
+    )
     providers = load_providers(cfg)
     assert len(providers.providers) == 2
     by_id = {p.id: p for p in providers.providers}
@@ -67,7 +69,8 @@ def test_load_providers_round_trip(tmp_path: Path) -> None:
 
 def test_load_providers_rejects_duplicate_ids(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(textwrap.dedent("""
+    cfg.write_text(
+        textwrap.dedent("""
         [[providers]]
         id = "dup"
         backend = "comfyui"
@@ -78,7 +81,8 @@ def test_load_providers_rejects_duplicate_ids(tmp_path: Path) -> None:
         id = "dup"
         backend = "venice"
         api_token_env = "X"
-    """))
+    """)
+    )
     with pytest.raises(ConfigError, match="Duplicate"):
         load_providers(cfg)
 
@@ -90,30 +94,28 @@ def test_load_providers_missing_file(tmp_path: Path) -> None:
 
 def test_venice_resolve_api_token_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_VENICE", "v-secret")
-    cfg = VeniceProviderConfig(
-        backend="venice", id="v", api_token_env="MY_VENICE"
-    )
+    cfg = VeniceProviderConfig(backend="venice", id="v", api_token_env="MY_VENICE")
     assert cfg.resolve_api_token() == "v-secret"
 
 
 def test_venice_resolve_api_token_raises_when_unset() -> None:
     if "MISSING_VAR_FOR_TESTING" in os.environ:
         del os.environ["MISSING_VAR_FOR_TESTING"]
-    cfg = VeniceProviderConfig(
-        backend="venice", id="v", api_token_env="MISSING_VAR_FOR_TESTING"
-    )
+    cfg = VeniceProviderConfig(backend="venice", id="v", api_token_env="MISSING_VAR_FOR_TESTING")
     with pytest.raises(ConfigError, match="not set"):
         cfg.resolve_api_token()
 
 
 def test_imagerouter_provider_loads_from_toml(tmp_path: Path) -> None:
     cfg = tmp_path / "config.toml"
-    cfg.write_text(textwrap.dedent("""
+    cfg.write_text(
+        textwrap.dedent("""
         [[providers]]
         id = "ir"
         backend = "imagerouter"
         api_token_env = "TEST_IR_TOKEN"
-    """))
+    """)
+    )
     providers = load_providers(cfg)
     by_id = {p.id: p for p in providers.providers}
     assert isinstance(by_id["ir"], ImageRouterProviderConfig)
@@ -123,18 +125,14 @@ def test_imagerouter_provider_loads_from_toml(tmp_path: Path) -> None:
 
 def test_imagerouter_resolve_api_token_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_IR", "ir-secret")
-    cfg = ImageRouterProviderConfig(
-        backend="imagerouter", id="ir", api_token_env="MY_IR"
-    )
+    cfg = ImageRouterProviderConfig(backend="imagerouter", id="ir", api_token_env="MY_IR")
     assert cfg.resolve_api_token() == "ir-secret"
 
 
 def test_imagerouter_resolve_api_token_raises_when_unset() -> None:
     if "MISSING_IR_VAR" in os.environ:
         del os.environ["MISSING_IR_VAR"]
-    cfg = ImageRouterProviderConfig(
-        backend="imagerouter", id="ir", api_token_env="MISSING_IR_VAR"
-    )
+    cfg = ImageRouterProviderConfig(backend="imagerouter", id="ir", api_token_env="MISSING_IR_VAR")
     with pytest.raises(ConfigError, match="not set"):
         cfg.resolve_api_token()
 

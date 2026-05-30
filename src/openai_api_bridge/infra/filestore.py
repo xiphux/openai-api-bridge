@@ -135,9 +135,7 @@ class FileStore:
         return file_id
 
     async def get_metadata(self, file_id: str) -> FileMetadata | None:
-        row = await self.db.fetchone(
-            "SELECT * FROM generated_files WHERE id = ?", (file_id,)
-        )
+        row = await self.db.fetchone("SELECT * FROM generated_files WHERE id = ?", (file_id,))
         return self._row_to_metadata(row) if row else None
 
     async def open_for_read(self, file_id: str) -> tuple[Path, FileMetadata] | None:

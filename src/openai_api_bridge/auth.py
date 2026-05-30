@@ -23,6 +23,6 @@ async def require_api_key(
 ) -> None:
     if not authorization or not authorization.startswith(_BEARER):
         raise Unauthorized("Missing or malformed Authorization header")
-    presented = authorization[len(_BEARER):]
+    presented = authorization[len(_BEARER) :]
     if not hmac.compare_digest(presented, settings.api_key):
         raise Unauthorized("Invalid API key")

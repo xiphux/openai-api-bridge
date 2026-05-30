@@ -58,13 +58,15 @@ def client_with_comfyui(
     comfyui_workflows_dir: Path,
 ) -> Iterator[TestClient]:
     config = tmp_path / "config.toml"
-    config.write_text(textwrap.dedent(f"""
+    config.write_text(
+        textwrap.dedent(f"""
         [[providers]]
         id = "comfyui"
         backend = "comfyui"
         url = "http://127.0.0.1:8188"
         workflows_dir = "{comfyui_workflows_dir}"
-    """))
+    """)
+    )
 
     monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
@@ -89,9 +91,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
 def test_models_lists_comfyui_workflow(
     client_with_comfyui: TestClient,
 ) -> None:
-    r = client_with_comfyui.get(
-        "/v1/models", headers={"Authorization": "Bearer test-bridge-key"}
-    )
+    r = client_with_comfyui.get("/v1/models", headers={"Authorization": "Bearer test-bridge-key"})
     assert r.status_code == 200
     body = r.json()
     assert body["object"] == "list"
@@ -107,7 +107,8 @@ def test_models_lists_comfyui_workflow(
 
 @respx.mock
 def test_models_display_name_falls_back_to_slug_when_meta_lacks_one(
-    client_with_comfyui: TestClient, comfyui_workflows_dir: Path,
+    client_with_comfyui: TestClient,
+    comfyui_workflows_dir: Path,
 ) -> None:
     # Drop a second workflow whose meta.json doesn't set display_name.
     (comfyui_workflows_dir / "no-name.json").write_text(
@@ -121,9 +122,7 @@ def test_models_display_name_falls_back_to_slug_when_meta_lacks_one(
     (comfyui_workflows_dir / "no-name.meta.json").write_text(
         json.dumps({"positive_prompt_node": "1"})
     )
-    r = client_with_comfyui.get(
-        "/v1/models", headers={"Authorization": "Bearer test-bridge-key"}
-    )
+    r = client_with_comfyui.get("/v1/models", headers={"Authorization": "Bearer test-bridge-key"})
     by_id = {m["id"]: m for m in r.json()["data"]}
     # Without display_name in meta, the bridge falls back to the source filename.
     assert by_id["comfyui/no-name"]["display_name"] == "no-name"
@@ -205,20 +204,14 @@ def test_image_generation_b64_json_response_format(
     client_with_comfyui: TestClient,
 ) -> None:
     headers = {"Authorization": "Bearer test-bridge-key"}
-    respx.post(f"{COMFY}/prompt").mock(
-        return_value=httpx.Response(200, json={"prompt_id": "p"})
-    )
+    respx.post(f"{COMFY}/prompt").mock(return_value=httpx.Response(200, json={"prompt_id": "p"}))
     respx.get(f"{COMFY}/history/p").mock(
         return_value=httpx.Response(
             200,
             json={
                 "p": {
                     "outputs": {
-                        "2": {
-                            "images": [
-                                {"filename": "x.png", "subfolder": "", "type": "output"}
-                            ]
-                        }
+                        "2": {"images": [{"filename": "x.png", "subfolder": "", "type": "output"}]}
                     }
                 }
             },
@@ -283,6 +276,7 @@ def test_video_endpoint_rejects_image_workflow(
 
     # Poll briefly until the runner sets status=failed.
     import time
+
     for _ in range(20):
         r = client_with_comfyui.get(f"/v1/videos/{job_id}", headers=headers)
         body = r.json()

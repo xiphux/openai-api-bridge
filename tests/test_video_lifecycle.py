@@ -39,9 +39,7 @@ async def test_poll_completion_fails_fast_when_comfyui_drops_prompt(
     monkeypatch.setattr(comfy_client_module, "QUEUE_MISS_THRESHOLD", 2)
 
     # /history always 200 with empty body — the prompt isn't there.
-    respx.get("http://comfy/history/dropped-id").mock(
-        return_value=httpx.Response(200, json={})
-    )
+    respx.get("http://comfy/history/dropped-id").mock(return_value=httpx.Response(200, json={}))
     # /queue returns no record of our prompt for every check.
     respx.get("http://comfy/queue").mock(
         return_value=httpx.Response(
@@ -92,9 +90,7 @@ async def test_poll_completion_tolerates_transient_queue_miss(
         200,
         json={"queue_running": [[0, "transient-id", {}, {}]], "queue_pending": []},
     )
-    missing = httpx.Response(
-        200, json={"queue_running": [], "queue_pending": []}
-    )
+    missing = httpx.Response(200, json={"queue_running": [], "queue_pending": []})
     respx.get("http://comfy/queue").mock(
         side_effect=[present, missing, present, missing, present, missing]
     )
@@ -217,9 +213,7 @@ def comfyui_workflows_dir(tmp_path: Path) -> Path:
             }
         )
     )
-    (d / "tiny-t2v.meta.json").write_text(
-        json.dumps({"positive_prompt_node": "1"})
-    )
+    (d / "tiny-t2v.meta.json").write_text(json.dumps({"positive_prompt_node": "1"}))
     return d
 
 
@@ -230,13 +224,15 @@ def client_with_video(
     comfyui_workflows_dir: Path,
 ) -> Iterator[TestClient]:
     config = tmp_path / "config.toml"
-    config.write_text(textwrap.dedent(f"""
+    config.write_text(
+        textwrap.dedent(f"""
         [[providers]]
         id = "comfyui"
         backend = "comfyui"
         url = "http://127.0.0.1:8188"
         workflows_dir = "{comfyui_workflows_dir}"
-    """))
+    """)
+    )
 
     monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
@@ -285,6 +281,7 @@ def test_delete_video_cancels_in_progress_job(client_with_video: TestClient) -> 
 
     # Wait for the runner to actually start (status flips to in_progress).
     import time
+
     for _ in range(40):
         body = client_with_video.get(f"/v1/videos/{job_id}", headers=headers).json()
         if body["status"] == "in_progress":
