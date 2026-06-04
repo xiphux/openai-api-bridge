@@ -141,15 +141,14 @@ def test_images_generations_round_trip(
     assert sent["size"] == "1024x1024"
     assert sent["response_format"] == "url"
 
-    # Asset-fetch must carry the Bearer auth — ImageRouter's storage host
-    # is auth-gated and returns 401 without it. Regression guard for the
-    # original "auth not needed for CDN URLs" misconception that caused
-    # real production breakage; respx doesn't filter by headers, so the
-    # previous bug ran green here even though the asset fetch was
-    # unauthenticated in production.
+    # Asset-fetch must NOT carry the Bearer auth — ImageRouter's storage
+    # host (storage.imagerouter.io) is publicly accessible per their docs,
+    # and sending auth headers can cause issues. The bridge fetches assets
+    # without authentication to avoid any cross-origin header-stripping
+    # behavior and to match the documented public access model.
     assert asset_route.called
     asset_req = asset_route.calls.last.request
-    assert asset_req.headers.get("authorization") == "Bearer ir-secret"
+    assert asset_req.headers.get("authorization") is None
 
 
 @respx.mock
@@ -222,6 +221,7 @@ def test_videos_round_trip_t2v(
     # is bounded — should finish in a few hundred ms.
     job_id = job["id"]
     deadline = time.time() + 5.0
+    state = {}
     while time.time() < deadline:
         r = client_with_imagerouter.get(f"/v1/videos/{job_id}", headers=HEADERS)
         assert r.status_code == 200
@@ -232,7 +232,9 @@ def test_videos_round_trip_t2v(
             pytest.fail(f"Video job failed: {state.get('error', {}).get('message')}")
         time.sleep(0.05)
     else:
-        pytest.fail(f"Video job didn't complete in time (last status={state['status']})")
+        pytest.fail(
+            f"Video job didn't complete in time (last status={state.get('status', 'unknown')})"
+        )
 
     r = client_with_imagerouter.get(f"/v1/videos/{job_id}/content", headers=HEADERS)
     assert r.status_code == 200
