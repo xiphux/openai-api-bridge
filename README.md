@@ -22,8 +22,9 @@ client (LibreChat/LobeChat/curl/...)
         │
         ├──► ComfyUI workflow (image or video, via user-defined workflow JSON)
         ├──► Venice.ai native /api/v1/image/generate (image only)
-        └──► Any OpenAI-compatible upstream (llama-server, vLLM, OpenAI, OpenRouter chat, ...)
-              for /v1/chat/completions and /v1/embeddings
+        ├──► ImageRouter / OpenRouter (cloud image · video · chat across many vendors)
+        └──► Any OpenAI-compatible upstream (llama-server, vLLM, OpenAI, ...)
+              passthrough for /v1/chat/completions and /v1/embeddings
 ```
 
 ## Supported providers
@@ -73,6 +74,23 @@ Model IDs follow `{provider_id}/{model_slug}` — so a request like
 `{"model": "comfyui/ltxv-t2i", "prompt": "..."}` routes to the ComfyUI provider's
 `ltxv-t2i` workflow.
 
+### Model metadata extensions (nonstandard)
+
+The OpenAI `/v1/models` shape is too thin for a multi-modal catalog — it
+doesn't say what a model *does*. The bridge adds a few fields to each model
+entry so clients can build a useful picker without per-model hardcoding
+([GlyphStream][glyphstream] consumes all of these):
+
+| Field | Values | Source |
+|---|---|---|
+| `owned_by` | the `[[providers]]` block's `id` | always set — lets an aggregating client group models by real provider |
+| `display_name` | human-readable name | ComfyUI: meta.json `display_name`; others: upstream catalog. Falls back to the model id |
+| `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
+| `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
+
+Standard OpenAI clients ignore the extra fields; nothing nonstandard is
+*required* to use the bridge.
+
 ## Configuration
 
 Two layers, by concern:
@@ -82,6 +100,30 @@ Two layers, by concern:
 
 Adding a second ComfyUI instance is a single new `[[providers]]` block — no
 code changes needed.
+
+### Environment variables
+
+`BRIDGE_API_KEY` is the only required variable. Everything else defaults
+sensibly:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BRIDGE_API_KEY` | — (required) | Bearer token clients must send |
+| `BRIDGE_HOST` / `BRIDGE_PORT` | `0.0.0.0` / `8080` | Bind address |
+| `BRIDGE_PUBLIC_BASE_URL` | empty | Public origin used to build asset URLs in responses (e.g. `https://bridge.example.com`). Empty → relative URLs, fine when clients reach the bridge at the same host they requested from |
+| `BRIDGE_CONFIG_PATH` | `/etc/openai-api-bridge/config.toml` | Provider config location |
+| `FILES_DIR` | `/var/lib/openai-api-bridge/files` | Generated-asset cache directory |
+| `SQLITE_PATH` | `/var/lib/openai-api-bridge/state.db` | Job + file state database |
+| `RETENTION_DAYS` | `30` | TTL for cached generated files (see [Storage & retention](#storage--retention)) |
+| `MAX_CACHE_GB` | `50` | Size cap for the file cache (LRU past this) |
+| `EVICTION_INTERVAL_SECONDS` | `600` | How often the eviction loop runs |
+| `MAX_CONCURRENT_VIDEO_JOBS` | `2` | Parallel video generations (see [Video jobs](#video-jobs)) |
+| `LOG_LEVEL` | `INFO` | TRACE / DEBUG / INFO / WARNING / ERROR |
+
+Provider API tokens (`VENICE_API_TOKEN`, `IMAGEROUTER_API_KEY`,
+`OPENROUTER_API_KEY`, …) are referenced by *name* from `config.toml`'s
+`*_env` fields — the bridge reads whatever variable names you declare
+there, so secrets never live in the config file.
 
 ## Running locally (uv)
 
@@ -182,6 +224,43 @@ curl -sH "$H" -H "Content-Type: application/json" \
   http://localhost:8080/v1/images/generations | jq .
 ```
 
+## Storage & retention
+
+Generated assets are cached on disk (`FILES_DIR`) and indexed in SQLite so
+response URLs like `/v1/files/{id}/content` stay valid across requests. The
+cache is **not permanent storage** — an eviction loop (every
+`EVICTION_INTERVAL_SECONDS`) applies two policies:
+
+- **TTL**: files older than `RETENTION_DAYS` (default 30) are deleted.
+- **LRU**: when the cache exceeds `MAX_CACHE_GB` (default 50), the
+  least-recently-accessed files are deleted until it fits.
+
+Files referenced by an in-flight video job are pinned and never evicted
+mid-job. Clients that want to keep generated media should download and
+persist it on their side — [GlyphStream][glyphstream] does exactly this,
+pulling each asset into its own media store on first generation.
+
+Completed/failed rows in the video-jobs table are kept as history; they're
+metadata-sized and have no eviction policy today.
+
+## Video jobs
+
+`/v1/videos` follows OpenAI's async lifecycle (submit → poll → fetch
+content). Operationally:
+
+- At most `MAX_CONCURRENT_VIDEO_JOBS` (default 2) run at once; excess jobs
+  queue in `status: "queued"` order.
+- Each job has a hard 30-minute wall-clock cap, independent of the
+  per-provider poll timeouts.
+- On bridge restart, jobs that were queued/in-progress are marked `failed`
+  ("bridge restarted") rather than left dangling — clients never poll a
+  zombie job forever.
+- **ComfyUI dropped-prompt detection**: ComfyUI can silently lose a queued
+  prompt (server restart, queue contention). The bridge re-verifies the
+  prompt against ComfyUI's `/queue` + `/history` every 30 s and fails the
+  job after 3 consecutive misses (~90 s tolerance window), instead of
+  holding a runner slot for the full generation timeout.
+
 ## Workflow meta.json schema (ComfyUI)
 
 Each workflow file `<name>.json` needs a companion `<name>.meta.json` declaring
@@ -190,30 +269,33 @@ where the bridge should inject things:
 ```json
 {
   "positive_prompt_node": "10",
-  "positive_prompt_field": "text",
   "display_name": "LTX-V T2V (Fast)",
-  "image_inputs": [{"node": "7", "field": "image"}],
-  "image_required": true,
+  "image_inputs": [{ "node": "7", "field": "image" }],
   "dimensions_node": "5",
-  "width_field": "width",
-  "height_field": "height",
   "length_node": "8",
-  "length_field": "value",
   "fps": 24,
-  "seed_nodes": ["11", "12"],
   "output_type": "video"
 }
 ```
 
-Only `positive_prompt_node` is required. `output_type` auto-detects between
-`image` and `video` based on the presence of `SaveVideo` / `VHS_VideoCombine`
-nodes; set it explicitly to override. `fps` enables OpenAI's `seconds`
-parameter to translate into a frame count for the workflow's `length_node`.
+Only `positive_prompt_node` is required:
+
+| Field | Default | Purpose |
+|---|---|---|
+| `positive_prompt_node` | — (required) | Node ID that receives the prompt text |
+| `positive_prompt_field` | `"text"` | Field name on that node |
+| `display_name` | the workflow filename | Human-readable name surfaced in `/v1/models` |
+| `image_inputs` | `[]` | Where attached input images land — each entry is `{node, field}` plus optional `format` (`"filename"`, the default, or `"list"`) and `multiple: true` to route all remaining images into one input |
+| `dimensions_node` / `width_field` / `height_field` | — / `"width"` / `"height"` | Node that receives the request's `size` |
+| `length_node` / `length_field` | — / `"value"` | Node that receives the frame count (video) |
+| `fps` | — | Enables OpenAI's `seconds` parameter: `seconds × fps` → frame count injected into `length_node` |
+| `seed_nodes` | all nodes with a `seed` / `noise_seed` field | Node IDs to randomize per request; list them explicitly to leave other seeds untouched |
+| `output_type` | auto-detected | `"image"` or `"video"`; auto-detection keys off the presence of `SaveVideo` / `VHS_VideoCombine` nodes — set explicitly to override |
 
 ## Tests
 
 ```bash
-uv run pytest                # full suite (~80 unit + integration tests)
+uv run pytest                # full suite (~95 unit + integration tests)
 uv run pytest -m live        # opt-in live tests against real backends (not yet wired)
 uv run ruff check .          # lint
 ```

@@ -15,8 +15,8 @@ cache_workflows = true                 # rescan only when bridge restarts
 
 # --- ComfyUI ----------------------------------------------------------------
 # Discovers workflows from a flat directory of `<name>.json` + `<name>.meta.json`
-# pairs. See the existing pipe (or this project's tests/test_workflows.py) for
-# the meta.json schema.
+# pairs. See "Workflow meta.json schema" in the README for the full field
+# reference.
 
 [[providers]]
 id = "comfyui"
