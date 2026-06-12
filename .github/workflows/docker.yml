@@ -134,27 +134,3 @@ jobs:
           # Body is left blank so GitHub's auto-generation fills it in based
           # on `.github/release.yml`. To prepend a hand-written intro, set
           # `body:` here and GitHub appends the auto-generated notes after it.
-
-  dependabot-automerge:
-    name: Dependabot auto-merge
-    needs: [test]
-    if: ${{ github.actor == 'dependabot[bot]' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Fetch update metadata
-        id: meta
-        uses: dependabot/fetch-metadata@v2
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-      # Merge only semver-safe bumps: any patch, plus minors on packages already
-      # >= 1.0. Genuine majors and 0.x-minors (which can break, e.g. esbuild) are
-      # left open for manual review.
-      - name: Merge safe updates
-        if: ${{ steps.meta.outputs.update-type == 'version-update:semver-patch' || (steps.meta.outputs.update-type == 'version-update:semver-minor' && !startsWith(steps.meta.outputs.previous-version, '0.')) }}
-        run: gh pr merge --merge --delete-branch "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
