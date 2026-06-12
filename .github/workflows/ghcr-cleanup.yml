@@ -18,7 +18,12 @@ name: GHCR cleanup
 on:
   schedule:
     - cron: '0 4 * * 0' # 04:00 UTC every Sunday
-  workflow_dispatch: # manual runs — use this for the first run to eyeball deletions
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log what would be deleted without deleting anything'
+        type: boolean
+        default: false
 
 permissions:
   packages: write # required to delete package versions
@@ -53,3 +58,7 @@ jobs:
           # Post-run integrity check: fails if any retained manifest is
           # left with a missing child.
           validate: true
+          # On a manual run you can flip on dry-run (Actions → Run workflow)
+          # to log the keep/delete plan without touching the registry. The
+          # scheduled run always deletes for real (inputs is empty there).
+          dry-run: ${{ inputs.dry_run || false }}
