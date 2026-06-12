@@ -1,0 +1,63 @@
+# Auto-merge safe Dependabot PRs once CI passes.
+#
+# Standalone + workflow_run on purpose: embedding this in the CI workflow made
+# that (reusable) workflow request contents/pull-requests write, which exceeds
+# what its callers (docker/deploy/publish) grant and invalidated the workflow.
+# Running AFTER CI completes keeps write-permissions out of the CI workflow.
+# It also runs from the trusted default branch, not PR code.
+#
+# Safe = same major version, excluding 0.x minor bumps (which can break, e.g.
+# esbuild). Genuine majors and 0.x-minors are left open for manual review.
+name: Dependabot auto-merge
+
+on:
+  workflow_run:
+    workflows: ["Build and publish container image"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge if the update is semver-safe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then echo "No PR found for $SHA"; exit 0; fi
+          title=$(gh pr view "$pr" --repo "$REPO" --json title --jq '.title')
+          echo "PR #$pr: $title"
+          if [[ "$title" =~ from\ ([0-9]+(\.[0-9]+)*)\ to\ ([0-9]+(\.[0-9]+)*) ]]; then
+            from="${BASH_REMATCH[1]}"; to="${BASH_REMATCH[3]}"
+          else
+            echo "Not a single-dependency bump title - leaving for manual review"; exit 0
+          fi
+          IFS=. read -r fmaj fmin _ <<<"$from"
+          IFS=. read -r tmaj tmin _ <<<"$to"
+          fmaj=${fmaj:-0}; fmin=${fmin:-0}; tmaj=${tmaj:-0}; tmin=${tmin:-0}
+          safe=no
+          if [ "$fmaj" = "$tmaj" ]; then
+            if [ "$fmaj" = "0" ]; then
+              if [ "$fmin" = "$tmin" ]; then safe=yes; fi
+            else
+              safe=yes
+            fi
+          fi
+          if [ "$safe" = "yes" ]; then
+            echo "Safe bump ($from -> $to) - merging"
+            gh pr merge "$pr" --repo "$REPO" --merge --delete-branch
+          else
+            echo "Holding ($from -> $to: major or 0.x-minor) - manual review"
+          fi
