@@ -99,7 +99,7 @@ jobs:
             org.opencontainers.image.description=OpenAI-compatible HTTP bridge for ComfyUI and Venice
 
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
