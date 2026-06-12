@@ -1,0 +1,49 @@
+# Prune old per-commit Docker images from GitHub Container Registry.
+#
+# docker.yml publishes an immutable `sha-<7chars>` image for every push
+# to `main`, which accumulates without bound. This sweep keeps the most
+# recent N of them and deletes the rest. Official release tags
+# (`X.Y.Z` / `X.Y` / `X` / `latest`) and the rolling `main` tag are
+# excluded unconditionally and live forever.
+#
+# Multi-arch caveat: docker.yml builds linux/amd64 + linux/arm64, so each
+# tag is a manifest list pointing at *untagged* per-arch child images
+# (plus build attestations). dataaxiom/ghcr-cleanup-action is manifest-
+# aware — it only reaps a child when its parent is being deleted, so
+# pruning an old `sha-` image never orphans an arch layer that a retained
+# release still references. A naive "delete untagged" action would break
+# retained releases here.
+name: GHCR cleanup
+
+on:
+  schedule:
+    - cron: '0 4 * * 0' # 04:00 UTC every Sunday
+  workflow_dispatch: # manual runs — use this for the first run to eyeball deletions
+
+permissions:
+  packages: write # required to delete package versions
+
+jobs:
+  cleanup:
+    name: Prune old commit images
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full commit SHA, not a floating tag: this action has
+      # destructive permissions (deletes registry packages), so a hijacked
+      # tag could nuke images or exfiltrate the token. Bump deliberately.
+      - uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          packages: openai-api-bridge
+          # Releases + the rolling main tag are never touched, regardless
+          # of age. Matches semver tags (X.Y.Z, X.Y, X), `latest`, `main`.
+          exclude-tags: 'latest,main,[0-9]*.[0-9]*.[0-9]*,[0-9]*.[0-9]*,[0-9]*'
+          # Of the remaining tagged images (the sha-* commits), keep the
+          # 20 most recent and delete older ones. Their untagged
+          # multi-arch children are reaped along with them.
+          keep-n-tagged: 20
+          # Also reap orphaned untagged manifests not referenced by any
+          # retained tag (e.g. from overwritten/cancelled builds).
+          delete-untagged: true
+          # Post-run integrity check: fails if any retained manifest is
+          # left with a missing child.
+          validate: true

@@ -1,0 +1,13 @@
+# Keep GitHub Actions pins current. The cleanup workflow pins its action to
+# a commit SHA (destructive actions shouldn't float on a tag), which goes
+# stale silently. Dependabot opens a PR whenever a used action ships a new
+# release, updating the SHA and the trailing `# vX.Y.Z` comment so the bump
+# is reviewed rather than auto-applied.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
