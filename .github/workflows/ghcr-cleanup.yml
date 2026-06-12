@@ -43,11 +43,13 @@ jobs:
           # of age. exclude-tags is regex here (use-regex: true), anchored
           # to match `latest`, `main`, and any X / X.Y / X.Y.Z semver tag
           # while leaving `sha-<hash>` commit images eligible for pruning.
-          # NOTE: this action's exclude-tags is GLOB by default — a regex
-          # like this silently matches nothing without use-regex, which is
-          # exactly how an earlier version of this file deleted releases.
+          # NOTE: exclude-tags is GLOB by default — a regex like this
+          # silently matches nothing without use-regex, which is exactly how
+          # an earlier version of this file deleted releases. The pattern is
+          # also kept flat (no nested quantifiers) so it passes the action's
+          # ReDoS safety check; `[0-9][0-9.]*` covers X / X.Y / X.Y.Z.
           use-regex: true
-          exclude-tags: '^(latest|main|[0-9]+(\.[0-9]+){0,2})$'
+          exclude-tags: '^(latest|main|[0-9][0-9.]*)$'
           # Of the remaining tagged images (the sha-* commits), keep the
           # 20 most recent and delete older ones. Their untagged
           # multi-arch children are reaped along with them.
