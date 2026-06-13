@@ -1,0 +1,36 @@
+# Keep the build context lean — none of this is sent to the daemon.
+# The Dockerfile COPYs only `src` + the manifests (pyproject.toml, uv.lock,
+# README.md, LICENSE), so everything else here is dead weight in the tar.
+
+# Virtualenv + tool caches (the .venv alone is ~137 MB)
+.venv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# VCS / CI
+.git
+.gitignore
+.github
+
+# Local data + secrets — never in the build context
+.env
+.env.*
+!.env.example
+config.toml
+!config.toml.example
+state.db*
+files/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Docs — README.md + LICENSE are COPYed explicitly, so keep those
+*.md
+!README.md
