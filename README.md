@@ -295,7 +295,7 @@ Only `positive_prompt_node` is required:
 ## Tests
 
 ```bash
-uv run pytest                # full suite (~95 unit + integration tests)
+uv run pytest                # full suite
 uv run pytest -m live        # opt-in live tests against real backends (not yet wired)
 uv run ruff check .          # lint
 ```
