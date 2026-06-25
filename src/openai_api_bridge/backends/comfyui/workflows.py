@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...errors import WorkflowInvalid
+from ...errors import UnsupportedOperation, WorkflowInvalid
 from ...util.ids import slugify
 
 log = logging.getLogger(__name__)
@@ -169,6 +169,17 @@ def prepare_workflow(
                 remaining = []
             elif remaining:
                 workflow[node_id]["inputs"][field] = remaining.pop(0)
+        # Surplus images that no spec could consume would otherwise be
+        # silently dropped (they're already uploaded to ComfyUI). Surface it
+        # as an error instead — matches the edit_image contract that surplus
+        # references error rather than vanish.
+        if remaining:
+            consumed = len(image_filenames) - len(remaining)
+            raise UnsupportedOperation(
+                f"Workflow {record.slug!r} accepts {consumed} image input(s) "
+                f"but {len(image_filenames)} were supplied",
+                param="image",
+            )
 
     # Seed randomization. Without this, ComfyUI's execution cache will short-
     # circuit identical-input runs and return the same output every time.

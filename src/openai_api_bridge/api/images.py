@@ -19,6 +19,10 @@ from ..schemas.openai import ImagesGenerationRequest
 router = APIRouter()
 
 _MAX_N = 4
+# Cap on reference images per edit. Matches OpenAI's /images/edits limit and
+# bounds memory on backends that buffer every image (OpenRouter base64-expands
+# them); edits are authenticated, so this is a sanity guard, not a DoS control.
+_MAX_EDIT_IMAGES = 16
 
 
 def _build_url(settings: BridgeSettings, file_id: str) -> str:
@@ -111,6 +115,11 @@ async def images_edits(
     uploads = [*(image or []), *(image_array or [])]
     if not uploads:
         raise InvalidRequest("At least one input image is required", param="image")
+    if len(uploads) > _MAX_EDIT_IMAGES:
+        raise InvalidRequest(
+            f"At most {_MAX_EDIT_IMAGES} input images are allowed (got {len(uploads)})",
+            param="image",
+        )
 
     # Validate each upload first so an empty file surfaces as a 400 rather
     # than getting masked by a downstream provider/model 404.

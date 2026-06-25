@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 
@@ -130,12 +131,13 @@ class ComfyUIBackend(Backend):
             )
         if not record.meta.get("image_inputs"):
             raise UnsupportedOperation(f"Workflow {model_slug!r} does not accept image input")
-        # Upload once and reuse the filenames across the n runs. prepare_workflow
-        # distributes the list across the workflow's declared image_inputs (and a
-        # spec marked ``multiple`` consumes all that remain).
-        comfy_filenames = [
-            await self.client.upload_image(img.data, img.content_type) for img in images
-        ]
+        # Upload once and reuse the filenames across the n runs. Uploads run
+        # concurrently; gather preserves order so the filenames still line up
+        # with the workflow's declared image_inputs. prepare_workflow then
+        # distributes the list (a spec marked ``multiple`` consumes the rest).
+        comfy_filenames = await asyncio.gather(
+            *(self.client.upload_image(img.data, img.content_type) for img in images)
+        )
         return [
             await self._run_one(
                 record,

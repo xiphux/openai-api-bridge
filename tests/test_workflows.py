@@ -13,7 +13,7 @@ from openai_api_bridge.backends.comfyui.workflows import (
     scan_workflows,
     seconds_to_frames,
 )
-from openai_api_bridge.errors import WorkflowInvalid
+from openai_api_bridge.errors import UnsupportedOperation, WorkflowInvalid
 
 
 def _write_pair(workflows_dir: Path, name: str, graph: dict, meta: dict) -> Path:
@@ -223,6 +223,26 @@ def test_prepare_image_inputs_multiple_serializes_remaining(tmp_path: Path) -> N
     rec = scan_workflows(tmp_path)["i2"]
     out = prepare_workflow(rec, prompt_text="x", image_filenames=["a.png", "b.png"])
     assert json.loads(out["7"]["inputs"]["images"]) == ["a.png", "b.png"]
+
+
+def test_prepare_raises_when_more_images_than_single_slots(tmp_path: Path) -> None:
+    """A single-slot workflow given two images must error rather than silently
+    drop the surplus (which was already uploaded to ComfyUI)."""
+    _write_pair(
+        tmp_path,
+        "i3",
+        graph={
+            "1": {"class_type": "T", "inputs": {"text": ""}},
+            "7": {"class_type": "LoadImage", "inputs": {"image": ""}},
+        },
+        meta={
+            "positive_prompt_node": "1",
+            "image_inputs": [{"node": "7", "field": "image"}],
+        },
+    )
+    rec = scan_workflows(tmp_path)["i3"]
+    with pytest.raises(UnsupportedOperation, match="accepts 1 image"):
+        prepare_workflow(rec, prompt_text="x", image_filenames=["a.png", "b.png"])
 
 
 def test_prepare_seeds_only_named_nodes_when_specified(tmp_path: Path) -> None:

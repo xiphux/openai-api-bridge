@@ -92,12 +92,14 @@ class Backend(ABC):
     ) -> list[GeneratedAsset]:
         """Default: not supported. Override in backends that do img2img.
 
-        ``images`` carries one or more reference images in client order. A
-        backend that only accepts a single reference image should use
-        ``images[0]``; backends that can forward multiples (ImageRouter's
-        ``image[]``, ComfyUI multi-input workflows) pass the whole list
-        through and let the upstream reject models that can't take more
-        than one — better an upstream error than a silently dropped image.
+        ``images`` carries one or more reference images in client order.
+        Backends that can forward multiples (ImageRouter's ``image[]``,
+        OpenRouter's per-image content parts, ComfyUI multi-input workflows)
+        pass the whole list through. The invariant is that a backend which
+        can't use every supplied image must raise rather than silently drop
+        one — either by letting the upstream reject it (ImageRouter) or by
+        erroring at the bridge (ComfyUI, when a workflow has fewer image
+        slots than images supplied).
         """
         raise UnsupportedOperation("Image edits are not supported by this provider")
 

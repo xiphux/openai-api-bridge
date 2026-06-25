@@ -61,7 +61,7 @@ for the existing implementations.
 | POST   | `/v1/chat/completions`             | Sync + SSE streaming passthrough to openai-compat upstreams |
 | POST   | `/v1/embeddings`                   | Sync passthrough to openai-compat upstreams |
 | POST   | `/v1/images/generations`           | Sync; JSON body |
-| POST   | `/v1/images/edits`                 | Sync; multipart (`image` + `prompt` + `model`) |
+| POST   | `/v1/images/edits`                 | Sync; multipart (`image` + `prompt` + `model`). Send multiple reference images by repeating `image` or using `image[]` (up to 16); backends that can't use all of them error rather than silently drop |
 | POST   | `/v1/videos`                       | Async; multipart; returns `{id, status: "queued"}` |
 | GET    | `/v1/videos/{id}`                  | Poll job status |
 | GET    | `/v1/videos/{id}/content`          | Stream final mp4 once `status: "completed"` |

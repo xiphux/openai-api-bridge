@@ -77,6 +77,22 @@ def test_images_edits_empty_image(
     assert r.json()["error"]["code"] == "invalid_request"
 
 
+def test_images_edits_too_many_images(
+    client: TestClient,
+    auth_headers: dict[str, str],
+) -> None:
+    r = client.post(
+        "/v1/images/edits",
+        headers=auth_headers,
+        files=[("image", (f"{i}.png", b"x", "image/png")) for i in range(17)],
+        data={"model": "ghost/x", "prompt": "x"},
+    )
+    assert r.status_code == 400
+    body = r.json()["error"]
+    assert body["code"] == "invalid_request"
+    assert "image" in body.get("param", "")
+
+
 def test_videos_get_nonexistent(
     client: TestClient,
     auth_headers: dict[str, str],
