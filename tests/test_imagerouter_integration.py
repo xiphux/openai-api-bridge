@@ -192,6 +192,74 @@ def test_images_edits_round_trip(
 
 
 @respx.mock
+def test_images_edits_forwards_multiple_references(
+    client_with_imagerouter: TestClient,
+) -> None:
+    """Two reference images sent as a repeated ``image`` field both survive
+    to the outgoing ``image[]`` multipart, in order — guards the bug where a
+    single declared UploadFile dropped all but the last reference image."""
+    edit_route = respx.post(f"{UPSTREAM}/v1/openai/images/edits").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"url": "https://cdn.example/imgs/edited.png"}]}
+        )
+    )
+    respx.get("https://cdn.example/imgs/edited.png").mock(
+        return_value=httpx.Response(
+            200, content=b"edited-bytes", headers={"content-type": "image/png"}
+        )
+    )
+
+    r = client_with_imagerouter.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        # Repeated ``image`` field — the shape GlyphStream sends for multi-ref.
+        files=[
+            ("image", ("first.png", b"FIRST-REFERENCE-BYTES", "image/png")),
+            ("image", ("second.png", b"SECOND-REFERENCE-BYTES", "image/png")),
+        ],
+        data={"model": "ir/openai/gpt-image-1", "prompt": "combine these"},
+    )
+    assert r.status_code == 200, r.text
+
+    sent = edit_route.calls.last.request
+    body_bytes = sent.content
+    # Both reference payloads forwarded, each under image[].
+    assert body_bytes.count(b'name="image[]"') == 2
+    assert b"FIRST-REFERENCE-BYTES" in body_bytes
+    assert b"SECOND-REFERENCE-BYTES" in body_bytes
+    # Order preserved: first reference precedes the second.
+    assert body_bytes.index(b"FIRST-REFERENCE-BYTES") < body_bytes.index(b"SECOND-REFERENCE-BYTES")
+
+
+@respx.mock
+def test_images_edits_accepts_bracket_field(
+    client_with_imagerouter: TestClient,
+) -> None:
+    """The ``image[]`` array convention is accepted alongside plain ``image``."""
+    respx.post(f"{UPSTREAM}/v1/openai/images/edits").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"url": "https://cdn.example/imgs/edited.png"}]}
+        )
+    )
+    respx.get("https://cdn.example/imgs/edited.png").mock(
+        return_value=httpx.Response(
+            200, content=b"edited-bytes", headers={"content-type": "image/png"}
+        )
+    )
+
+    r = client_with_imagerouter.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        files=[
+            ("image[]", ("a.png", b"A-BYTES", "image/png")),
+            ("image[]", ("b.png", b"B-BYTES", "image/png")),
+        ],
+        data={"model": "ir/openai/gpt-image-1", "prompt": "combine these"},
+    )
+    assert r.status_code == 200, r.text
+
+
+@respx.mock
 def test_videos_round_trip_t2v(
     client_with_imagerouter: TestClient,
 ) -> None:

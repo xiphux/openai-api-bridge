@@ -49,6 +49,14 @@ class GeneratedAsset:
     kind: str  # "image" | "video"
 
 
+@dataclass(frozen=True, slots=True)
+class InputImage:
+    """One reference image supplied to an image-edit request."""
+
+    data: bytes
+    content_type: str
+
+
 class Backend(ABC):
     """Async backend protocol. Implementations are *not* expected to be thread-safe;
     they live for the duration of the bridge process and serve all requests for
@@ -78,12 +86,19 @@ class Backend(ABC):
         *,
         model_slug: str,
         prompt: str,
-        image: bytes,
-        image_content_type: str,
+        images: list[InputImage],
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        """Default: not supported. Override in backends that do img2img."""
+        """Default: not supported. Override in backends that do img2img.
+
+        ``images`` carries one or more reference images in client order. A
+        backend that only accepts a single reference image should use
+        ``images[0]``; backends that can forward multiples (ImageRouter's
+        ``image[]``, ComfyUI multi-input workflows) pass the whole list
+        through and let the upstream reject models that can't take more
+        than one — better an upstream error than a silently dropped image.
+        """
         raise UnsupportedOperation("Image edits are not supported by this provider")
 
     async def generate_video(

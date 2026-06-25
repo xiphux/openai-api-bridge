@@ -12,7 +12,7 @@ import logging
 from ...config import VeniceProviderConfig
 from ...errors import UnsupportedOperation
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, ModelEntry
+from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
 from .client import VeniceClient
 
 log = logging.getLogger(__name__)
@@ -69,8 +69,7 @@ class VeniceBackend(Backend):
         *,
         model_slug: str,
         prompt: str,
-        image: bytes,
-        image_content_type: str,
+        images: list[InputImage],
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:

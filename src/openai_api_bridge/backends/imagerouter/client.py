@@ -36,6 +36,7 @@ from typing import Any
 import httpx
 
 from ...errors import UpstreamError
+from ..base import InputImage
 
 log = logging.getLogger(__name__)
 
@@ -123,16 +124,16 @@ class ImageRouterClient:
         *,
         model: str,
         prompt: str,
-        image: bytes,
-        image_content_type: str,
+        images: list[InputImage],
         size: str | None = None,
     ) -> str:
         """Returns the URL of the edited image.
 
         ImageRouter's /images/edits accepts ``image[]`` for one-or-more
-        input images. We always send a single image here (the bridge's
-        Backend protocol is one-image-in for edit_image); multi-image is
-        a future extension.
+        input images. We forward every supplied reference image under that
+        repeated field, in order. Models that only accept a single image
+        surface an upstream error rather than the bridge silently dropping
+        the extras.
         """
         data: dict[str, Any] = {
             "model": model,
@@ -143,8 +144,10 @@ class ImageRouterClient:
             data["size"] = size
         # Repeat-field name mirrors the OWUI pipe's behavior; ImageRouter
         # treats ``image[]`` as the canonical multi-image multipart form.
-        filename = _filename_for(image_content_type)
-        files = [("image[]", (filename, image, image_content_type))]
+        files = [
+            ("image[]", (_filename_for(img.content_type), img.data, img.content_type))
+            for img in images
+        ]
         try:
             resp = await self._client.post(
                 f"{self.base_url}/v1/openai/images/edits",

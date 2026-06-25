@@ -8,7 +8,7 @@ import random
 from ...config import ComfyUIProviderConfig
 from ...errors import ImageRequired, ModelNotFound, UnsupportedOperation
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, ModelEntry, UpstreamIdCallback
+from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
 from .client import ComfyUIClient
 from .workflows import (
     WorkflowRecord,
@@ -119,8 +119,7 @@ class ComfyUIBackend(Backend):
         *,
         model_slug: str,
         prompt: str,
-        image: bytes,
-        image_content_type: str,
+        images: list[InputImage],
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
@@ -131,13 +130,18 @@ class ComfyUIBackend(Backend):
             )
         if not record.meta.get("image_inputs"):
             raise UnsupportedOperation(f"Workflow {model_slug!r} does not accept image input")
-        comfy_filename = await self.client.upload_image(image, image_content_type)
+        # Upload once and reuse the filenames across the n runs. prepare_workflow
+        # distributes the list across the workflow's declared image_inputs (and a
+        # spec marked ``multiple`` consumes all that remain).
+        comfy_filenames = [
+            await self.client.upload_image(img.data, img.content_type) for img in images
+        ]
         return [
             await self._run_one(
                 record,
                 prompt=prompt,
                 size=size,
-                image_filenames=[comfy_filename],
+                image_filenames=comfy_filenames,
             )
             for _ in range(n)
         ]

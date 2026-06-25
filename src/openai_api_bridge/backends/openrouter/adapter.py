@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 
 from ...config import OpenRouterProviderConfig
-from ..base import Backend, GeneratedAsset, ModelEntry
+from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
 from ..openai.client import OpenAIClient
 from .client import classify_kind, extract_image_data_urls, fetch_image_bytes
 
@@ -124,7 +124,7 @@ class OpenRouterBackend(Backend):
         del size
         results: list[GeneratedAsset] = []
         for _ in range(n):
-            results.append(await self._generate_one(model_slug, prompt, image=None))
+            results.append(await self._generate_one(model_slug, prompt, images=[]))
         return results
 
     async def edit_image(
@@ -132,45 +132,40 @@ class OpenRouterBackend(Backend):
         *,
         model_slug: str,
         prompt: str,
-        image: bytes,
-        image_content_type: str,
+        images: list[InputImage],
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        # Edit = generate with the input image attached to the user message as
-        # a base64 data URL. OpenRouter's multimodal models accept this exact
-        # shape; the chat completions API does the rest.
+        # Edit = generate with the input image(s) attached to the user message
+        # as base64 data URLs. OpenRouter's multimodal models accept this exact
+        # shape; the chat completions API does the rest. Models that only honor
+        # one reference image simply use the first part — nothing is dropped on
+        # our side.
         del size
-        b64 = base64.b64encode(image).decode("ascii")
-        input_data_url = f"data:{image_content_type};base64,{b64}"
+        data_urls = [
+            f"data:{img.content_type};base64,{base64.b64encode(img.data).decode('ascii')}"
+            for img in images
+        ]
         results: list[GeneratedAsset] = []
         for _ in range(n):
-            results.append(await self._generate_one(model_slug, prompt, image=input_data_url))
+            results.append(await self._generate_one(model_slug, prompt, images=data_urls))
         return results
 
     # --- internal helper -------------------------------------------------
 
     async def _generate_one(
-        self, model_slug: str, prompt: str, *, image: str | None
+        self, model_slug: str, prompt: str, *, images: list[str]
     ) -> GeneratedAsset:
         """Run a single OpenRouter image generation: build the chat body,
         await the response, pull the first image out, return as a
-        GeneratedAsset."""
-        if image is None:
+        GeneratedAsset. ``images`` are data URLs attached in order (empty for
+        text-to-image)."""
+        if not images:
             messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         else:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": image},
-                        },
-                    ],
-                }
-            ]
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            content.extend({"type": "image_url", "image_url": {"url": url}} for url in images)
+            messages = [{"role": "user", "content": content}]
         body = {
             "model": model_slug,
             "messages": messages,

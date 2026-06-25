@@ -313,6 +313,51 @@ def test_images_edits_sends_input_as_base64(
 
 
 @respx.mock
+def test_images_edits_sends_multiple_inputs(
+    client_with_openrouter: TestClient,
+) -> None:
+    """Multiple reference images each become their own image_url part in the
+    chat message content, in order — none are dropped."""
+    output_png = b"\x89PNG\r\n\x1a\nedit-output"
+    out_data_url = "data:image/png;base64," + base64.b64encode(output_png).decode()
+    chat_route = respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Done.",
+                            "images": [{"image_url": {"url": out_data_url}}],
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    first_png = b"\x89PNG\r\n\x1a\nfirst"
+    second_png = b"\x89PNG\r\n\x1a\nsecond"
+    r = client_with_openrouter.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        files=[
+            ("image", ("first.png", first_png, "image/png")),
+            ("image", ("second.png", second_png, "image/png")),
+        ],
+        data={"model": "or/google/gemini-2.5-flash-image", "prompt": "combine these"},
+    )
+    assert r.status_code == 200, r.text
+
+    sent = json.loads(chat_route.calls.last.request.read())
+    content = sent["messages"][0]["content"]
+    image_parts = [p for p in content if p["type"] == "image_url"]
+    assert len(image_parts) == 2
+    payloads = [base64.b64decode(p["image_url"]["url"].partition(",")[2]) for p in image_parts]
+    assert payloads == [first_png, second_png]
+
+
+@respx.mock
 def test_images_generations_empty_images_array_surfaces_error(
     client_with_openrouter: TestClient,
 ) -> None:

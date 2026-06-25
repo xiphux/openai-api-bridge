@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from ...config import ImageRouterProviderConfig
-from ..base import Backend, GeneratedAsset, ModelEntry, UpstreamIdCallback
+from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
 from .client import ImageRouterClient
 
 log = logging.getLogger(__name__)
@@ -82,8 +82,7 @@ class ImageRouterBackend(Backend):
         *,
         model_slug: str,
         prompt: str,
-        image: bytes,
-        image_content_type: str,
+        images: list[InputImage],
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
@@ -92,8 +91,7 @@ class ImageRouterBackend(Backend):
             url = await self.client.edit_image_url(
                 model=model_slug,
                 prompt=prompt,
-                image=image,
-                image_content_type=image_content_type,
+                images=images,
                 size=size,
             )
             data, content_type = await self.client.fetch_asset(url)

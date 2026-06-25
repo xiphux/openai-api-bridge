@@ -9,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from ..auth import require_api_key
-from ..backends.base import GeneratedAsset
+from ..backends.base import GeneratedAsset, InputImage
 from ..config import BridgeSettings, get_settings, parse_model_id
 from ..dispatcher import BackendDispatcher
 from ..errors import InvalidRequest
@@ -85,9 +85,16 @@ async def images_generations(req: ImagesGenerationRequest, request: Request) -> 
 @router.post("/v1/images/edits", dependencies=[Depends(require_api_key)])
 async def images_edits(
     request: Request,
-    image: Annotated[UploadFile, File(description="Source image (multipart upload)")],
     prompt: Annotated[str, Form()],
     model: Annotated[str, Form()],
+    # Accept both the OpenAI single-field ``image`` (which some clients
+    # repeat to send multiples) and the ``image[]`` array convention. A
+    # single declared ``UploadFile`` silently keeps only the last of a
+    # repeated field, which is what dropped all-but-one reference image.
+    image: Annotated[
+        list[UploadFile] | None, File(description="Source image(s) (multipart upload)")
+    ] = None,
+    image_array: Annotated[list[UploadFile] | None, File(alias="image[]")] = None,
     n: Annotated[int, Form()] = 1,
     size: Annotated[str | None, Form()] = None,
     response_format: Annotated[str, Form()] = "url",
@@ -100,12 +107,19 @@ async def images_edits(
             param="response_format",
         )
 
-    # Validate the upload first so an empty/missing file surfaces as a 400
-    # rather than getting masked by a downstream provider/model 404.
-    image_bytes = await image.read()
-    if not image_bytes:
-        raise InvalidRequest("Uploaded image is empty", param="image")
-    image_content_type = image.content_type or "image/png"
+    # Preserve client order: ``image`` entries first, then any ``image[]``.
+    uploads = [*(image or []), *(image_array or [])]
+    if not uploads:
+        raise InvalidRequest("At least one input image is required", param="image")
+
+    # Validate each upload first so an empty file surfaces as a 400 rather
+    # than getting masked by a downstream provider/model 404.
+    images: list[InputImage] = []
+    for upload in uploads:
+        raw = await upload.read()
+        if not raw:
+            raise InvalidRequest("Uploaded image is empty", param="image")
+        images.append(InputImage(data=raw, content_type=upload.content_type or "image/png"))
 
     provider_id, model_slug = parse_model_id(model)
     dispatcher: BackendDispatcher = request.app.state.dispatcher
@@ -114,8 +128,7 @@ async def images_edits(
     assets = await backend.edit_image(
         model_slug=model_slug,
         prompt=prompt,
-        image=image_bytes,
-        image_content_type=image_content_type,
+        images=images,
         size=size,
         n=n,
     )
