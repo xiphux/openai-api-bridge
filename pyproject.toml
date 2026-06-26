@@ -1,6 +1,6 @@
 [project]
 name = "openai-api-bridge"
-version = "0.4.2"
+version = "0.4.3"
 description = "OpenAI-compatible HTTP bridge for ComfyUI and Venice image/video generation"
 readme = "README.md"
 license = "MIT"
