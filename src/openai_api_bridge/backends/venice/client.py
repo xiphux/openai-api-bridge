@@ -1,13 +1,18 @@
 """Async HTTP client for the Venice.ai image API.
 
-Wraps two endpoints:
+Wraps three endpoints:
   * ``GET  /api/v1/models?type=image`` — list available image models
-  * ``POST /api/v1/image/generate``    — synchronous image generation
+  * ``POST /api/v1/image/generate``    — synchronous text-to-image
+  * ``POST /api/v1/image/edit``        — synchronous image-to-image (img2img)
 
-Venice's image-generation endpoint is *not* OpenAI-shaped: it uses
+Venice's image API is *not* OpenAI-shaped. ``/image/generate`` uses
 ``width``/``height`` ints (not ``size`` strings), exposes ``steps``/``cfg_scale``
 explicitly, and returns base64-encoded image data under ``data["images"][0]``.
-The bridge translates those shapes for OpenAI clients.
+``/image/edit`` is different again: it's multipart (``image`` + ``prompt`` +
+``model``) and returns the edited image as *raw binary*, not base64 JSON. The
+bridge translates both shapes for OpenAI clients. (Note: img2img lives on the
+dedicated ``/image/edit`` endpoint — the older ``inpaint`` flag on
+``/image/generate`` was deprecated and disabled in May 2025.)
 """
 
 from __future__ import annotations
@@ -92,3 +97,56 @@ class VeniceClient:
             return base64.b64decode(images[0])
         except (ValueError, TypeError) as e:
             raise UpstreamError(f"Venice returned undecodable base64: {e}") from e
+
+    async def edit_image(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        image: bytes,
+        image_content_type: str,
+    ) -> tuple[bytes, str]:
+        """Edit one image. Returns ``(bytes, content_type)``.
+
+        Unlike ``/image/generate`` (base64 JSON), ``/image/edit`` is multipart
+        and streams the edited image back as raw binary, so we read the bytes
+        and the response's own content-type directly.
+        """
+        files = {"image": (_filename_for(image_content_type), image, image_content_type)}
+        # safe_mode mirrors the generate path (operator opted out of Venice's
+        # content filter there); the form encodes booleans as strings.
+        data = {"model": model, "prompt": prompt, "safe_mode": "false"}
+        try:
+            response = await self._client.post(
+                f"{self.base_url}/api/v1/image/edit", data=data, files=files
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise UpstreamError(
+                f"Venice /image/edit returned {e.response.status_code}: {e.response.text[:300]}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise UpstreamError(f"Venice /image/edit failed: {e}") from e
+
+        content = response.content
+        if not content:
+            raise UpstreamError("Venice /image/edit returned an empty body")
+        content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+        # Venice should echo the output format (png/jpeg/webp); fall back to
+        # PNG if the header is missing or non-image.
+        if not content_type.startswith("image/"):
+            content_type = "image/png"
+        return content, content_type
+
+
+def _filename_for(content_type: str) -> str:
+    """Filename component for the multipart upload. Venice infers the input
+    format from the extension when the content-type is generic."""
+    ct = content_type.lower()
+    if ct in ("image/jpeg", "image/jpg"):
+        return "image.jpg"
+    if ct == "image/webp":
+        return "image.webp"
+    if ct == "image/gif":
+        return "image.gif"
+    return "image.png"

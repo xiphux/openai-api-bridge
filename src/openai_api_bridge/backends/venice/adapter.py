@@ -1,8 +1,10 @@
 """Venice Backend implementation.
 
-Venice supports text-to-image only — no I2I, no video. The default
-``edit_image``/``generate_video`` raise ``UnsupportedOperation`` from the base
-class; we override here to surface clearer messages.
+Venice supports text-to-image (``/image/generate``) and image-to-image
+(``/image/edit``), but no video. ``edit_image`` routes to Venice's dedicated
+edit endpoint; ``generate_video`` raises ``UnsupportedOperation`` from the base
+class (overridden here for a clearer message). Venice edits are single-image,
+so more than one reference is rejected rather than silently dropped.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import logging
 
 from ...config import VeniceProviderConfig
-from ...errors import UnsupportedOperation
+from ...errors import InvalidRequest, UnsupportedOperation
 from ...util.sizes import parse_size
 from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
 from .client import VeniceClient
@@ -73,10 +75,27 @@ class VeniceBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        raise UnsupportedOperation(
-            "Venice does not support image edits (img2img). "
-            "Use a ComfyUI provider with a workflow that declares image_inputs."
-        )
+        # Venice's /image/edit takes exactly one reference image. Reject extras
+        # rather than silently dropping them (the edit_image contract).
+        if len(images) > 1:
+            raise InvalidRequest(
+                f"Venice image edits accept exactly one reference image (got {len(images)})",
+                param="image",
+            )
+        # /image/edit uses aspect_ratio/resolution, not OpenAI's size string;
+        # we let Venice infer from the source image rather than guess a mapping.
+        del size
+        image = images[0]
+        out: list[GeneratedAsset] = []
+        for _ in range(n):
+            data, content_type = await self.client.edit_image(
+                model=model_slug,
+                prompt=prompt,
+                image=image.data,
+                image_content_type=image.content_type,
+            )
+            out.append(GeneratedAsset(data=data, content_type=content_type, kind="image"))
+        return out
 
     async def generate_video(
         self,

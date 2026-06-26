@@ -21,7 +21,7 @@ client (LibreChat/LobeChat/curl/...)
    openai-api-bridge   ←  config.toml: [[providers]] = comfyui | venice | openai | ...
         │
         ├──► ComfyUI workflow (image or video, via user-defined workflow JSON)
-        ├──► Venice.ai native /api/v1/image/generate (image only)
+        ├──► Venice.ai native /api/v1/image/{generate,edit} (image gen + img2img)
         ├──► ImageRouter / OpenRouter (cloud image · video · chat across many vendors)
         └──► Any OpenAI-compatible upstream (llama-server, vLLM, OpenAI, ...)
               passthrough for /v1/chat/completions and /v1/embeddings
@@ -32,7 +32,7 @@ client (LibreChat/LobeChat/curl/...)
 | Provider type | What it covers | Why it's a separate adapter |
 |---|---|---|
 | **ComfyUI** | Image and video generation via user-defined workflow files | ComfyUI has no OpenAI-compatible HTTP surface; bridge translates |
-| **Venice.ai** | Image generation via Venice's native `/api/v1/image/generate` | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
+| **Venice.ai** | Image generation (`/api/v1/image/generate`) and img2img edits (`/api/v1/image/edit`, single reference image) | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
 | **ImageRouter** | Image and video generation across many providers | OpenAI-compat *content* but path-divergent — model catalog is at `/v2/models`, inference at `/v1/openai/...`, and the video endpoint is sync (single POST) rather than OpenAI's async `/v1/videos` lifecycle |
 | **OpenRouter** | Chat, embeddings, and image generation across many vendors | Chat/embeddings are spec-compliant; image generation diverges — OpenRouter exposes it via chat completions with a non-standard `message.images` array on the response. The bridge translates so clients see standard `/v1/images/generations` and `/v1/images/edits` |
 | **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
