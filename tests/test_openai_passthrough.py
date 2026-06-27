@@ -20,9 +20,37 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from openai_api_bridge.backends.openai.adapter import _extract_context_window
 from openai_api_bridge.config import reset_caches_for_tests
 
 UPSTREAM = "http://upstream.test"
+
+
+def test_extract_context_window_sources() -> None:
+    # Normalized field wins.
+    assert _extract_context_window({"context_window": 32768}) == 32768
+    # llama.cpp loaded model.
+    assert _extract_context_window({"meta": {"n_ctx": 40960}}) == 40960
+    # n_ctx_train is the trained ceiling, not the configured window — ignored.
+    assert _extract_context_window({"meta": {"n_ctx_train": 262144}}) is None
+    # vLLM.
+    assert _extract_context_window({"max_model_len": 16384}) == 16384
+    # llama.cpp router lists the child's argv even while cold.
+    assert _extract_context_window({"status": {"args": ["--ctx-size", "65536"]}}) == 65536
+    assert _extract_context_window({"status": {"args": ["-c", "8192"]}}) == 8192
+    assert _extract_context_window({"status": {"args": ["--ctx-size=4096"]}}) == 4096
+    # A clean numeric field beats the argv parse.
+    assert (
+        _extract_context_window(
+            {"meta": {"n_ctx": 40960}, "status": {"args": ["--ctx-size", "65536"]}}
+        )
+        == 40960
+    )
+    # Non-positive / non-numeric / absent → None. (bool must not count as int.)
+    assert _extract_context_window({"meta": {"n_ctx": 0}}) is None
+    assert _extract_context_window({"context_window": True}) is None
+    assert _extract_context_window({"status": {"args": ["--ctx-size", "nope"]}}) is None
+    assert _extract_context_window({}) is None
 
 
 @pytest.fixture
@@ -65,7 +93,9 @@ def test_models_lists_upstream_models_with_prefix(
             json={
                 "object": "list",
                 "data": [
-                    {"id": "llama-3.1-8b", "object": "model"},
+                    # A loaded llama.cpp model exposes meta.n_ctx (the configured
+                    # context window) — we surface it as context_window.
+                    {"id": "llama-3.1-8b", "object": "model", "meta": {"n_ctx": 40960}},
                     {"id": "text-embedding-3-large", "object": "model"},
                 ],
             },
@@ -85,6 +115,10 @@ def test_models_lists_upstream_models_with_prefix(
     # where per-model tool support varies wildly. The bridge can't tell
     # from the catalog; the client's per-endpoint fallback decides.
     assert "supports_tools" not in by_id["llama/llama-3.1-8b"]
+    # context_window IS surfaced when the upstream exposed it (the bridge
+    # otherwise strips the meta block that carries it). Omitted when unknown.
+    assert by_id["llama/llama-3.1-8b"]["context_window"] == 40960
+    assert "context_window" not in by_id["llama/text-embedding-3-large"]
 
 
 @respx.mock

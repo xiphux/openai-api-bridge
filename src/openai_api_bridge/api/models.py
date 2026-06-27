@@ -49,5 +49,10 @@ async def list_models(request: Request) -> dict:
             # apply their own fallback policy.
             if entry.supports_tools is not None:
                 row["supports_tools"] = entry.supports_tools
+            # Likewise additive: a model's max context window in tokens, when
+            # the upstream exposed it. Omitted (not null) when unknown so the
+            # client falls back to its own per-endpoint config.
+            if entry.context_window is not None:
+                row["context_window"] = entry.context_window
             out.append(row)
     return {"object": "list", "data": out}

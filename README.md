@@ -87,6 +87,7 @@ entry so clients can build a useful picker without per-model hardcoding
 | `display_name` | human-readable name | ComfyUI: meta.json `display_name`; others: upstream catalog. Falls back to the model id |
 | `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
 | `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
+| `context_window` | max context size in tokens, omitted when unknown | OpenAI-passthrough upstreams that expose it: llama.cpp's `meta.n_ctx` (a loaded model) or router `--ctx-size`, vLLM's `max_model_len`. The bridge strips the `meta`/`status` blocks otherwise, so this is the only way the size survives the proxy. Clients use it for a "N / max tokens" budget |
 
 Standard OpenAI clients ignore the extra fields; nothing nonstandard is
 *required* to use the bridge.

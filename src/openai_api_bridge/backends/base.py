@@ -32,12 +32,19 @@ class ModelEntry:
     frontends — the bridge knows per-backend (and sometimes per-model) which
     models accept the OpenAI ``tools`` array. ``None`` means the backend
     didn't say; the client can fall back to its own per-endpoint default.
+
+    ``context_window`` is likewise non-standard: the model's max context size
+    in tokens, when the upstream exposes it (llama.cpp's ``meta.n_ctx`` /
+    router ``--ctx-size``, vLLM's ``max_model_len``). ``None`` when unknown —
+    the OpenAI ``/v1/models`` row carries no such field, so a frontend showing
+    a "N / max tokens" budget falls back to its own config.
     """
 
     id: str
     kind: str | None = None
     display_name: str | None = None
     supports_tools: bool | None = None
+    context_window: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
