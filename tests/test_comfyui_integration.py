@@ -45,6 +45,8 @@ def comfyui_workflows_dir(tmp_path: Path) -> Path:
             {
                 "positive_prompt_node": "1",
                 "display_name": "Tiny T2I",
+                "prompt_style": "booru-tags",
+                "prompt_hint": "prefix: masterpiece, best quality",
             }
         )
     )
@@ -103,6 +105,10 @@ def test_models_lists_comfyui_workflow(
     assert entry["display_name"] == "Tiny T2I"
     # `kind` lets gateway-aware clients route to the right endpoint.
     assert entry["kind"] == "image"
+    # prompt_style / prompt_hint flow from meta.json for an image model's
+    # prompt-enhancement pass.
+    assert entry["prompt_style"] == "booru-tags"
+    assert entry["prompt_hint"] == "prefix: masterpiece, best quality"
 
 
 @respx.mock
@@ -126,6 +132,10 @@ def test_models_display_name_falls_back_to_slug_when_meta_lacks_one(
     by_id = {m["id"]: m for m in r.json()["data"]}
     # Without display_name in meta, the bridge falls back to the source filename.
     assert by_id["comfyui/no-name"]["display_name"] == "no-name"
+    # A workflow that doesn't declare prompt_style/prompt_hint omits them
+    # entirely (not null) so clients apply their own fallback.
+    assert "prompt_style" not in by_id["comfyui/no-name"]
+    assert "prompt_hint" not in by_id["comfyui/no-name"]
 
 
 @respx.mock

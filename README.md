@@ -88,6 +88,7 @@ entry so clients can build a useful picker without per-model hardcoding
 | `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
 | `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
 | `context_window` | max context size in tokens, omitted when unknown | OpenAI-passthrough upstreams that expose it: llama.cpp's `meta.n_ctx` (a loaded model) or router `--ctx-size`, vLLM's `max_model_len`. The bridge strips the `meta`/`status` blocks otherwise, so this is the only way the size survives the proxy. Clients use it for a "N / max tokens" budget |
+| `prompt_style` / `prompt_hint` | preferred prompt format + a freeform per-model nudge, omitted when unset | ComfyUI: the workflow's `meta.json` (see the meta schema below). Image models only — a gateway-aware client uses them to rewrite a prompt into the model's preferred format before generation |
 
 Standard OpenAI clients ignore the extra fields; nothing nonstandard is
 *required* to use the bridge.
@@ -292,6 +293,8 @@ Only `positive_prompt_node` is required:
 | `fps` | — | Enables OpenAI's `seconds` parameter: `seconds × fps` → frame count injected into `length_node` |
 | `seed_nodes` | all nodes with a `seed` / `noise_seed` field | Node IDs to randomize per request; list them explicitly to leave other seeds untouched |
 | `output_type` | auto-detected | `"image"` or `"video"`; auto-detection keys off the presence of `SaveVideo` / `VHS_VideoCombine` nodes — set explicitly to override |
+| `prompt_style` | — | Image models only. The prompt FORMAT this model prefers, surfaced in `/v1/models` for a gateway-aware frontend's prompt-enhancement pass — e.g. `"natural-language"`, `"booru-tags"`, `"keyword-soup"`, `"hybrid"`. Omitted from the model row when unset |
+| `prompt_hint` | — | Image models only. A freeform per-model nudge surfaced alongside `prompt_style` (e.g. a quality-tag prefix, a length cap, `@artist` conventions). Omitted when unset |
 
 ## Tests
 

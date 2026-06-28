@@ -54,5 +54,12 @@ async def list_models(request: Request) -> dict:
             # client falls back to its own per-endpoint config.
             if entry.context_window is not None:
                 row["context_window"] = entry.context_window
+            # Additive image-model hints for a frontend's prompt-enhancement
+            # pass — the preferred prompt format and an optional per-model nudge.
+            # Omitted when unset.
+            if entry.prompt_style is not None:
+                row["prompt_style"] = entry.prompt_style
+            if entry.prompt_hint is not None:
+                row["prompt_hint"] = entry.prompt_hint
             out.append(row)
     return {"object": "list", "data": out}

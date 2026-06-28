@@ -38,6 +38,14 @@ class ModelEntry:
     router ``--ctx-size``, vLLM's ``max_model_len``). ``None`` when unknown —
     the OpenAI ``/v1/models`` row carries no such field, so a frontend showing
     a "N / max tokens" budget falls back to its own config.
+
+    ``prompt_style`` and ``prompt_hint`` are non-standard extensions for image
+    models, consumed by a gateway-aware frontend's prompt-enhancement pass.
+    ``prompt_style`` is the prompt FORMAT this model prefers — e.g.
+    "natural-language", "booru-tags", "keyword-soup", "hybrid". ``prompt_hint``
+    is a freeform per-model nudge (a quality-tag prefix, a length cap, …). Both
+    ``None`` when unset; for a ComfyUI workflow they come from the companion
+    ``meta.json``.
     """
 
     id: str
@@ -45,6 +53,8 @@ class ModelEntry:
     display_name: str | None = None
     supports_tools: bool | None = None
     context_window: int | None = None
+    prompt_style: str | None = None
+    prompt_hint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

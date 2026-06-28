@@ -53,7 +53,13 @@ class ComfyUIBackend(Backend):
     async def list_models(self) -> list[ModelEntry]:
         records = self._ensure_workflows()
         return [
-            ModelEntry(id=r.slug, kind=r.output_type, display_name=r.display_name)
+            ModelEntry(
+                id=r.slug,
+                kind=r.output_type,
+                display_name=r.display_name,
+                prompt_style=r.meta.get("prompt_style"),
+                prompt_hint=r.meta.get("prompt_hint"),
+            )
             for r in sorted(records.values(), key=lambda r: r.slug)
         ]
 
