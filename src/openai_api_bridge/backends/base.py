@@ -40,12 +40,14 @@ class ModelEntry:
     a "N / max tokens" budget falls back to its own config.
 
     ``prompt_style`` and ``prompt_hint`` are non-standard extensions for image
-    models, consumed by a gateway-aware frontend's prompt-enhancement pass.
-    ``prompt_style`` is the prompt FORMAT this model prefers — e.g.
-    "natural-language", "booru-tags", "keyword-soup", "hybrid". ``prompt_hint``
-    is a freeform per-model nudge (a quality-tag prefix, a length cap, …). Both
-    ``None`` when unset; for a ComfyUI workflow they come from the companion
-    ``meta.json``.
+    and video models, consumed by a gateway-aware frontend's prompt-enhancement
+    pass. ``prompt_style`` is the prompt FORMAT this model prefers — for images
+    e.g. "natural-language", "booru-tags", "keyword-soup", "hybrid"; for video
+    e.g. "cinematic-prose", "structured-cinematic". ``prompt_hint`` is a freeform
+    per-model nudge (a quality-tag prefix, a length cap, an audio-cue reminder,
+    …). Both ``None`` when unset; for a ComfyUI workflow they come from the
+    companion ``meta.json``. The bridge passes them through verbatim regardless
+    of ``kind`` — it does not validate the vocabulary; that's the frontend's job.
     """
 
     id: str
