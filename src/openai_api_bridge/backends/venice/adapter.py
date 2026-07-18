@@ -58,17 +58,16 @@ class VeniceBackend(Backend):
         self._routes_lock = asyncio.Lock()
         self._routes_loaded = False
         self._routes_failed_at: float | None = None
-        # Only *complete* listings are stored: caching a degraded one (inpaint
-        # half missing) would pin routing unresolved for the whole TTL,
-        # outliving the shorter route-retry cooldown that is supposed to govern
-        # when we try again. That's why this drives the cache by hand rather
-        # than using AsyncTTLCache.get(), which would store whatever came back.
-        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
+        # A degraded listing (inpaint half missing) is cached too, but only
+        # for the short failure window — long enough that a burst can't queue
+        # up behind the lock, short enough that the missing half is retried
+        # soon rather than pinned for the full TTL.
+        # Caches ``(entries, complete)``: whether both halves arrived decides
+        # how long the result is worth keeping, so it travels with the value
+        # rather than through a side-channel flag.
+        self._catalog: AsyncTTLCache[tuple[list[ModelEntry], bool]] = AsyncTTLCache(
             cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
         )
-        # Whether the last fetch got both halves; picks the TTL the result is
-        # cached under.
-        self._last_listing_complete = False
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -81,16 +80,15 @@ class VeniceBackend(Backend):
         # a burst during an inpaint hang would queue up behind the lock and
         # each waiter would start its own fetch: the exact storm the failure
         # cooldown exists to damp, reached without ever raising.
-        return await self._catalog.get(
+        entries, _complete = await self._catalog.get(
             self._fetch_catalog,
-            ttl_for=lambda _entries: (
-                self.cfg.catalog_ttl_seconds
-                if self._last_listing_complete
-                else self.cfg.catalog_retry_seconds
+            ttl_for=lambda result: (
+                self.cfg.catalog_ttl_seconds if result[1] else self.cfg.catalog_retry_seconds
             ),
         )
+        return entries
 
-    async def _fetch_catalog(self) -> list[ModelEntry]:
+    async def _fetch_catalog(self) -> tuple[list[ModelEntry], bool]:
         # Two independent listings, fetched together — neither feeds the other,
         # and serialising them would double this endpoint's tail latency while
         # every other provider waits behind it.
@@ -164,8 +162,7 @@ class VeniceBackend(Backend):
             for model_id in edit_ids
             if model_id not in collapsed
         ]
-        self._last_listing_complete = edit_available
-        return entries
+        return entries, edit_available
 
     def _in_route_cooldown(self) -> bool:
         if self._routes_failed_at is None:

@@ -14,10 +14,10 @@ Two ways in:
 
 * :meth:`get` is the whole pattern for a backend whose listing is one call and
   whose result is always cacheable.
-* :attr:`lock` / :meth:`fresh` / :meth:`store` are for a backend that has to
-  decide *whether* the result is worth caching — Venice deliberately declines
-  to store a listing whose second half failed, since that would pin its edit
-  routing unresolved for the whole TTL.
+* ``ttl_for`` on :meth:`get`, plus :attr:`lock` / :meth:`fresh` / :meth:`store`
+  directly, are for a backend whose result may be worth caching for less than
+  the full window — Venice serves a listing whose second half failed but keeps
+  it only briefly, so the missing half is re-attempted soon.
 
 A failure is remembered for ``failure_cooldown_seconds`` and re-raised to
 callers arriving inside that window. That matters because the fetch runs *under
@@ -63,11 +63,16 @@ class AsyncTTLCache[T]:
         """Cache a value, optionally for less than the configured TTL.
 
         A shorter TTL is for a result that's usable but incomplete — worth
-        serving, but worth re-attempting sooner than a healthy one.
+        serving, but worth re-attempting sooner than a healthy one. The request
+        is clamped to the configured TTL so that an override can only ever
+        shorten it: otherwise ``ttl_seconds = 0`` would stop disabling caching
+        the moment a caller passed an override, and an override larger than the
+        TTL would hold an incomplete result *longer* than a healthy one.
         """
+        requested = self.ttl_seconds if ttl_seconds is None else ttl_seconds
         self._value = value
         self._stored_at = time.monotonic()
-        self._stored_ttl = self.ttl_seconds if ttl_seconds is None else ttl_seconds
+        self._stored_ttl = min(requested, self.ttl_seconds)
         self._failure = None
         self._failed_at = None
 

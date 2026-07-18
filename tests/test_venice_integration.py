@@ -433,3 +433,43 @@ async def test_edit_routing_reuses_the_cached_catalog(monkeypatch: pytest.Monkey
     finally:
         await backend.aclose()
     assert calls["n"] == 2, "edit routing should hit the cache, not re-fetch"
+
+
+@respx.mock
+async def test_ttl_zero_disables_caching_on_the_degraded_path_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`catalog_ttl_seconds = 0` documents caching as off. The short-TTL
+    override for an incomplete listing must not quietly reinstate it — an
+    override may only ever shorten the window, never create one."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls, inpaint_ok=False)
+
+    backend = _venice_backend(catalog_ttl_seconds=0, catalog_retry_seconds=300.0)
+    try:
+        for _ in range(3):
+            await backend.list_models()
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 6, f"caching should be off entirely, saw {calls['n']} calls"
+
+
+@respx.mock
+async def test_incomplete_listing_is_never_held_longer_than_a_healthy_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry window wider than the TTL must not invert the relationship."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls, inpaint_ok=False)
+
+    backend = _venice_backend(catalog_ttl_seconds=0.05, catalog_retry_seconds=300.0)
+    try:
+        await backend.list_models()
+        assert calls["n"] == 2
+        await asyncio.sleep(0.1)
+        await backend.list_models()
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 4, "the incomplete listing outlived the configured TTL"
