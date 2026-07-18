@@ -899,8 +899,10 @@ def test_rejected_key_is_not_retried_on_the_catalog(
             # Degrades to the configured entry rather than 500-ing the listing.
             assert {m["id"] for m in r.json()["data"]} == {f"fal/{NANO}"}
 
-    # One attempt only: a bad key cannot start working, so no cooldown retry.
-    assert route.call_count == 1
+    # One attempt only — one call per category, since they're walked
+    # concurrently — rather than a fresh attempt per request. A bad key cannot
+    # start working, so there is no cooldown retry.
+    assert route.call_count == len(SUPPORTED_CATEGORIES)
     # And it says so once, actionably — naming the env var to fix.
     errors = [r for r in caplog.records if r.levelname == "ERROR"]
     assert len(errors) == 1
@@ -1880,3 +1882,126 @@ def test_unknown_category_publishes_no_capability(
         assert "fal/fal-ai/odd" in by_id, "the configured category should still be listed"
         assert "capabilities" not in by_id["fal/fal-ai/odd"]
     reset_caches_for_tests()
+
+
+@respx.mock
+def test_configured_sibling_block_does_not_re_list_the_collapsed_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configuring the `/edit` half must not undo the collapsing.
+
+    The listing unions in configured models the catalogue didn't return — but a
+    collapsed sibling is absent *by design*, not because it's uncatalogued, so
+    without distinguishing the two a config block puts it straight back. That's
+    the shipped example (config.toml.example pairs seedream text-to-image with
+    its /edit half), and the README endorses sibling blocks for overriding a
+    routed edit, so it's the documented shape rather than a corner case.
+    """
+    t2v = "fal-ai/veo3.1"
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent(f"""
+        [[providers]]
+        id = "fal"
+        backend = "fal"
+        api_token_env = "TEST_FAL_TOKEN"
+        introspect_safety = false
+
+        [[providers.models]]
+        id = "{NANO}/edit"
+        display_name = "Nano (edit)"
+
+        [[providers.models]]
+        id = "{t2v}/image-to-video"
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Edit"),
+            _cat_entry(t2v, "text-to-video", "Veo 3.1"),
+            _cat_entry(f"{t2v}/image-to-video", "image-to-video", "Veo 3.1 I2V"),
+        ]
+    )
+
+    with TestClient(create_app()) as client:
+        by_id = {m["id"]: m for m in client.get("/v1/models", headers=HEADERS).json()["data"]}
+        assert f"fal/{NANO}" in by_id
+        assert f"fal/{NANO}/edit" not in by_id, "collapsed edit half was re-listed"
+        # The video pair is the sharper edge: a re-added entry comes from the
+        # config, which carries no capabilities and defaults kind to "image" —
+        # so a client filtering on kind would send a video model to /v1/images.
+        assert f"fal/{t2v}" in by_id
+        assert f"fal/{t2v}/image-to-video" not in by_id, "collapsed video half was re-listed"
+    reset_caches_for_tests()
+
+
+@respx.mock
+def test_catalog_categories_are_walked_concurrently(discovering_client: TestClient) -> None:
+    """Serially this is ~10-13 round trips on the first /v1/models after boot,
+    all of it holding the catalogue lock with every other provider queued
+    behind it."""
+    inflight = {"now": 0, "max": 0}
+
+    async def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("expand"):
+            return httpx.Response(200, json={"models": []})
+        inflight["now"] += 1
+        inflight["max"] = max(inflight["max"], inflight["now"])
+        await asyncio.sleep(0.05)
+        inflight["now"] -= 1
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+    assert discovering_client.get("/v1/models", headers=HEADERS).status_code == 200
+    assert inflight["max"] == len(SUPPORTED_CATEGORIES), (
+        f"categories should overlap; peak concurrency was {inflight['max']}"
+    )
+
+
+def test_ref_encoded_enums_are_resolved() -> None:
+    """fal inlines its enums today, so this is insurance rather than a live
+    fix — but the failure mode if that changes is silent: an unresolved enum
+    reads as "no values" and the moderation knob is simply omitted."""
+    from openai_api_bridge.backends.fal.safety import safety_params_from_schema
+    from openai_api_bridge.backends.fal.schema import duration_params, duration_property
+
+    spec = {
+        "paths": {
+            "/m": {
+                "post": {
+                    "requestBody": {
+                        "content": {"application/json": {"schema": {"$ref": "#/c/s/MInput"}}}
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "MInput": {
+                    "properties": {
+                        "safety_tolerance": {"allOf": [{"$ref": "#/c/s/Tolerance"}]},
+                        "duration": {"allOf": [{"$ref": "#/c/s/Duration"}]},
+                    }
+                },
+                "Tolerance": {"enum": ["1", "2", "3", "4", "5", "6"]},
+                "Duration": {"enum": ["4s", "6s", "8s"]},
+            }
+        },
+    }
+    # Nested under "c/s" to match the $ref paths above.
+    spec["c"] = spec.pop("components")
+    spec["c"]["s"] = spec["c"].pop("schemas")
+
+    assert safety_params_from_schema(spec) == {"safety_tolerance": "6"}
+    assert duration_params(duration_property(spec), 5.0) == {"duration": "6s"}

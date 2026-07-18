@@ -296,7 +296,15 @@ class FalBackend(Backend):
             # is absent too — yet `_model_config` still resolves it and
             # generation still works, so dropping it here would leave the
             # listing and generation surfaces disagreeing.
-            listed = {e.id for e in entries}
+            # Two reasons a configured model can be missing from `entries`,
+            # and only one of them wants re-adding: absent from the catalogue
+            # (union it back in), versus deliberately collapsed into its
+            # text-driven half (leave it out — re-listing is exactly what
+            # collapsing exists to prevent). A re-added entry would also come
+            # from config, which carries no capabilities and defaults kind to
+            # "image", so a collapsed *video* half would reappear advertising
+            # the wrong modality.
+            listed = {e.id for e in entries} | set(self._variant_routes.values())
             entries += [e for e in self._configured_entries() if e.id not in listed]
             self._catalog_failed_at = None
             self._catalog_cache = entries

@@ -92,14 +92,31 @@ def input_properties(spec: dict[str, Any]) -> dict[str, Any]:
     return props if isinstance(props, dict) else {}
 
 
-def enum_of(schema: dict[str, Any]) -> list[Any] | None:
-    """A property's accepted values, unwrapping fal's anyOf/allOf nesting."""
+def enum_of(schema: dict[str, Any], spec: dict[str, Any] | None = None) -> list[Any] | None:
+    """A property's accepted values, unwrapping fal's anyOf/allOf nesting.
+
+    ``spec`` lets a ``$ref``-encoded enum be followed. fal inlines these today
+    — every knob checked against the live API has its values in place — but the
+    failure mode if that changes is silent: an unresolved enum reads as "no
+    values", and the moderation knob is simply omitted with nothing to see in
+    the request. Cheap insurance for the one thing this backend exists to set.
+    """
     if isinstance(schema.get("enum"), list) and schema["enum"]:
         return list(schema["enum"])
     for key in ("anyOf", "allOf", "oneOf"):
         for sub in schema.get(key) or []:
-            if isinstance(sub, dict) and isinstance(sub.get("enum"), list) and sub["enum"]:
+            if not isinstance(sub, dict):
+                continue
+            if isinstance(sub.get("enum"), list) and sub["enum"]:
                 return list(sub["enum"])
+            if spec is not None and "$ref" in sub:
+                target = resolve_ref(spec, sub)
+                if target and isinstance(target.get("enum"), list) and target["enum"]:
+                    return list(target["enum"])
+    if spec is not None and "$ref" in schema:
+        target = resolve_ref(spec, schema)
+        if target and isinstance(target.get("enum"), list) and target["enum"]:
+            return list(target["enum"])
     return None
 
 
@@ -117,9 +134,21 @@ def _as_number(value: Any) -> float | None:
 
 
 def duration_property(spec: dict[str, Any]) -> dict[str, Any] | None:
-    """The model's ``duration`` input property, if it has one."""
+    """The model's ``duration`` input property, if it has one.
+
+    Any ``$ref``-encoded enum is resolved and inlined here, while the whole
+    document is still in hand — the adapter caches this property alone, not the
+    spec, so a reference left dangling would be unresolvable by the time a
+    request needs it.
+    """
     prop = input_properties(spec).get("duration")
-    return prop if isinstance(prop, dict) else None
+    if not isinstance(prop, dict):
+        return None
+    if not prop.get("enum"):
+        values = enum_of(prop, spec)
+        if values:
+            return {**prop, "enum": values}
+    return prop
 
 
 def duration_params(prop: dict[str, Any] | None, seconds: float) -> dict[str, Any]:

@@ -43,10 +43,10 @@ from .schema import enum_of, input_properties
 log = logging.getLogger(__name__)
 
 
-def _loosest_enum(schema: dict[str, Any]) -> Any | None:
+def _loosest_enum(schema: dict[str, Any], spec: dict[str, Any] | None = None) -> Any | None:
     """Highest value in the field's own enum — fal's tolerance scales run
     strict->loose, so the maximum is the most permissive."""
-    values = enum_of(schema)
+    values = enum_of(schema, spec)
     if not values:
         return None
     try:
@@ -56,14 +56,14 @@ def _loosest_enum(schema: dict[str, Any]) -> Any | None:
         return values[-1]
 
 
-def _off(_schema: dict[str, Any]) -> Any:
+def _off(_schema: dict[str, Any], _spec: dict[str, Any] | None = None) -> Any:
     """A boolean checker we want disabled."""
     return False
 
 
 # Allowlist of knobs we understand, keyed by input field name. Adding a new
 # convention is a one-line change here — not a per-model entry.
-_KNOBS: dict[str, Callable[[dict[str, Any]], Any]] = {
+_KNOBS: dict[str, Callable[[dict[str, Any], dict[str, Any] | None], Any]] = {
     "enable_safety_checker": _off,
     "safety_tolerance": _loosest_enum,
 }
@@ -84,7 +84,7 @@ def safety_params_from_schema(spec: dict[str, Any]) -> dict[str, Any]:
         prop = props.get(name)
         if not isinstance(prop, dict):
             continue
-        value = resolve(prop)
+        value = resolve(prop, spec)
         if value is not None:
             out[name] = value
     return out
