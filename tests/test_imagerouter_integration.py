@@ -62,7 +62,18 @@ HEADERS = {"Authorization": "Bearer test-bridge-key"}
 # id + output array. Mixed modalities so we can verify our image+video
 # filter does the right thing.
 _MODELS_FIXTURE = [
-    {"id": "black-forest-labs/FLUX-1.1-pro", "output": ["image"]},
+    # Real shape: ImageRouter states accepted inputs per model, and they differ
+    # — FLUX-1.1-pro is text-only while schnell also takes a reference image.
+    {
+        "id": "black-forest-labs/FLUX-1.1-pro",
+        "output": ["image"],
+        "inputs": {"text": True, "image": False, "mask": False},
+    },
+    {
+        "id": "black-forest-labs/FLUX-1-schnell",
+        "output": ["image"],
+        "inputs": {"text": True, "image": True, "mask": True},
+    },
     {"id": "openai/gpt-image-1", "output": ["image"]},
     {"id": "stability-ai/stable-video-3d", "output": ["video"]},
     # These should be filtered out — bridge only surfaces image+video.
@@ -92,6 +103,15 @@ def test_models_lists_image_and_video_only(
     # Kind hints surface from the upstream's `output` array.
     assert by_id["ir/black-forest-labs/FLUX-1.1-pro"]["kind"] == "image"
     assert by_id["ir/stability-ai/stable-video-3d"]["kind"] == "video"
+    # Capabilities come from the catalogue's own `inputs` map, so a text-only
+    # model is distinguishable from one that accepts a reference image.
+    assert by_id["ir/black-forest-labs/FLUX-1.1-pro"]["capabilities"] == ["text-to-image"]
+    assert by_id["ir/black-forest-labs/FLUX-1-schnell"]["capabilities"] == [
+        "text-to-image",
+        "image-to-image",
+    ]
+    # Omitted, not guessed, when the upstream didn't say.
+    assert "capabilities" not in by_id["ir/openai/gpt-image-1"]
 
 
 @respx.mock

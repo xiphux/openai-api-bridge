@@ -8,7 +8,7 @@ dispatcher routes incoming requests to the right backend by parsing the
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +69,41 @@ class ModelEntry:
     prompt_style: str | None = None
     prompt_hint: str | None = None
     capabilities: tuple[str, ...] | None = None
+
+
+# Canonical ordering for capability strings, so the field is stable across
+# backends and across runs regardless of how an upstream ordered its metadata.
+_INPUT_MODALITY_ORDER: tuple[str, ...] = ("text", "image", "video", "audio")
+
+# ModelEntry.kind is an output *category*; capability strings name the output
+# modality itself, so a chat model reads "image-to-text" rather than
+# "image-to-chat".
+KIND_OUTPUT_MODALITY: dict[str, str] = {
+    "image": "image",
+    "video": "video",
+    "chat": "text",
+    "embedding": "embedding",
+}
+
+
+def make_capabilities(inputs: Iterable[str], output: str | None) -> tuple[str, ...] | None:
+    """Build a ``ModelEntry.capabilities`` tuple from raw modality names.
+
+    Only names in the known modality vocabulary are used; anything else is
+    ignored, because upstream "inputs" metadata is not always purely modalities
+    — ImageRouter's map mixes them with parameter flags
+    (``{"text": true, "image": false, "mask": false, "quality": false}``), and
+    passing those through would yield nonsense like ``"quality-to-image"``.
+
+    ``None`` when the output modality is unknown or no input is recognised —
+    the field's contract is that absence means "the backend didn't say", never
+    "this model accepts nothing".
+    """
+    if not output:
+        return None
+    seen = set(inputs)
+    ordered = [m for m in _INPUT_MODALITY_ORDER if m in seen]
+    return tuple(f"{m}-to-{output}" for m in ordered) or None
 
 
 @dataclass(frozen=True, slots=True)

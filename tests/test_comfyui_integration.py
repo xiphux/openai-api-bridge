@@ -109,6 +109,34 @@ def test_models_lists_comfyui_workflow(
     # prompt-enhancement pass.
     assert entry["prompt_style"] == "booru-tags"
     assert entry["prompt_hint"] == "prefix: masterpiece, best quality"
+    # This workflow declares no image_inputs, so it's text-only — the same
+    # declaration edit_image gates on, surfaced so a client knows up front
+    # instead of discovering it from a rejected request.
+    assert entry["capabilities"] == ["text-to-image"]
+
+
+@respx.mock
+def test_models_capabilities_follow_declared_image_inputs(
+    client_with_comfyui: TestClient,
+    comfyui_workflows_dir: Path,
+) -> None:
+    """A workflow that declares image_inputs accepts img2img, and says so."""
+    (comfyui_workflows_dir / "i2i.json").write_text(
+        (comfyui_workflows_dir / "tiny-t2i.json").read_text()
+    )
+    (comfyui_workflows_dir / "i2i.meta.json").write_text(
+        json.dumps(
+            {
+                "positive_prompt_node": "1",
+                "display_name": "Tiny I2I",
+                "image_inputs": [{"node": "2"}],
+            }
+        )
+    )
+    r = client_with_comfyui.get("/v1/models", headers={"Authorization": "Bearer test-bridge-key"})
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    assert by_id["comfyui/i2i"]["capabilities"] == ["text-to-image", "image-to-image"]
+    assert by_id["comfyui/tiny-t2i"]["capabilities"] == ["text-to-image"]
 
 
 @respx.mock

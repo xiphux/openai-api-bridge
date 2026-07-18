@@ -17,7 +17,14 @@ from __future__ import annotations
 import logging
 
 from ...config import ImageRouterProviderConfig
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
+from ..base import (
+    Backend,
+    GeneratedAsset,
+    InputImage,
+    ModelEntry,
+    UpstreamIdCallback,
+    make_capabilities,
+)
 from .client import ImageRouterClient
 
 log = logging.getLogger(__name__)
@@ -56,7 +63,23 @@ class ImageRouterBackend(Backend):
                 kind = "video"
             else:
                 continue
-            entries.append(ModelEntry(id=model_id, kind=kind, display_name=model_id))
+            # ImageRouter states accepted inputs outright
+            # (``"inputs": {"text": true, "image": false, ...}``), so whether a
+            # model can take a reference image is read, not inferred.
+            raw_inputs = info.get("inputs")
+            accepted = (
+                [name for name, ok in raw_inputs.items() if ok is True]
+                if isinstance(raw_inputs, dict)
+                else []
+            )
+            entries.append(
+                ModelEntry(
+                    id=model_id,
+                    kind=kind,
+                    display_name=model_id,
+                    capabilities=make_capabilities(accepted, kind),
+                )
+            )
         return entries
 
     async def generate_image(

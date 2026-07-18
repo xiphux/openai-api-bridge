@@ -430,3 +430,49 @@ def test_openrouter_provider_loads_from_toml(tmp_path: Path) -> None:
     by_id = {p.id: p for p in providers.providers}
     assert isinstance(by_id["or"], OpenRouterProviderConfig)
     assert by_id["or"].base_url == "https://openrouter.ai/api"
+
+
+@respx.mock
+def test_models_expose_capabilities_from_architecture(
+    client_with_openrouter: TestClient,
+) -> None:
+    """OpenRouter states input_modalities alongside the output ones
+    classify_kind already reads, so a vision model can be told from a
+    text-only one without guessing."""
+    respx.get(f"{UPSTREAM}/v1/models").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "vendor/vision-chat",
+                        "architecture": {
+                            "input_modalities": ["text", "image"],
+                            "output_modalities": ["text"],
+                        },
+                    },
+                    {
+                        "id": "vendor/text-chat",
+                        "architecture": {
+                            "input_modalities": ["text"],
+                            "output_modalities": ["text"],
+                        },
+                    },
+                    {
+                        "id": "vendor/img",
+                        "architecture": {
+                            "input_modalities": ["text", "image"],
+                            "output_modalities": ["image"],
+                        },
+                    },
+                ]
+            },
+        )
+    )
+    r = client_with_openrouter.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    # A chat model's output modality is text, not its `kind`.
+    assert by_id["or/vendor/vision-chat"]["capabilities"] == ["text-to-text", "image-to-text"]
+    assert by_id["or/vendor/text-chat"]["capabilities"] == ["text-to-text"]
+    assert by_id["or/vendor/img"]["capabilities"] == ["text-to-image", "image-to-image"]

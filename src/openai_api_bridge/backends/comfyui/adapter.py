@@ -9,7 +9,14 @@ import random
 from ...config import ComfyUIProviderConfig
 from ...errors import ImageRequired, ModelNotFound, UnsupportedOperation
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
+from ..base import (
+    Backend,
+    GeneratedAsset,
+    InputImage,
+    ModelEntry,
+    UpstreamIdCallback,
+    make_capabilities,
+)
 from .client import ComfyUIClient
 from .workflows import (
     WorkflowRecord,
@@ -59,6 +66,13 @@ class ComfyUIBackend(Backend):
                 display_name=r.display_name,
                 prompt_style=r.meta.get("prompt_style"),
                 prompt_hint=r.meta.get("prompt_hint"),
+                # ``image_inputs`` is the same declaration edit_image and
+                # generate_video gate on, so the listing can't disagree with
+                # what a request will actually accept. Needs no new meta field.
+                capabilities=make_capabilities(
+                    ["text", "image"] if r.meta.get("image_inputs") else ["text"],
+                    r.output_type,
+                ),
             )
             for r in sorted(records.values(), key=lambda r: r.slug)
         ]

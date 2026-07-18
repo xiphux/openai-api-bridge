@@ -24,7 +24,14 @@ from typing import Any
 import httpx
 
 from ...config import OpenRouterProviderConfig
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
+from ..base import (
+    KIND_OUTPUT_MODALITY,
+    Backend,
+    GeneratedAsset,
+    InputImage,
+    ModelEntry,
+    make_capabilities,
+)
 from ..openai.client import OpenAIClient
 from .client import classify_kind, extract_image_data_urls, fetch_image_bytes
 
@@ -81,12 +88,22 @@ class OpenRouterBackend(Backend):
             params = m.get("supported_parameters")
             if isinstance(params, list):
                 supports_tools = "tools" in params
+            # ``architecture.input_modalities`` is the same source-of-truth
+            # metadata classify_kind reads for the output side, so a vision
+            # chat model surfaces as ("text-to-text", "image-to-text") and a
+            # model that accepts a reference image says so.
+            arch = m.get("architecture")
+            inputs = arch.get("input_modalities") if isinstance(arch, dict) else None
             entries.append(
                 ModelEntry(
                     id=model_id,
                     kind=kind,
                     display_name=display,
                     supports_tools=supports_tools,
+                    capabilities=make_capabilities(
+                        inputs if isinstance(inputs, list) else [],
+                        KIND_OUTPUT_MODALITY.get(kind or ""),
+                    ),
                 )
             )
         return entries
