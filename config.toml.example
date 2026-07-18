@@ -166,6 +166,9 @@ api_token_env = "VENICE_API_TOKEN"
 #   introspect_safety = false   # skip the schema lookup, use the built-in
 #                               # fallback map (the bridge also falls back
 #                               # automatically if fal's model API is down)
+#   introspect_retry_seconds = 300.0   # cooldown before retrying a failed
+#                               # lookup; until then the fallback map applies,
+#                               # so an outage heals without a restart
 #   models_api_url = "https://api.fal.ai/v1/models"   # rarely needs override
 #
 # Per-model escape hatches:

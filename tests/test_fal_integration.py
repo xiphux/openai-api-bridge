@@ -27,7 +27,8 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from openai_api_bridge.config import reset_caches_for_tests
+from openai_api_bridge.backends.fal.adapter import FalBackend
+from openai_api_bridge.config import FalModelConfig, FalProviderConfig, reset_caches_for_tests
 
 FAL = "https://fal.run"
 
@@ -486,9 +487,6 @@ async def test_concurrent_first_requests_share_one_lookup(
     UI) must collapse into a single schema lookup, with every request waiting
     for it — not one racing ahead un-loosened while N fetches fire in parallel.
     """
-    from openai_api_bridge.backends.fal.adapter import FalBackend
-    from openai_api_bridge.config import FalModelConfig, FalProviderConfig
-
     monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
     ids = [SEEDREAM_T2I, NANO, GPT_IMAGE]
     spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
@@ -523,6 +521,71 @@ async def test_concurrent_first_requests_share_one_lookup(
     assert route.call_count == 1
     # And none of them slipped through before the cache was populated.
     assert all(r == {"enable_safety_checker": False} for r in results)
+
+
+def _direct_backend(retry_seconds: float, model_ids: list[str]) -> FalBackend:
+    """A FalBackend built straight from config, for tests that need to poke
+    introspection behaviour without going through the HTTP layer."""
+    cfg = FalProviderConfig(
+        backend="fal",
+        id="fal",
+        api_token_env="TEST_FAL_TOKEN",
+        models=[FalModelConfig(id=m) for m in model_ids],
+        introspect_retry_seconds=retry_seconds,
+    )
+    return FalBackend(cfg)
+
+
+# A model id the static fallback map does NOT match, so schema-derived params
+# ({"enable_safety_checker": False}) are distinguishable from fallback ({}).
+UNMAPPED = "fal-ai/some-unmapped-model"
+
+
+@respx.mock
+async def test_failed_introspection_is_not_retried_during_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = respx.get(MODELS_API).mock(return_value=httpx.Response(503, json={"error": "down"}))
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[UNMAPPED])
+    try:
+        for _ in range(3):
+            assert await backend._safety_params(backend.cfg.models[0]) == {}
+    finally:
+        await backend.aclose()
+    # One attempt, not one per request — the cooldown suppresses the rest.
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_introspection_retries_after_cooldown_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the cooldown elapses the lookup is retried, and a now-healthy fal
+    API upgrades the process from fallback to schema-derived settings without a
+    restart."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+    responses = [
+        httpx.Response(503, json={"error": "down"}),
+        httpx.Response(200, json={"models": [{"endpoint_id": UNMAPPED, "openapi": spec}]}),
+    ]
+    route = respx.get(MODELS_API).mock(side_effect=responses)
+
+    # retry_seconds=0 -> the cooldown has always elapsed, so the next request retries.
+    backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
+    try:
+        model = backend.cfg.models[0]
+        # First attempt fails -> fallback (no static rule for this id).
+        assert await backend._safety_params(model) == {}
+        # Second attempt retries and succeeds -> schema-derived.
+        assert await backend._safety_params(model) == {"enable_safety_checker": False}
+        # Now cached: no further lookups.
+        assert await backend._safety_params(model) == {"enable_safety_checker": False}
+    finally:
+        await backend.aclose()
+    assert route.call_count == 2
 
 
 @respx.mock

@@ -76,10 +76,16 @@ Two look-alike fields are deliberately ignored: `safety_checker_version`
 `has_nsfw_concepts` is an *output* field, not an input knob.
 
 Schemas are fetched once, lazily, on the first image request (one batched call
-covering every configured model) and cached for the process. If fal's model API
-is unreachable the bridge logs a warning and falls back to a small built-in map,
-so generation never fails over an introspection blip. Set
-`introspect_safety = false` on the provider to skip the lookup entirely.
+covering every configured model) and cached for the process. The fetch happens
+under a lock, so a burst of concurrent generations — a multi-model fan-out from
+a UI, say — collapses into a single lookup that all of them wait for and
+benefit from, rather than one racing ahead un-loosened.
+
+If fal's model API is unreachable the bridge logs a warning and falls back to a
+small built-in map, so generation never fails over an introspection blip. The
+failure is retried after `introspect_retry_seconds` (default 300), so an outage
+degrades temporarily instead of until the next restart. Set
+`introspect_safety = false` to skip the lookup entirely.
 
 Two caveats worth knowing:
 

@@ -165,17 +165,16 @@ class FalModelConfig(BaseModel):
     display_name: str | None = None
     prompt_style: str | None = None
     prompt_hint: str | None = None
-    # Loosen content moderation to the minimum this model's family allows.
-    # The bridge knows the per-family knob (Seedream -> enable_safety_checker=
-    # false, Nano Banana / Gemini image -> safety_tolerance="6"); set false to
-    # leave the upstream's own defaults in place. Families the bridge doesn't
-    # recognise (e.g. fal's gpt-image wrapper, which exposes no moderation
-    # field at all) get nothing injected regardless.
+    # Loosen content moderation as far as this model allows. The setting is read
+    # from the model's own OpenAPI schema (see ``backends/fal/safety.py``); set
+    # false to leave the upstream's own defaults in place. Models exposing no
+    # knob the bridge recognises — e.g. fal's gpt-image wrapper, which has no
+    # moderation field at all — get nothing injected regardless.
     disable_safety: bool = True
     # Arbitrary extra fields merged into the fal request body, applied last so
-    # they override the built-in safety defaults. Escape hatch to pin
-    # aspect_ratio/resolution/quality, or to set a safety knob for a family the
-    # bridge doesn't special-case.
+    # they override the derived safety setting. Escape hatch to pin
+    # aspect_ratio/resolution/quality, or to set a knob the bridge doesn't
+    # recognise.
     params: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -184,10 +183,11 @@ class FalProviderConfig(BaseModel):
     (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …).
 
     Unlike ImageRouter/OpenRouter, fal exposes each model's *native* input
-    schema, which includes per-model content-moderation knobs. The bridge's fal
-    backend hardcodes the loosest setting per model family (see
-    ``FalModelConfig.disable_safety``) so tier-1 models can be driven past the
-    over-eager default guardrails other brokers don't let you touch.
+    schema, which includes per-model content-moderation knobs. The bridge reads
+    that schema and sets the knob to its loosest value (see
+    ``backends/fal/safety.py``), so tier-1 models can be driven past the
+    over-eager default guardrails other brokers don't let you touch — and new
+    model versions are picked up without a code change.
 
     Calls hit fal's synchronous endpoint (``POST https://fal.run/{model_id}``)
     with ``Authorization: Key {token}``; the response carries hosted asset URLs
@@ -209,6 +209,12 @@ class FalProviderConfig(BaseModel):
     # out at "5"). Set false to skip the lookup and use the built-in fallback
     # map instead; the bridge also falls back automatically if the fetch fails.
     introspect_safety: bool = True
+    # Cooldown before a *failed* introspection is retried. Until it elapses,
+    # requests use the built-in fallback map, so a fal outage costs one round
+    # trip per window rather than one per request — but it heals on its own
+    # instead of staying degraded until the process restarts. 0 retries on the
+    # very next request.
+    introspect_retry_seconds: float = 300.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)

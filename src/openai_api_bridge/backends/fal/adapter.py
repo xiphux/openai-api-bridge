@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import time
 from typing import Any
 
 from ...config import FalModelConfig, FalProviderConfig
@@ -76,7 +77,10 @@ class FalBackend(Backend):
         # network dependency and a fal outage can't block boot.
         self._safety_cache: dict[str, dict[str, Any]] | None = None
         self._safety_lock = asyncio.Lock()
-        self._introspect_failed = False
+        # Monotonic timestamp of the last failed lookup, or None if we haven't
+        # failed. Drives the retry cooldown so an outage degrades temporarily
+        # rather than for the life of the process.
+        self._introspect_failed_at: float | None = None
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -104,12 +108,20 @@ class FalBackend(Backend):
             )
         return mcfg
 
+    def _in_introspect_cooldown(self) -> bool:
+        """True while a recent introspection failure should suppress retries."""
+        if self._introspect_failed_at is None:
+            return False
+        elapsed = time.monotonic() - self._introspect_failed_at
+        return elapsed < self.cfg.introspect_retry_seconds
+
     async def _ensure_safety_cache(self) -> dict[str, dict[str, Any]] | None:
         """Populate the schema-derived safety map, once, for all configured models.
 
-        Returns ``None`` if introspection is off or the lookup failed — callers
-        then fall back to the static map. A failure is sticky for the process so
-        an unreachable fal model API doesn't cost a round trip per request.
+        Returns ``None`` if introspection is off, the lookup failed, or we're
+        still inside the post-failure cooldown — callers then fall back to the
+        static map. The cooldown keeps a fal outage from costing a round trip
+        per request without leaving the process permanently degraded.
         """
         if not self.cfg.introspect_safety:
             return None
@@ -119,7 +131,7 @@ class FalBackend(Backend):
         async with self._safety_lock:
             if self._safety_cache is not None:
                 return self._safety_cache
-            if self._introspect_failed:
+            if self._in_introspect_cooldown():
                 return None
             model_ids = [m.id for m in self.cfg.models]
             if not model_ids:
@@ -128,11 +140,12 @@ class FalBackend(Backend):
             try:
                 specs = await self.client.fetch_model_schemas(model_ids)
             except Exception as e:  # never fail a generation over an introspection blip
-                self._introspect_failed = True
+                self._introspect_failed_at = time.monotonic()
                 log.warning(
-                    "fal: could not introspect model schemas (%s); "
-                    "falling back to built-in moderation defaults",
+                    "fal: could not introspect model schemas (%s); using built-in "
+                    "moderation defaults, retrying in %.0fs",
                     e,
+                    self.cfg.introspect_retry_seconds,
                 )
                 return None
             resolved = {mid: safety_params_from_schema(spec) for mid, spec in specs.items()}
@@ -143,6 +156,7 @@ class FalBackend(Backend):
                         "moderation defaults",
                         mid,
                     )
+            self._introspect_failed_at = None
             self._safety_cache = resolved
             return self._safety_cache
 
