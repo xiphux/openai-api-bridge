@@ -200,6 +200,15 @@ class FalProviderConfig(BaseModel):
     api_token_env: str
     request_timeout_seconds: float = 600.0
     models: list[FalModelConfig] = Field(default_factory=list)
+    # fal's model-catalog API, used to introspect each model's OpenAPI input
+    # schema so the moderation knob can be derived rather than hardcoded.
+    models_api_url: str = "https://api.fal.ai/v1/models"
+    # When true (default), the loosest moderation setting is read from each
+    # model's own schema — which keeps working across new model versions and
+    # picks up per-model enum ceilings (most accept "1".."6"; flux-2-flex tops
+    # out at "5"). Set false to skip the lookup and use the built-in fallback
+    # map instead; the bridge also falls back automatically if the fetch fails.
+    introspect_safety: bool = True
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)

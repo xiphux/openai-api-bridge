@@ -2,13 +2,16 @@
 
 Stubs the upstream fal.run HTTP surface with respx and verifies:
   * /v1/models reflects the configured model list (no upstream catalog call)
-  * /v1/images/generations injects the loosest per-family moderation knob
-    (Seedream -> enable_safety_checker=false, Nano Banana -> safety_tolerance=6)
-  * families the bridge doesn't recognise (gpt-image) get nothing injected
+  * /v1/images/generations injects the loosest moderation knob
+  * models exposing no knob (gpt-image) get nothing injected
   * disable_safety=false and per-model `params` overrides behave correctly
   * size maps to image_size for Seedream but is dropped for Nano Banana
   * /v1/images/edits forwards reference images as image_urls data URIs
   * the generation request carries `Authorization: Key ...`, asset fetch doesn't
+
+Moderation settings come from schema introspection against fal's model API.
+Tests that leave that API unstubbed exercise the *fallback* static map; the
+"schema introspection" section below stubs it to exercise the derived path.
 """
 
 from __future__ import annotations
@@ -280,3 +283,204 @@ def test_upstream_error_surfaces(client_with_fal: TestClient) -> None:
 def test_unconfigured_model_is_model_not_found(client_with_fal: TestClient) -> None:
     r = _generate(client_with_fal, "fal-ai/not-configured")
     assert r.status_code == 404
+
+
+# --- schema introspection --------------------------------------------------
+#
+# The tests above exercise the *fallback* path: respx leaves fal's model API
+# unstubbed, so introspection fails and the static map applies. These stub the
+# model API so the schema-derived path runs.
+
+MODELS_API = "https://api.fal.ai/v1/models"
+
+
+def _openapi(model_title: str, props: dict) -> dict:
+    """Minimal fal-shaped OpenAPI doc with the given input properties."""
+    return {
+        "openapi": "3.0.4",
+        "paths": {
+            f"/{model_title}": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": f"#/components/schemas/{model_title}Input"}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                f"{model_title}Input": {"properties": {"prompt": {"type": "string"}, **props}},
+                # Output side carries has_nsfw_concepts — must never be picked up.
+                f"{model_title}Output": {"properties": {"has_nsfw_concepts": {"type": "array"}}},
+            }
+        },
+    }
+
+
+def _stub_models_api(schemas: dict[str, dict]) -> None:
+    respx.get(MODELS_API).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "models": [{"endpoint_id": mid, "openapi": spec} for mid, spec in schemas.items()],
+                "has_more": False,
+            },
+        )
+    )
+
+
+@respx.mock
+def test_schema_derived_enum_uses_model_specific_ceiling(client_with_fal: TestClient) -> None:
+    """The whole point of introspection: most models cap safety_tolerance at
+    "6", but some (flux-2-flex) cap at "5" — a hardcoded "6" would be rejected.
+    The value must come from the model's own enum."""
+    _stub_models_api(
+        {
+            NANO: _openapi(
+                "Nano",
+                {"safety_tolerance": {"enum": ["1", "2", "3", "4", "5", "6"], "default": "4"}},
+            )
+        }
+    )
+    gen = _mock_generation(NANO)
+    assert _generate(client_with_fal, NANO).status_code == 200
+    assert _sent_body(gen)["safety_tolerance"] == "6"
+
+
+@respx.mock
+def test_schema_derived_respects_narrower_enum(client_with_fal: TestClient) -> None:
+    """A model whose enum tops out at "5" (as fal-ai/flux-2-flex really does)
+    must get "5" — the hardcoded "6" this replaced would be rejected."""
+    _stub_models_api(
+        {
+            SEEDREAM_T2I: _openapi(
+                "Narrow",
+                {"safety_tolerance": {"enum": ["1", "2", "3", "4", "5"], "default": "2"}},
+            )
+        }
+    )
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    body = _sent_body(gen)
+    # Derived from the schema (5), not the hardcoded family default (6), and
+    # not the seedream fallback (enable_safety_checker).
+    assert body["safety_tolerance"] == "5"
+    assert "enable_safety_checker" not in body
+
+
+@respx.mock
+def test_schema_derived_boolean_checker(client_with_fal: TestClient) -> None:
+    _stub_models_api(
+        {
+            SEEDREAM_T2I: _openapi(
+                "Seedream", {"enable_safety_checker": {"type": "boolean", "default": True}}
+            )
+        }
+    )
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    assert _sent_body(gen)["enable_safety_checker"] is False
+
+
+@respx.mock
+def test_output_only_and_decoy_fields_are_ignored(client_with_fal: TestClient) -> None:
+    """has_nsfw_concepts is an output field; safety_checker_version selects
+    WHICH checker runs, not how strict — neither may be injected."""
+    _stub_models_api(
+        {
+            SEEDREAM_T2I: _openapi(
+                "Decoy",
+                {
+                    "safety_checker_version": {"enum": ["v1", "v2"], "default": "v1"},
+                    "enable_safety_checker": {"type": "boolean", "default": True},
+                },
+            )
+        }
+    )
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    body = _sent_body(gen)
+    assert body["enable_safety_checker"] is False
+    assert "safety_checker_version" not in body
+    assert "has_nsfw_concepts" not in body
+
+
+@respx.mock
+def test_model_with_no_knob_gets_nothing_injected(client_with_fal: TestClient) -> None:
+    # fal's gpt-image wrapper exposes no moderation field at all.
+    _stub_models_api({GPT_IMAGE: _openapi("GptImage", {"quality": {"type": "string"}})})
+    gen = _mock_generation(GPT_IMAGE)
+    assert _generate(client_with_fal, GPT_IMAGE).status_code == 200
+    body = _sent_body(gen)
+    assert "safety_tolerance" not in body
+    assert "enable_safety_checker" not in body
+
+
+@respx.mock
+def test_schemas_fetched_once_and_cached(client_with_fal: TestClient) -> None:
+    # Every configured model answered in the one batch, so no per-model retry
+    # pass is triggered — this isolates the caching behaviour.
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+    route = respx.get(MODELS_API).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"endpoint_id": mid, "openapi": spec}
+                    for mid in (
+                        SEEDREAM_T2I,
+                        SEEDREAM_EDIT,
+                        NANO,
+                        NANO_PRO,
+                        GPT_IMAGE,
+                        PLAIN,
+                    )
+                ],
+                "has_more": False,
+            },
+        )
+    )
+    _mock_generation(SEEDREAM_T2I)
+    for _ in range(3):
+        assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    # One batched lookup covers every configured model, for the process.
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_truncated_batch_is_retried_per_model(client_with_fal: TestClient) -> None:
+    """fal silently truncates expanded-schema responses, so a model missing
+    from a batch must be re-fetched individually rather than silently losing
+    its moderation settings."""
+    seedream_spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        asked = request.url.params.get_list("endpoint_id")
+        # Batch call: pretend the response got truncated to a single unrelated
+        # model, omitting the one we care about. Single-id call: answer fully.
+        if len(asked) > 1:
+            return httpx.Response(200, json={"models": [{"endpoint_id": NANO, "openapi": {}}]})
+        if asked and asked[0] == SEEDREAM_T2I:
+            return httpx.Response(
+                200, json={"models": [{"endpoint_id": SEEDREAM_T2I, "openapi": seedream_spec}]}
+            )
+        return httpx.Response(200, json={"models": []})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    # Recovered via the per-model retry, not the static fallback.
+    assert _sent_body(gen)["enable_safety_checker"] is False
+
+
+@respx.mock
+def test_introspection_failure_falls_back_to_static_map(client_with_fal: TestClient) -> None:
+    respx.get(MODELS_API).mock(return_value=httpx.Response(503, json={"error": "down"}))
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    # Static fallback still loosens the seedream family.
+    assert _sent_body(gen)["enable_safety_checker"] is False

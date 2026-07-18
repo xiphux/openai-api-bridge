@@ -34,8 +34,16 @@ _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
 
 
 class FalClient:
-    def __init__(self, *, base_url: str, api_token: str, request_timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_token: str,
+        request_timeout_seconds: float,
+        models_api_url: str = "https://api.fal.ai/v1/models",
+    ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.models_api_url = models_api_url
         self._auth_headers = {"Authorization": f"Key {api_token}"}
         self._client = httpx.AsyncClient(
             headers=self._auth_headers,
@@ -70,6 +78,64 @@ class FalClient:
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
         return _extract_image_urls(resp.json(), model_id)
+
+    # --- model schemas ---------------------------------------------------
+
+    async def fetch_model_schemas(self, model_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch OpenAPI documents for the given fal models, keyed by model id.
+
+        Uses fal's model API in "Find Mode" (``?endpoint_id=a&endpoint_id=b``)
+        with ``expand=openapi-3.0`` to inline each model's schema. Auth is
+        optional there but we send our key anyway — it raises the rate limit,
+        and unauthenticated ``expand`` calls get 429'd readily.
+
+        Note the batch size: while Find Mode accepts up to 50 ids, a response
+        carrying expanded schemas is **silently truncated to 10** — ask for 14
+        and you get 10 back with no error and no pagination hint. Chunking at
+        10 avoids losing schemas; any id still missing afterwards is retried
+        on its own before we give up on it.
+
+        Models the API never returns are simply absent from the result; the
+        caller decides what to do about them.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        chunk_size = 10
+        for start in range(0, len(model_ids), chunk_size):
+            out.update(await self._fetch_schema_batch(model_ids[start : start + chunk_size]))
+
+        # Guard against the truncation cap moving: re-ask for stragglers one at
+        # a time, where a single-model response can't be trimmed.
+        missing = [mid for mid in model_ids if mid not in out]
+        for mid in missing:
+            out.update(await self._fetch_schema_batch([mid]))
+        return out
+
+    async def _fetch_schema_batch(self, chunk: list[str]) -> dict[str, dict[str, Any]]:
+        params: list[tuple[str, str | int | float | bool | None]] = [
+            ("endpoint_id", mid) for mid in chunk
+        ]
+        params.append(("expand", "openapi-3.0"))
+        try:
+            resp = await self._client.get(self.models_api_url, params=params, timeout=60.0)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise UpstreamError(
+                f"fal model API returned {e.response.status_code}: {e.response.text[:300]}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise UpstreamError(f"fal model API request failed: {e}") from e
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise UpstreamError(f"fal model API returned non-dict body: {str(body)[:200]}")
+        out: dict[str, dict[str, Any]] = {}
+        for entry in body.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            mid = entry.get("endpoint_id")
+            spec = entry.get("openapi")
+            if isinstance(mid, str) and isinstance(spec, dict):
+                out[mid] = spec
+        return out
 
     # --- asset fetch -----------------------------------------------------
 

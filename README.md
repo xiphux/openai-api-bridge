@@ -52,15 +52,34 @@ see `src/openai_api_bridge/backends/` for the existing implementations.
 
 The reason to reach for the `fal` backend over ImageRouter/OpenRouter is
 control over the tier-1 models' safety guardrails. fal surfaces each model's
-own moderation parameter, and the bridge injects the loosest value per model
-family whenever a model is configured with `disable_safety = true` (the
-default):
+own moderation parameter, and the bridge sets it to the loosest value whenever
+a model is configured with `disable_safety = true` (the default).
 
-| Model family | fal knob the bridge sets | Effect |
+Rather than mapping model name → knob (which would need a code change for every
+new model version), the bridge **reads the model's own OpenAPI schema** from
+fal's model API and derives the setting. A sweep of fal's ~600 image models
+found the knobs collapse to two field names, both stable across versions:
+
+| Input field | Models | What the bridge sets |
 |---|---|---|
-| ByteDance **Seedream** (`…/seedream/…`) | `enable_safety_checker = false` | Safety checker off |
-| Google **Nano Banana** / **Gemini** image (`nano-banana…`, `gemini…`) | `safety_tolerance = "6"` | Loosest of the 1–6 scale |
-| Everything else (incl. fal's **GPT Image** wrapper) | *(nothing injected)* | fal's gpt-image exposes no moderation field; unknown families are left untouched so an unrecognized field can't 422 the request |
+| `enable_safety_checker` (bool) | ~132 | `false` |
+| `safety_tolerance` (enum) | ~23 | the **highest value in that model's own enum** |
+| *(no recognized field)* | — | nothing injected — e.g. fal's **GPT Image** wrapper has no moderation field at all |
+
+Reading the enum matters: most models accept `"1"`–`"6"`, but `fal-ai/flux-2-flex`
+tops out at `"5"`, so a hardcoded `"6"` would be rejected. Defaults vary
+independently of the ceiling (`"4"` for Gemini, `"2"` for FLUX), so the default
+tells you nothing about the maximum.
+
+Two look-alike fields are deliberately ignored: `safety_checker_version`
+(`v1`/`v2`) selects *which* checker runs rather than how strict it is, and
+`has_nsfw_concepts` is an *output* field, not an input knob.
+
+Schemas are fetched once, lazily, on the first image request (one batched call
+covering every configured model) and cached for the process. If fal's model API
+is unreachable the bridge logs a warning and falls back to a small built-in map,
+so generation never fails over an introspection blip. Set
+`introspect_safety = false` on the provider to skip the lookup entirely.
 
 Two caveats worth knowing:
 
@@ -69,9 +88,9 @@ Two caveats worth knowing:
   no broker (or Google's own API) can disable it. `safety_tolerance = "6"`
   softens Layer 1 only.
 - **Per-model overrides** live in a `[providers.models.params]` table (merged
-  last, so it beats the safety default) plus a `disable_safety = false` toggle
-  — use these to pin `aspect_ratio`/`resolution`/`quality`, or to set a safety
-  knob for a family the bridge doesn't special-case. `size` (`WxH`) maps to
+  last, so it beats the derived setting) plus a `disable_safety = false` toggle
+  — use these to pin `aspect_ratio`/`resolution`/`quality`, or to set a knob the
+  bridge doesn't recognize. `size` (`WxH`) maps to
   `image_size` for most families but is dropped for Nano Banana / Gemini, which
   take `aspect_ratio` + `resolution` instead.
 

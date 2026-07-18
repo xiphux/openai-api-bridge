@@ -126,10 +126,11 @@ api_token_env = "VENICE_API_TOKEN"
 # Model-hosting broker for tier-1 image models (Seedream, Nano Banana / Gemini
 # image, GPT Image, FLUX, …). Unlike ImageRouter/OpenRouter, fal exposes each
 # model's *native* input schema — which includes the per-model content-
-# moderation knob. The bridge hardcodes the loosest setting per model family
-# (Seedream -> enable_safety_checker=false, Nano Banana -> safety_tolerance=6)
-# so tier-1 models can be driven past the over-eager default guardrails that
-# flat OpenAI-shaped brokers don't let you touch.
+# moderation knob. The bridge reads each model's OpenAPI schema and sets that
+# knob to its loosest value (enable_safety_checker=false, or the top of the
+# model's own safety_tolerance enum), so tier-1 models can be driven past the
+# over-eager default guardrails that flat OpenAI-shaped brokers don't let you
+# touch — and new model versions are picked up without a code change.
 #
 # fal has no model-catalog endpoint, so — unlike ImageRouter — you declare the
 # models this provider serves explicitly, one [[providers.models]] per model.
@@ -146,22 +147,29 @@ api_token_env = "VENICE_API_TOKEN"
 #   [[providers.models]]
 #   id = "fal-ai/bytedance/seedream/v4/text-to-image"
 #   display_name = "Seedream 4"
-#   # disable_safety defaults to true -> injects enable_safety_checker=false
+#   # disable_safety defaults to true -> schema says enable_safety_checker,
+#   # so the bridge sends enable_safety_checker=false
 #
 #   [[providers.models]]
 #   id = "fal-ai/bytedance/seedream/v4/edit"      # img2img edit endpoint
 #   display_name = "Seedream 4 (edit)"
 #
 #   [[providers.models]]
-#   id = "fal-ai/nano-banana-2"                   # injects safety_tolerance="6"
-#   display_name = "Nano Banana 2"
+#   id = "fal-ai/nano-banana-2"                   # enum tops out at 6 ->
+#   display_name = "Nano Banana 2"                # safety_tolerance="6"
 #
 #   [[providers.models]]
 #   id = "fal-ai/gpt-image-2"                     # fal's gpt-image exposes NO
 #   display_name = "GPT Image 2"                  # moderation knob; nothing injected
 #
+# Provider-level:
+#   introspect_safety = false   # skip the schema lookup, use the built-in
+#                               # fallback map (the bridge also falls back
+#                               # automatically if fal's model API is down)
+#   models_api_url = "https://api.fal.ai/v1/models"   # rarely needs override
+#
 # Per-model escape hatches:
 #   disable_safety = false   # leave the model's own moderation default in place
 #   [providers.models.params]  # arbitrary body fields, applied last (override
-#   aspect_ratio = "16:9"      # the safety default); pin size/quality, or set a
-#   resolution = "2K"          # safety knob for a family the bridge doesn't map
+#   aspect_ratio = "16:9"      # the derived safety setting); pin size/quality,
+#   resolution = "2K"          # or set a knob the bridge doesn't recognize
