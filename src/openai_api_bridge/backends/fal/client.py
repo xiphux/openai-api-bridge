@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from ...errors import UpstreamAuthError, UpstreamError
+from ...errors import UnsupportedOperation, UpstreamAuthError, UpstreamError
 from ...util.http import fetch_asset_with_retry
 
 log = logging.getLogger(__name__)
@@ -159,10 +159,13 @@ class FalClient:
             out.update(await self._fetch_schema_batch(model_ids[start : start + chunk_size]))
 
         # Guard against the truncation cap moving: re-ask for stragglers one at
-        # a time, where a single-model response can't be trimmed.
-        missing = [mid for mid in model_ids if mid not in out]
-        for mid in missing:
-            out.update(await self._fetch_schema_batch([mid]))
+        # a time, where a single-model response can't be trimmed. Only worth it
+        # for a real batch — re-asking for a lone id would repeat a
+        # byte-identical request that already came back without it.
+        if len(model_ids) > 1:
+            missing = [mid for mid in model_ids if mid not in out]
+            for mid in missing:
+                out.update(await self._fetch_schema_batch([mid]))
         return out
 
     async def _fetch_schema_batch(self, chunk: list[str]) -> dict[str, dict[str, Any]]:
@@ -202,6 +205,20 @@ class FalClient:
         return await fetch_asset_with_retry(url, provider_label="fal")
 
 
+# Output keys fal uses for the modalities this backend doesn't implement. A
+# response carrying one of these is a well-formed success for a video/audio/3d
+# model, not an upstream fault — the caller pointed an image endpoint at a
+# non-image model.
+_NON_IMAGE_OUTPUT_KEYS = (
+    "video",
+    "audio",
+    "model_mesh",
+    "mesh",
+    "video_url",
+    "audio_url",
+)
+
+
 def _extract_image_urls(body: Any, model_id: str) -> list[str]:
     """Pull every ``images[].url`` out of a fal response.
 
@@ -213,6 +230,13 @@ def _extract_image_urls(body: Any, model_id: str) -> list[str]:
         raise UpstreamError(f"fal {model_id} returned non-dict body: {str(body)[:200]}")
     images = body.get("images")
     if not isinstance(images, list) or not images:
+        for key in _NON_IMAGE_OUTPUT_KEYS:
+            if key in body:
+                raise UnsupportedOperation(
+                    f"fal model {model_id!r} produced {key!r} output; this provider "
+                    "implements image generation and edits only",
+                    param="model",
+                )
         raise UpstreamError(f"fal {model_id} returned no images: {str(body)[:300]}")
     urls: list[str] = []
     for img in images:

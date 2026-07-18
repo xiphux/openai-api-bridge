@@ -56,15 +56,19 @@ models. The listing is fetched once and cached, and excludes deprecated models.
 
 fal's `text-to-video`, `image-to-video`, audio and 3D categories are
 deliberately **not** listed: the fal backend implements the image surface
-(generate + edit) only, so those models would fail every request with
-`unsupported_operation`. Widening `categories` alone won't make them work —
-video needs `generate_video` implemented against fal's queue lifecycle first.
+(generate + edit) only. Widening `categories` won't make them work — video
+needs `generate_video` implemented against fal's queue lifecycle first. Nothing
+stops a client naming such an endpoint by hand, though; fal will run the job
+and return a non-image envelope, which the bridge reports as
+`unsupported_operation` (HTTP 400) rather than a retryable upstream error.
 
 `[[providers.models]]` entries are per-model **overrides**, not a whitelist —
 they set `disable_safety`, `params`, `display_name`, or prompt metadata on a
-discovered model without restricting the rest. To serve a fixed set instead,
-set `discover_models = false` and list them; a model outside that list is then
-a 404.
+discovered model without restricting the rest. A configured model the catalogue
+doesn't return (a deprecated one, or an id outside the filtered categories) is
+still listed, since generation works for it either way. To serve a fixed set
+instead, set `discover_models = false` and list them; a model outside that list
+is then a 404.
 
 If the catalogue can't be fetched, the provider degrades to whatever is
 explicitly configured (rather than serving nothing) and retries after
@@ -75,7 +79,8 @@ and the token is resolved while the dispatcher is built, so the bridge refuses
 to start (`ConfigError: Provider 'fal': env var 'FAL_API_KEY' is not set`). A
 *wrong* key can't be caught that way without putting a network call in the
 startup path — which would let a fal outage block the bridge from booting — so
-it's handled on first use: fal's `401`/`403` is reported **once at ERROR**,
+it's handled on first use — on discovery, introspection, or generation,
+whichever touches fal first: fal's `401`/`403` is reported **once at ERROR**,
 naming the env var to fix, and is never retried, since a token read from the
 environment at startup cannot start working again. Discovery and introspection
 switch off for the process, and generation fails with
@@ -108,11 +113,12 @@ Two look-alike fields are deliberately ignored: `safety_checker_version`
 (`v1`/`v2`) selects *which* checker runs rather than how strict it is, and
 `has_nsfw_concepts` is an *output* field, not an input knob.
 
-Schemas are fetched once, lazily, on the first image request (one batched call
-covering every configured model) and cached for the process. The fetch happens
-under a lock, so a burst of concurrent generations — a multi-model fan-out from
-a UI, say — collapses into a single lookup that all of them wait for and
-benefit from, rather than one racing ahead un-loosened.
+Schemas are fetched lazily **per model** on first use and cached for the
+process, so you only pay for models you actually generate with — discovery
+surfaces hundreds. Each model has its own lock: a burst of concurrent
+generations for the *same* model collapses into a single lookup that all of
+them wait for and benefit from, while *different* models resolve concurrently
+rather than queueing behind one another.
 
 If fal's model API is unreachable the bridge logs a warning and falls back to a
 small built-in map, so generation never fails over an introspection blip. The

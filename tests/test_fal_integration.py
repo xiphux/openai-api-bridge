@@ -605,10 +605,8 @@ async def test_empty_but_successful_response_arms_the_cooldown(
     def responder(request: httpx.Request) -> httpx.Response:
         asked = request.url.params.get_list("endpoint_id")
         calls.append(asked)
-        # The client itself retries a missing id once (its truncation guard),
-        # so the whole first round — batch + straggler — must come back empty
-        # for the adapter to see a successful-but-useless lookup.
-        if len(calls) <= 2:
+        # Schemas resolve one model at a time, so a round is a single call.
+        if len(calls) <= 1:
             return httpx.Response(200, json={"models": []})
         return httpx.Response(200, json={"models": [{"endpoint_id": UNMAPPED, "openapi": spec}]})
 
@@ -625,22 +623,20 @@ async def test_empty_but_successful_response_arms_the_cooldown(
 
 
 @respx.mock
-async def test_partial_response_retries_only_the_missing_model(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When a response resolves some models but omits others, the resolved ones
-    are cached and only the stragglers are re-fetched after the cooldown."""
+async def test_models_resolve_independently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schemas are resolved per model: one model failing doesn't hold back
+    another, and a model that already resolved isn't re-fetched when its
+    neighbour retries."""
     monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
     spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
     other = "fal-ai/another-unmapped-model"
-    calls: list[list[str]] = []
+    asked: list[str] = []
 
     def responder(request: httpx.Request) -> httpx.Response:
-        asked = request.url.params.get_list("endpoint_id")
-        calls.append(asked)
-        # Round 1 is the batch plus the client's own straggler retry; `other`
-        # stays unanswered through both so the adapter sees a partial result.
-        served = [m for m in asked if m == UNMAPPED or len(calls) >= 3]
+        ids = request.url.params.get_list("endpoint_id")
+        asked.extend(ids)
+        # `other` stays unresolved on its first attempt, resolves on the retry.
+        served = [m for m in ids if m == UNMAPPED or asked.count(m) > 1]
         return httpx.Response(
             200, json={"models": [{"endpoint_id": m, "openapi": spec} for m in served]}
         )
@@ -649,16 +645,19 @@ async def test_partial_response_retries_only_the_missing_model(
 
     backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED, other])
     try:
-        resolved_model, missing_model = backend.cfg.models
-        # The model that did resolve is cached from the partial round...
+        resolved_model, retried_model = backend.cfg.models
         assert await backend._safety_params(resolved_model) == {"enable_safety_checker": False}
-        # ...and the straggler is retried rather than left on fallback forever.
-        assert await backend._safety_params(missing_model) == {"enable_safety_checker": False}
+        # Unresolved on the first attempt -> fallback for this request.
+        assert await backend._safety_params(retried_model) == {}
+        # Retried independently, and succeeds.
+        assert await backend._safety_params(retried_model) == {"enable_safety_checker": False}
+        # The one that already resolved is served from cache throughout.
+        assert await backend._safety_params(resolved_model) == {"enable_safety_checker": False}
     finally:
         await backend.aclose()
 
-    # That retry asked only for the model still missing, not the whole set.
-    assert calls[-1] == [other]
+    assert asked.count(UNMAPPED) == 1, "a cached model must not be re-fetched"
+    assert asked.count(other) == 2, "the failing model is retried on its own"
 
 
 @respx.mock
@@ -688,9 +687,9 @@ async def test_persistently_missing_model_is_throttled_by_the_cooldown(
     finally:
         await backend.aclose()
 
-    # One round only — the batch plus the client's own straggler retry — rather
-    # than a fresh lookup for each of the three requests.
-    assert route.call_count == 2
+    # One attempt only, rather than a fresh lookup for each of the three
+    # requests — the cooldown throttles it.
+    assert route.call_count == 1
 
 
 @respx.mock
@@ -929,3 +928,82 @@ async def test_transient_failure_still_retries(monkeypatch: pytest.MonkeyPatch) 
         await backend.aclose()
     # Each call re-attempts (batch + the client's own straggler retry per round).
     assert route.call_count > 1
+
+
+@respx.mock
+def test_configured_model_absent_from_catalog_is_still_listed(
+    discovering_client: TestClient,
+) -> None:
+    """A [[providers.models]] entry the catalogue doesn't return must survive
+    in /v1/models. fal's ids don't always match what operators configured, and
+    generation still works for it — so dropping it would leave the listing and
+    generation surfaces disagreeing."""
+    # NANO is configured but deliberately absent from the stubbed catalogue.
+    _stub_catalog({"text-to-image": [_catalog_page([(GPT_IMAGE, "GPT Image 2")])]})
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    assert f"fal/{GPT_IMAGE}" in by_id
+    assert f"fal/{NANO}" in by_id, "configured model vanished from the listing"
+    assert by_id[f"fal/{NANO}"]["display_name"] == "Nano (renamed locally)"
+
+
+@respx.mock
+async def test_unknown_slugs_do_not_grow_state_without_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With discovery on, any slug is accepted, so per-model bookkeeping is
+    keyed by unvalidated client input. It must stay bounded."""
+    from openai_api_bridge.backends.fal.adapter import _MAX_TRACKED_MODELS
+
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = respx.get(MODELS_API).mock(
+        return_value=httpx.Response(200, json={"models": [], "has_more": False})
+    )
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[])
+    try:
+        for i in range(_MAX_TRACKED_MODELS + 50):
+            await backend._safety_params(FalModelConfig(id=f"fal-ai/bogus-{i}"))
+        assert len(backend._schema_locks) <= _MAX_TRACKED_MODELS
+        assert len(backend._introspect_failed_at) <= _MAX_TRACKED_MODELS
+    finally:
+        await backend.aclose()
+
+    # One upstream call per distinct slug — the redundant single-id straggler
+    # re-ask (byte-identical to the call that just failed) is gone.
+    assert route.call_count == _MAX_TRACKED_MODELS + 50
+
+
+@respx.mock
+def test_non_image_output_is_a_terminal_client_error(
+    discovering_client: TestClient,
+) -> None:
+    """Pointing the image endpoint at a video model gives a 4xx, not a
+    retryable 5xx: fal really runs the job and returns a video envelope."""
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    respx.post(f"{FAL}/fal-ai/some-video-model").mock(
+        return_value=httpx.Response(200, json={"video": {"url": "https://v3.fal.media/v.mp4"}})
+    )
+    r = _generate(discovering_client, "fal-ai/some-video-model")
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "unsupported_operation"
+
+
+@respx.mock
+def test_rejected_key_on_generation_is_reported(
+    discovering_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 'reported once at ERROR' promise must hold even when nothing touches
+    fal before the generation call (introspection disabled, or a model with
+    disable_safety = false)."""
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(401, json={"error": "Invalid API key"})
+    )
+    with caplog.at_level("ERROR"):
+        r = _generate(discovering_client, SEEDREAM_T2I)
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "upstream_auth_error"
+    errors = [rec for rec in caplog.records if rec.levelname == "ERROR"]
+    assert errors and "TEST_FAL_TOKEN" in errors[0].getMessage()

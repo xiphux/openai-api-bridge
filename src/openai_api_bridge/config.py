@@ -151,13 +151,13 @@ class OpenRouterProviderConfig(BaseModel):
 class FalModelConfig(BaseModel):
     """One fal.ai model exposed by a ``fal`` provider.
 
-    The models a ``fal`` provider serves are declared explicitly here. fal does
-    publish a model search API, but it catalogues every model on the platform
-    (~600 image models) rather than a per-account selection like ImageRouter's,
-    so listing them all would be useless as a ``/v1/models`` response; the
-    bridge reads that API for schemas only. ``id`` is the fal model path, used
-    both as the ``/v1/models`` slug and as the URL path against ``fal.run``
-    (e.g. ``fal-ai/bytedance/seedream/v4/text-to-image``).
+    Per-model settings for a model served by a ``fal`` provider. These are
+    *overrides*: with ``discover_models`` on (the default) the served set comes
+    from fal's model API, and an entry here only adjusts its match — it doesn't
+    restrict what else is listed. With discovery off, these entries are the
+    authoritative list. ``id`` is the fal model path, used both as the
+    ``/v1/models`` slug and as the URL path against ``fal.run`` (e.g.
+    ``fal-ai/bytedance/seedream/v4/text-to-image``).
     """
 
     id: str

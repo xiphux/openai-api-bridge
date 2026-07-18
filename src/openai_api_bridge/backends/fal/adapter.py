@@ -14,11 +14,12 @@ true`` (the default). It degrades to a small static map per model — when
 introspection is off, the lookup failed, or that model was absent from an
 otherwise successful response.
 
-``list_models`` reflects the models declared in the provider's TOML block rather
-than a live listing. That's a deliberate choice, not a missing capability: fal
-*does* publish a platform-wide model search API (which is what we read schemas
-from), but it catalogues every model on the platform rather than a per-account
-selection, so the set this provider serves is declared explicitly.
+``list_models`` is discovered from fal's model API, filtered to
+``SUPPORTED_CATEGORIES`` — the modalities this backend actually implements —
+and to active models. ``discover_models = false`` opts out and serves only the
+configured models. Either way ``[[providers.models]]`` entries are per-model
+*overrides* rather than a whitelist, and a configured model the catalogue
+didn't return is still listed, since generation works for it regardless.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ import asyncio
 import base64
 import logging
 import time
+from collections import OrderedDict
 from typing import Any
 
 from ...config import FalModelConfig, FalProviderConfig
@@ -45,6 +47,22 @@ log = logging.getLogger(__name__)
 # means implementing generate_video for fal first (its queue lifecycle), not
 # just widening the filter.
 SUPPORTED_CATEGORIES: tuple[str, ...] = ("text-to-image", "image-to-image")
+
+# With discovery on, any slug a client sends is accepted (fal rejects unknown
+# ids itself), so per-model bookkeeping is keyed by unvalidated input. Bound it
+# so a client generating slugs — a uuid appended per request, say — can't grow
+# these maps without limit. Well past the ~574 real models, and eviction is
+# harmless: a dropped lock only risks a duplicate fetch, which the cache
+# already tolerates, and a dropped cooldown only allows one earlier retry.
+_MAX_TRACKED_MODELS = 1024
+
+
+def _remember[T](mapping: OrderedDict[str, T], key: str, value: T) -> None:
+    """Insert into an LRU-bounded map, evicting the oldest entries past the cap."""
+    mapping[key] = value
+    mapping.move_to_end(key)
+    while len(mapping) > _MAX_TRACKED_MODELS:
+        mapping.popitem(last=False)
 
 
 def _apply_size(body: dict[str, Any], model_slug: str, size: str | None) -> None:
@@ -92,12 +110,12 @@ class FalBackend(Backend):
         # One lock per model, so a fan-out across different models resolves
         # concurrently while duplicate requests for the *same* model still
         # collapse into a single lookup.
-        self._schema_locks: dict[str, asyncio.Lock] = {}
+        self._schema_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._locks_guard = asyncio.Lock()
         # Monotonic timestamp of each model's last failed lookup. Drives the
         # retry cooldown so an outage degrades temporarily rather than for the
         # life of the process.
-        self._introspect_failed_at: dict[str, float] = {}
+        self._introspect_failed_at: OrderedDict[str, float] = OrderedDict()
         # Discovered catalog, with its own cooldown on failure.
         self._catalog_cache: list[ModelEntry] | None = None
         self._catalog_lock = asyncio.Lock()
@@ -188,6 +206,16 @@ class FalBackend(Backend):
                     self.cfg.introspect_retry_seconds,
                 )
                 return self._configured_entries()
+            # Union, not projection: an explicitly configured model the
+            # catalogue didn't return must still be listed. fal's ids don't
+            # always match what operators have configured (the gpt-image-2
+            # endpoint is ``openai/gpt-image-2``, not ``fal-ai/gpt-image-2``),
+            # and a model outside the filtered categories or marked deprecated
+            # is absent too — yet `_model_config` still resolves it and
+            # generation still works, so dropping it here would leave the
+            # listing and generation surfaces disagreeing.
+            listed = {e.id for e in entries}
+            entries += [e for e in self._configured_entries() if e.id not in listed]
             self._catalog_failed_at = None
             self._catalog_cache = entries
             return entries
@@ -250,7 +278,7 @@ class FalBackend(Backend):
     def _arm_introspect_retry(self, model_id: str, reason: str) -> None:
         """Record a lookup as unsuccessful so the cooldown — and therefore a
         later retry — engages for this model."""
-        self._introspect_failed_at[model_id] = time.monotonic()
+        _remember(self._introspect_failed_at, model_id, time.monotonic())
         log.warning(
             "fal: %s for %r; using built-in moderation defaults, retrying in %.0fs",
             reason,
@@ -262,7 +290,8 @@ class FalBackend(Backend):
         async with self._locks_guard:
             lock = self._schema_locks.get(model_id)
             if lock is None:
-                lock = self._schema_locks[model_id] = asyncio.Lock()
+                lock = asyncio.Lock()
+            _remember(self._schema_locks, model_id, lock)
             return lock
 
     async def _derived_safety_params(self, model_id: str) -> dict[str, Any] | None:
@@ -326,6 +355,21 @@ class FalBackend(Backend):
             body.update(mcfg.params)
         return body
 
+    async def _run_image(self, model_slug: str, body: dict[str, Any]) -> list[str]:
+        """Run a generation, reporting a rejected key on the way past.
+
+        Generation is the one path that can reach fal without introspection
+        having run first (``introspect_safety = false``, ``discover_models =
+        false``, or a model with ``disable_safety = false``), so without this
+        the "reported once at ERROR" guarantee wouldn't hold for those configs.
+        ``_note_auth_failure`` is idempotent, so "once" survives.
+        """
+        try:
+            return await self.client.run_image(model_slug, body)
+        except UpstreamAuthError as e:
+            self._note_auth_failure(e)
+            raise
+
     async def _fetch_all(self, urls: list[str]) -> list[GeneratedAsset]:
         # fal returns every image from a single call, so the URLs are all in
         # hand at once — fetch them concurrently rather than serially. Order is
@@ -349,7 +393,7 @@ class FalBackend(Backend):
         # fal honours ``num_images`` server-side, so a single call yields n
         # images — no per-image request loop (unlike ImageRouter).
         body = await self._build_body(mcfg, prompt=prompt, size=size, n=n)
-        urls = await self.client.run_image(model_slug, body)
+        urls = await self._run_image(model_slug, body)
         return await self._fetch_all(urls)
 
     async def edit_image(
@@ -368,5 +412,5 @@ class FalBackend(Backend):
         # one lets the upstream decide, matching the ABC's no-silent-drop rule.
         body = await self._build_body(mcfg, prompt=prompt, size=size, n=n)
         body["image_urls"] = [_data_uri(img) for img in images]
-        urls = await self.client.run_image(model_slug, body)
+        urls = await self._run_image(model_slug, body)
         return await self._fetch_all(urls)
