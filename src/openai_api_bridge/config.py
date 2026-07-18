@@ -212,9 +212,9 @@ class FalProviderConfig(BaseModel):
     # a model id outside that list is a 404.
     discover_models: bool = True
     # fal categories to surface. None uses the backend's own set — the ones it
-    # can actually serve (text-to-image, image-to-image). fal also publishes
-    # video/audio/3d categories; listing those here would advertise models the
-    # fal backend has no code path for.
+    # can actually serve: text-to-image, image-to-image, text-to-video and
+    # image-to-video. fal also publishes audio/3d categories; listing those
+    # here would advertise models the fal backend has no code path for.
     categories: list[str] | None = None
     # fal's model API, used both to list models and to introspect each model's
     # OpenAPI input schema so the moderation knob can be derived, not hardcoded.

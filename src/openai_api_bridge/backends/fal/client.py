@@ -51,8 +51,8 @@ def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
 
 
 @dataclass(frozen=True, slots=True)
-class _QueuedRequest:
-    """Handles for an in-flight fal queue job."""
+class QueuedRequest:
+    """Handles for an in-flight fal queue job (submit -> status -> result)."""
 
     request_id: str
     status_url: str
@@ -107,7 +107,7 @@ class FalClient:
 
     # --- queued inference (video) ----------------------------------------
 
-    async def submit_queued(self, model_id: str, body: dict[str, Any]) -> _QueuedRequest:
+    async def submit_queued(self, model_id: str, body: dict[str, Any]) -> QueuedRequest:
         """Submit a job to fal's queue and return its handles.
 
         Video runs for minutes, well past what the synchronous ``fal.run``
@@ -134,7 +134,7 @@ class FalClient:
             )
         status_url = body_json.get("status_url")
         response_url = body_json.get("response_url")
-        return _QueuedRequest(
+        return QueuedRequest(
             request_id=request_id,
             status_url=status_url
             if isinstance(status_url, str) and status_url
@@ -144,7 +144,7 @@ class FalClient:
             else f"{url}/requests/{request_id}",
         )
 
-    async def poll_queued(self, job: _QueuedRequest, *, model_id: str) -> str:
+    async def poll_queued(self, job: QueuedRequest, *, model_id: str) -> str:
         """Current queue status: ``IN_QUEUE``, ``IN_PROGRESS`` or ``COMPLETED``."""
         try:
             resp = await self._client.get(job.status_url, timeout=60.0)
@@ -159,7 +159,7 @@ class FalClient:
             raise UpstreamError(f"fal {model_id} status had no status field: {str(body)[:200]}")
         return status
 
-    async def fetch_queued_result(self, job: _QueuedRequest, *, model_id: str) -> dict[str, Any]:
+    async def fetch_queued_result(self, job: QueuedRequest, *, model_id: str) -> dict[str, Any]:
         try:
             resp = await self._client.get(job.response_url, timeout=120.0)
             resp.raise_for_status()

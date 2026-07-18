@@ -161,6 +161,14 @@ content. A reference image for image-to-video is forwarded as `image_url`.
 `video_poll_interval_seconds` (default 3) and `video_poll_timeout_seconds`
 (default 1800).
 
+Because a long job issues hundreds of status polls, no single one is fatal: a
+bounded run of consecutive transient failures is treated as "not ready yet"
+(as the ComfyUI poller does), with the deadline bounding the loop. The result
+fetch — which happens *after* fal has rendered and billed for the clip — is
+retried with backoff, so one hiccup can't discard a finished video. A rejected
+key stays fatal throughout, and is reported wherever in the sequence it
+surfaces.
+
 Moderation works exactly as it does for images — the same schema introspection
 finds `safety_tolerance` on `fal-ai/veo3` and `enable_safety_checker` on `wan`.
 

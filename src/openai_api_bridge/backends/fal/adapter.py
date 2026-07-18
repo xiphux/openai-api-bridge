@@ -33,10 +33,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import FalModelConfig, FalProviderConfig
-from ...errors import GenerationTimeout, ModelNotFound, UpstreamAuthError
+from ...errors import GenerationTimeout, ModelNotFound, UpstreamAuthError, UpstreamError
 from ...util.sizes import parse_size
 from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
-from .client import FalClient, extract_video_url
+from .client import FalClient, QueuedRequest, extract_video_url
 from .safety import fallback_safety_params, safety_params_from_schema
 from .schema import duration_params, duration_property
 
@@ -60,6 +60,14 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = tuple(CATEGORY_KINDS)
 # harmless: a dropped lock only risks a duplicate fetch, which the cache
 # already tolerates, and a dropped cooldown only allows one earlier retry.
 _MAX_TRACKED_MODELS = 1024
+
+# A long video job issues hundreds of status polls; any one of them can blip
+# without the render being in trouble. Tolerate a short run of consecutive
+# failures rather than discarding a clip fal is still working on (and billing
+# for), and retry the one-shot result fetch, which happens after the render is
+# already paid for.
+_MAX_CONSECUTIVE_POLL_ERRORS = 5
+_RESULT_FETCH_ATTEMPTS = 3
 
 
 def _remember[T](mapping: OrderedDict[str, T], key: str, value: T) -> None:
@@ -119,8 +127,9 @@ class FalBackend(Backend):
             models_api_url=cfg.models_api_url,
             queue_base_url=cfg.queue_base_url,
         )
-        # Schema-derived safety params, resolved per model on first use and
-        # cached for the process. Per-model rather than one batch over the whole
+        # Schema-derived request settings (moderation, plus the shape of the
+        # model's duration field), resolved per model on first use and cached
+        # for the process. Per-model rather than one batch over the whole
         # catalog: discovery surfaces hundreds of models and we only pay for the
         # ones actually generated with. Lazy rather than at startup so the
         # lifespan graph keeps no network dependency and a fal outage can't
@@ -429,17 +438,50 @@ class FalBackend(Backend):
         if mcfg.params:
             body.update(mcfg.params)
 
+        # One handler for the whole submit -> poll -> fetch sequence, so a key
+        # revoked mid-job is reported like one rejected at submit.
         try:
-            job = await self.client.submit_queued(model_slug, body)
+            return await self._run_video_job(model_slug, body, on_upstream_id)
         except UpstreamAuthError as e:
             self._note_auth_failure(e)
             raise
+
+    async def _run_video_job(
+        self,
+        model_slug: str,
+        body: dict[str, Any],
+        on_upstream_id: UpstreamIdCallback | None,
+    ) -> GeneratedAsset:
+        job = await self.client.submit_queued(model_slug, body)
         if on_upstream_id is not None:
             await on_upstream_id(job.request_id)
 
         deadline = time.monotonic() + self.cfg.video_poll_timeout_seconds
+        consecutive_errors = 0
         while True:
-            status = await self.client.poll_queued(job, model_id=model_slug)
+            try:
+                status = await self.client.poll_queued(job, model_id=model_slug)
+                consecutive_errors = 0
+            except UpstreamAuthError:
+                raise  # a rejected key is permanent; no point polling on
+            except UpstreamError as e:
+                # A single blip must not discard a clip fal is still rendering
+                # (and billing for). Treat a bounded run of transient failures
+                # as "not ready yet", as the ComfyUI poller does, and let the
+                # deadline bound the loop.
+                consecutive_errors += 1
+                if consecutive_errors > _MAX_CONSECUTIVE_POLL_ERRORS:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise
+                log.warning(
+                    "fal: status poll for job %s (%s) failed, %d in a row: %s",
+                    job.request_id,
+                    model_slug,
+                    consecutive_errors,
+                    e,
+                )
+                status = "IN_PROGRESS"
             if status == "COMPLETED":
                 break
             if time.monotonic() >= deadline:
@@ -450,10 +492,40 @@ class FalBackend(Backend):
                 )
             await asyncio.sleep(self.cfg.video_poll_interval_seconds)
 
-        result = await self.client.fetch_queued_result(job, model_id=model_slug)
+        result = await self._fetch_video_result(job, model_slug)
         url = extract_video_url(result, model_slug)
         data, content_type = await self.client.fetch_asset(url)
         return GeneratedAsset(data=data, content_type=content_type, kind="video")
+
+    async def _fetch_video_result(self, job: QueuedRequest, model_slug: str) -> dict[str, Any]:
+        """Collect a finished job's payload, retrying transient failures.
+
+        This runs exactly once per job, *after* fal reports COMPLETED — the
+        render is done and paid for, so letting one hiccup discard it would be
+        the most expensive possible failure in the whole path.
+        """
+        delay = 1.0
+        for attempt in range(1, _RESULT_FETCH_ATTEMPTS + 1):
+            try:
+                return await self.client.fetch_queued_result(job, model_id=model_slug)
+            except UpstreamAuthError:
+                raise
+            except UpstreamError as e:
+                if attempt == _RESULT_FETCH_ATTEMPTS:
+                    raise
+                log.warning(
+                    "fal: fetching result for completed job %s (%s) failed "
+                    "(attempt %d/%d), retrying in %.0fs: %s",
+                    job.request_id,
+                    model_slug,
+                    attempt,
+                    _RESULT_FETCH_ATTEMPTS,
+                    delay,
+                    e,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def _run_image(self, model_slug: str, body: dict[str, Any]) -> list[str]:
         """Run a generation, reporting a rejected key on the way past.

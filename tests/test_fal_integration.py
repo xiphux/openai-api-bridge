@@ -1228,3 +1228,146 @@ def test_video_models_are_listed_with_video_kind(discovering_client: TestClient)
     r = discovering_client.get("/v1/models", headers=HEADERS)
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id[f"fal/{VIDEO_MODEL}"]["kind"] == "video"
+
+
+# --- video resilience ------------------------------------------------------
+#
+# A 30-minute clip issues hundreds of status polls, any one of which can blip
+# without the render being in trouble — and the result fetch happens after fal
+# has already rendered (and billed for) the video. Neither may be a single
+# point of failure.
+
+
+def _stub_video_job_with(
+    status_responder: object, result_responder: object, model_id: str = VIDEO_MODEL
+) -> respx.Route:
+    req = "req-flaky"
+    submit = respx.post(f"{QUEUE}/{model_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "request_id": req,
+                "status_url": f"{QUEUE}/{model_id}/requests/{req}/status",
+                "response_url": f"{QUEUE}/{model_id}/requests/{req}",
+            },
+        )
+    )
+    respx.get(f"{QUEUE}/{model_id}/requests/{req}/status").mock(side_effect=status_responder)
+    respx.get(f"{QUEUE}/{model_id}/requests/{req}").mock(side_effect=result_responder)
+    respx.get("https://v3.fal.media/out.mp4").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64,
+            headers={"content-type": "video/mp4"},
+        )
+    )
+    return submit
+
+
+_OK_RESULT = {"video": {"url": "https://v3.fal.media/out.mp4"}}
+
+
+@respx.mock
+def test_transient_poll_failures_do_not_kill_the_job(discovering_client: TestClient) -> None:
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    polls = {"n": 0}
+
+    def status(request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        # A 503 then a 429 mid-flight; the render is fine.
+        if polls["n"] in (2, 3):
+            return httpx.Response(503, json={"error": "blip"})
+        if polls["n"] < 5:
+            return httpx.Response(200, json={"status": "IN_PROGRESS"})
+        return httpx.Response(200, json={"status": "COMPLETED"})
+
+    _stub_video_job_with(status, lambda request: httpx.Response(200, json=_OK_RESULT))
+
+    r = discovering_client.post(
+        "/v1/videos", headers=HEADERS, data={"model": f"fal/{VIDEO_MODEL}", "prompt": "x"}
+    )
+    assert r.status_code == 200, r.text
+    state = _await_video(discovering_client, r.json()["id"])
+    assert state["status"] == "completed"
+
+
+@respx.mock
+def test_sustained_poll_failures_do_eventually_fail(discovering_client: TestClient) -> None:
+    """Tolerance is bounded — a genuinely broken job must not poll forever."""
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    _stub_video_job_with(
+        lambda request: httpx.Response(503, json={"error": "down"}),
+        lambda request: httpx.Response(200, json=_OK_RESULT),
+    )
+
+    r = discovering_client.post(
+        "/v1/videos", headers=HEADERS, data={"model": f"fal/{VIDEO_MODEL}", "prompt": "x"}
+    )
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        state = discovering_client.get(f"/v1/videos/{job_id}", headers=HEADERS).json()
+        if state["status"] == "failed":
+            return
+        time.sleep(0.05)
+    pytest.fail("a permanently failing poll should surface as a failed job")
+
+
+@respx.mock
+def test_result_fetch_is_retried_after_the_render_is_paid_for(
+    discovering_client: TestClient,
+) -> None:
+    """fal already rendered and billed for the clip — one hiccup collecting it
+    must not throw the result away."""
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    fetches = {"n": 0}
+
+    def result(request: httpx.Request) -> httpx.Response:
+        fetches["n"] += 1
+        if fetches["n"] == 1:
+            return httpx.Response(502, json={"error": "blip"})
+        return httpx.Response(200, json=_OK_RESULT)
+
+    _stub_video_job_with(lambda request: httpx.Response(200, json={"status": "COMPLETED"}), result)
+
+    r = discovering_client.post(
+        "/v1/videos", headers=HEADERS, data={"model": f"fal/{VIDEO_MODEL}", "prompt": "x"}
+    )
+    assert r.status_code == 200, r.text
+    state = _await_video(discovering_client, r.json()["id"])
+    assert state["status"] == "completed"
+    assert fetches["n"] == 2, "the result fetch should have been retried once"
+
+
+@respx.mock
+def test_key_revoked_mid_poll_is_reported(
+    discovering_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The 'reported once at ERROR' guarantee must cover the whole submit ->
+    poll -> fetch sequence, not just submit."""
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    _stub_video_job_with(
+        lambda request: httpx.Response(401, json={"error": "Invalid API key"}),
+        lambda request: httpx.Response(200, json=_OK_RESULT),
+    )
+
+    with caplog.at_level("ERROR"):
+        r = discovering_client.post(
+            "/v1/videos", headers=HEADERS, data={"model": f"fal/{VIDEO_MODEL}", "prompt": "x"}
+        )
+        assert r.status_code == 200, r.text
+        job_id = r.json()["id"]
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if (
+                discovering_client.get(f"/v1/videos/{job_id}", headers=HEADERS).json()["status"]
+                == "failed"
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("a rejected key should fail the job")
+
+    errors = [rec for rec in caplog.records if rec.levelname == "ERROR"]
+    assert errors and any("TEST_FAL_TOKEN" in rec.getMessage() for rec in errors)
