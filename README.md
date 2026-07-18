@@ -342,6 +342,10 @@ entry so clients can build a useful picker without per-model hardcoding
 Standard OpenAI clients ignore the extra fields; nothing nonstandard is
 *required* to use the bridge.
 
+`capabilities` has a fuller, client-facing spec in
+[docs/model-capabilities.md](docs/model-capabilities.md) — the value grammar,
+ordering guarantees, and how a frontend should turn it into image-attachment UI.
+
 ## Configuration
 
 Two layers, by concern:
