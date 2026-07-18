@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 import httpx
 
@@ -12,6 +13,21 @@ from ..errors import UpstreamError
 log = logging.getLogger(__name__)
 
 _DEFAULT_FETCH_TIMEOUT_S = 120.0
+
+
+def parse_json(resp: httpx.Response, what: str) -> Any:
+    """Decode a JSON response body, reporting a non-JSON one as an upstream fault.
+
+    ``httpx``'s ``.json()`` raises ``ValueError``, which is not a
+    ``BridgeError`` — so an upstream answering 200 with HTML (a captive portal,
+    a CDN error page, a WAF interstitial) would escape the per-provider
+    handlers as an unhandled exception, surfacing as a 500 and a full
+    ``log.exception`` traceback rather than a 502 naming the provider.
+    """
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise UpstreamError(f"{what} returned a non-JSON body ({e}): {resp.text[:200]}") from e
 
 
 async def fetch_asset_with_retry(

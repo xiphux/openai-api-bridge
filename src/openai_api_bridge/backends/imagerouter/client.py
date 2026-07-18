@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from ...errors import UpstreamError
-from ...util.http import fetch_asset_with_retry
+from ...util.http import fetch_asset_with_retry, parse_json
 from ..base import InputImage
 
 log = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class ImageRouterClient:
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /v2/models failed: {e}") from e
-        body = resp.json()
+        body = parse_json(resp, "ImageRouter /v2/models")
         if not isinstance(body, list):
             raise UpstreamError(
                 f"ImageRouter /v2/models returned non-array body: {str(body)[:200]}"
@@ -114,7 +114,9 @@ class ImageRouterClient:
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /images/generations failed: {e}") from e
-        return _extract_first_url(resp.json(), "/images/generations")
+        return _extract_first_url(
+            parse_json(resp, "ImageRouter /images/generations"), "/images/generations"
+        )
 
     # --- image editing ---------------------------------------------------
 
@@ -161,7 +163,7 @@ class ImageRouterClient:
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /images/edits failed: {e}") from e
-        return _extract_first_url(resp.json(), "/images/edits")
+        return _extract_first_url(parse_json(resp, "ImageRouter /images/edits"), "/images/edits")
 
     # --- video generation ------------------------------------------------
 
@@ -220,7 +222,9 @@ class ImageRouterClient:
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /videos/generations failed: {e}") from e
-        return _extract_first_url(resp.json(), "/videos/generations")
+        return _extract_first_url(
+            parse_json(resp, "ImageRouter /videos/generations"), "/videos/generations"
+        )
 
     # --- asset fetch -----------------------------------------------------
 

@@ -383,22 +383,38 @@ async def test_catalog_caching_can_be_disabled(monkeypatch: pytest.MonkeyPatch) 
 
 
 @respx.mock
-async def test_degraded_listing_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Caching a listing whose inpaint half failed would pin routing unresolved
-    for the whole TTL, outliving the shorter route-retry cooldown that's meant
-    to decide when we try again."""
+async def test_degraded_listing_is_cached_only_briefly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing whose inpaint half failed is still served — dropping the
+    provider over its narrower query would be worse — but it's incomplete, so
+    it's cached only for the failure window. Not caching it at all would let a
+    burst during an inpaint hang queue behind the lock, each waiter starting
+    its own fetch; caching it for the full TTL would pin routing unresolved."""
     monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
     calls: dict[str, int] = {}
     _counting_catalog(calls, inpaint_ok=False)
 
-    backend = _venice_backend(catalog_ttl_seconds=300.0)
+    backend = _venice_backend(catalog_ttl_seconds=300.0, catalog_retry_seconds=0.05)
     try:
+        entries = await backend.list_models()
+        assert [e.id for e in entries] == ["gpt-image-2"]
+        assert calls["n"] == 2
+
+        # Repeats inside the window are served from cache, not re-fetched.
+        for _ in range(3):
+            await backend.list_models()
+        assert calls["n"] == 2, f"degraded listing re-fetched per call: {calls['n']}"
+
+        # Routing stays unresolved — the half it depends on never arrived.
+        assert backend._routes_loaded is False
+
+        # And the missing half is re-attempted once the short window lapses.
+        await asyncio.sleep(0.1)
         await backend.list_models()
-        assert backend._catalog.fresh() is None, "a degraded listing must not be cached"
-        await backend.list_models()
+        assert calls["n"] == 4
     finally:
         await backend.aclose()
-    assert calls["n"] == 4, "a degraded listing should be re-attempted, not served from cache"
 
 
 @respx.mock

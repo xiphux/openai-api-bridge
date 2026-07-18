@@ -66,26 +66,29 @@ class VeniceBackend(Backend):
         self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
             cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
         )
+        # Whether the last fetch got both halves; picks the TTL the result is
+        # cached under.
+        self._last_listing_complete = False
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
-        async with self._catalog.lock:
-            cached = self._catalog.fresh()
-            if cached is not None:
-                return cached
-            # The fetch happens under the lock, so a failure has to be
-            # remembered or a burst during an upstream hang would queue up,
-            # each waiter starting its own fetch after the last one gave up.
-            recent = self._catalog.pending_failure()
-            if recent is not None:
-                raise recent
-            try:
-                return await self._fetch_catalog()
-            except Exception as e:
-                self._catalog.note_failure(e)
-                raise
+        # A listing whose inpaint half failed is still worth serving — dropping
+        # the provider over its narrower query is what an earlier review
+        # rejected — but it is *incomplete*, so it's cached only for the
+        # failure window rather than the full TTL. Without caching it at all,
+        # a burst during an inpaint hang would queue up behind the lock and
+        # each waiter would start its own fetch: the exact storm the failure
+        # cooldown exists to damp, reached without ever raising.
+        return await self._catalog.get(
+            self._fetch_catalog,
+            ttl_for=lambda _entries: (
+                self.cfg.catalog_ttl_seconds
+                if self._last_listing_complete
+                else self.cfg.catalog_retry_seconds
+            ),
+        )
 
     async def _fetch_catalog(self) -> list[ModelEntry]:
         # Two independent listings, fetched together — neither feeds the other,
@@ -161,8 +164,7 @@ class VeniceBackend(Backend):
             for model_id in edit_ids
             if model_id not in collapsed
         ]
-        if edit_available:
-            self._catalog.store(entries)
+        self._last_listing_complete = edit_available
         return entries
 
     def _in_route_cooldown(self) -> bool:

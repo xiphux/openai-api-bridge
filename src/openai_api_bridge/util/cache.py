@@ -41,6 +41,7 @@ class AsyncTTLCache[T]:
         self.lock = asyncio.Lock()
         self._value: T | None = None
         self._stored_at: float | None = None
+        self._stored_ttl: float = ttl_seconds
         self._failure: BaseException | None = None
         self._failed_at: float | None = None
 
@@ -52,15 +53,21 @@ class AsyncTTLCache[T]:
         """
         if self._value is None or self._stored_at is None:
             return None
-        if self.ttl_seconds <= 0:
+        if self._stored_ttl <= 0:
             return None
-        if time.monotonic() - self._stored_at >= self.ttl_seconds:
+        if time.monotonic() - self._stored_at >= self._stored_ttl:
             return None
         return self._value
 
-    def store(self, value: T) -> None:
+    def store(self, value: T, *, ttl_seconds: float | None = None) -> None:
+        """Cache a value, optionally for less than the configured TTL.
+
+        A shorter TTL is for a result that's usable but incomplete — worth
+        serving, but worth re-attempting sooner than a healthy one.
+        """
         self._value = value
         self._stored_at = time.monotonic()
+        self._stored_ttl = self.ttl_seconds if ttl_seconds is None else ttl_seconds
         self._failure = None
         self._failed_at = None
 
@@ -85,19 +92,35 @@ class AsyncTTLCache[T]:
         self._failure = None
         self._failed_at = None
 
-    async def get(self, fetch: Callable[[], Awaitable[T]]) -> T:
-        """Return the cached value, fetching it under the lock if stale."""
+    async def get(
+        self,
+        fetch: Callable[[], Awaitable[T]],
+        *,
+        ttl_for: Callable[[T], float] | None = None,
+    ) -> T:
+        """Return the cached value, fetching it under the lock if stale.
+
+        ``ttl_for`` lets a caller pick the TTL from the fetched value — used to
+        cache an incomplete result briefly rather than for the full window.
+        """
         async with self.lock:
             cached = self.fresh()
             if cached is not None:
                 return cached
             recent = self.pending_failure()
             if recent is not None:
-                raise recent
+                # Clear the accumulated traceback first: this is one shared
+                # object re-raised for every caller in the window, and Python
+                # appends a frame each time without resetting. Left alone the
+                # chain grows unboundedly within a window, pinning each
+                # request's locals — cheap while the error is only logged by
+                # message, ruinous the moment something calls log.exception on
+                # it.
+                raise recent.with_traceback(None)
             try:
                 value = await fetch()
             except Exception as e:
                 self.note_failure(e)
                 raise
-            self.store(value)
+            self.store(value, ttl_seconds=ttl_for(value) if ttl_for else None)
             return value

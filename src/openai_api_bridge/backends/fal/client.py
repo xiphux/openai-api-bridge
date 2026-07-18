@@ -27,7 +27,7 @@ from typing import Any
 import httpx
 
 from ...errors import UnsupportedOperation, UpstreamAuthError, UpstreamError
-from ...util.http import fetch_asset_with_retry
+from ...util.http import fetch_asset_with_retry, parse_json
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class FalClient:
             raise _status_error(e, model_id) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
-        return _extract_image_urls(resp.json(), model_id)
+        return _extract_image_urls(parse_json(resp, f"fal {model_id}"), model_id)
 
     # --- queued inference (video) ----------------------------------------
 
@@ -137,7 +137,7 @@ class FalClient:
             raise _status_error(e, model_id) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} queue submit failed: {e}") from e
-        body_json = resp.json()
+        body_json = parse_json(resp, f"fal {model_id} queue submit")
         if not isinstance(body_json, dict):
             raise UpstreamError(f"fal {model_id} queue submit returned non-dict body")
         request_id = body_json.get("request_id")
@@ -166,7 +166,7 @@ class FalClient:
             raise _status_error(e, f"{model_id} status") from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} status poll failed: {e}") from e
-        body = resp.json()
+        body = parse_json(resp, f"fal {model_id} status")
         status = body.get("status") if isinstance(body, dict) else None
         if not isinstance(status, str):
             raise UpstreamError(f"fal {model_id} status had no status field: {str(body)[:200]}")
@@ -180,7 +180,7 @@ class FalClient:
             raise _status_error(e, f"{model_id} result") from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} result fetch failed: {e}") from e
-        body = resp.json()
+        body = parse_json(resp, f"fal {model_id} result")
         if not isinstance(body, dict):
             raise UpstreamError(f"fal {model_id} result was not an object: {str(body)[:200]}")
         return body
@@ -218,7 +218,7 @@ class FalClient:
                     raise _status_error(e, f"listing {category}") from e
                 except httpx.HTTPError as e:
                     raise UpstreamError(f"fal model API listing {category} failed: {e}") from e
-                body = resp.json()
+                body = parse_json(resp, f"fal listing {category}")
                 if not isinstance(body, dict):
                     raise UpstreamError(f"fal model API returned non-dict body: {str(body)[:200]}")
                 for entry in body.get("models") or []:
@@ -275,7 +275,7 @@ class FalClient:
             raise _status_error(e, "the model API") from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal model API request failed: {e}") from e
-        body = resp.json()
+        body = parse_json(resp, "fal the model API")
         if not isinstance(body, dict):
             raise UpstreamError(f"fal model API returned non-dict body: {str(body)[:200]}")
         out: dict[str, dict[str, Any]] = {}

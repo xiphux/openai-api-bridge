@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from ...errors import UpstreamError
+from ...util.http import parse_json
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class VeniceClient:
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /models failed: {e}") from e
-        body = response.json()
+        body = parse_json(response, "Venice /models")
         return list(body.get("data", []))
 
     async def generate_image(
@@ -96,7 +97,7 @@ class VeniceClient:
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /image/generate failed: {e}") from e
 
-        body = response.json()
+        body = parse_json(response, "Venice /image/generate")
         images = body.get("images") or []
         if not images:
             raise UpstreamError(f"Venice response contained no images: {str(body)[:200]}")

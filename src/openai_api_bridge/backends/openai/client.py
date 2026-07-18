@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from ...errors import InvalidRequest, UnsupportedOperation, UpstreamError
+from ...util.http import parse_json
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class OpenAIClient:
             ) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/models failed: {e}") from e
-        body = response.json()
+        body = parse_json(response, "Upstream /v1/models")
         return list(body.get("data", []))
 
     async def chat_completion(self, body: dict[str, Any]) -> dict[str, Any]:

@@ -63,6 +63,13 @@ already in flight rather than each starting its own — one round trip on
 ImageRouter and OpenRouter, and one pair of them on Venice, whose catalogue is
 split across two listings.
 
+Venice's listing has a third state: the `type=inpaint` half can fail while the
+text-to-image half succeeds. That result is still served — dropping the
+provider over its narrower query would be worse — but it's cached only for
+`catalog_retry_seconds` rather than the full TTL, so the missing half is
+re-attempted soon while a burst still can't queue up behind the lock. Edit
+routing stays unresolved until a complete listing arrives.
+
 That lock is also why a **failure** is remembered for `catalog_retry_seconds`
 (default 30; `0` retries immediately) and re-raised to callers arriving inside
 the window. Without it, a burst during an upstream hang would queue up, each

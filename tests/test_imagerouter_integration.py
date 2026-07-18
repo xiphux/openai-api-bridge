@@ -442,3 +442,39 @@ def test_failed_catalog_fetch_recovers_after_the_cooldown(
         second = client.get("/v1/models", headers=HEADERS)
         assert [m for m in second.json()["data"] if m["id"].startswith("ir/")]
     reset_caches_for_tests()
+
+
+@respx.mock
+def test_non_json_200_is_an_upstream_error_not_a_crash(
+    client_with_imagerouter: TestClient,
+) -> None:
+    """A 200 carrying HTML — captive portal, CDN error page, WAF interstitial —
+    used to raise JSONDecodeError, which isn't a BridgeError, so it escaped the
+    per-provider handler as an unhandled 500 with a full traceback."""
+    respx.get(f"{UPSTREAM}/v2/models").mock(
+        return_value=httpx.Response(
+            200,
+            text="<html><body>Gateway Timeout</body></html>",
+            headers={"content-type": "text/html"},
+        )
+    )
+    r = client_with_imagerouter.get("/v1/models", headers=HEADERS)
+    # Handled per-provider: the listing survives, this provider is just absent.
+    assert r.status_code == 200
+    assert not [m for m in r.json().get("data", []) if m["id"].startswith("ir/")]
+
+
+@respx.mock
+def test_non_json_200_on_generation_surfaces_as_502(
+    client_with_imagerouter: TestClient,
+) -> None:
+    respx.post(f"{UPSTREAM}/v1/openai/images/generations").mock(
+        return_value=httpx.Response(200, text="<html>nope</html>")
+    )
+    r = client_with_imagerouter.post(
+        "/v1/images/generations",
+        headers=HEADERS,
+        json={"model": "ir/openai/gpt-image-1", "prompt": "x"},
+    )
+    assert r.status_code == 502, r.text
+    assert "non-JSON" in r.json()["error"]["message"]

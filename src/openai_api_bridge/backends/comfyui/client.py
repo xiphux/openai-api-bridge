@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from ...errors import GenerationTimeout, UpstreamError, WorkflowInvalid
+from ...util.http import parse_json
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ class ComfyUIClient:
                 timeout=self.request_timeout,
             )
             response.raise_for_status()
-            result = response.json()
+            result = parse_json(response, "ComfyUI image upload")
             return str(result.get("name", filename))
         except httpx.HTTPStatusError as e:
             raise UpstreamError(f"ComfyUI image upload returned {e.response.status_code}") from e
@@ -145,13 +146,16 @@ class ComfyUIClient:
             try:
                 response = await self._client.get(history_url, timeout=per_request_timeout)
                 if response.status_code == 200:
-                    history = response.json()
+                    # A non-JSON 200 here is a transient upstream glitch, not a
+                    # reason to fail the job — the loop retries.
+                    history = parse_json(response, "ComfyUI /history")
                     if prompt_id in history:
                         return dict(history[prompt_id])
             except (
                 httpx.ReadTimeout,
                 httpx.ConnectError,
                 httpx.RemoteProtocolError,
+                UpstreamError,  # includes a non-JSON 200 from a proxy hiccup
             ) as e:
                 log.debug("Transient history poll error (will retry): %s", type(e).__name__)
 
