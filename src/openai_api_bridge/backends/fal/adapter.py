@@ -336,11 +336,17 @@ class FalBackend(Backend):
             # What this entry actually accepts. A collapsed model covers both
             # halves; without this the merged id would be indistinguishable
             # from a text-only one, and a client would find out by failing.
+            # Only categories the backend knows are published: they double as
+            # the capability strings, so an operator pointing `categories` at
+            # something outside CATEGORY_KINDS would otherwise emit a value
+            # that isn't in the documented {input}-to-{output} vocabulary.
             capabilities: tuple[str, ...] | None = None
-            if isinstance(category, str):
+            if isinstance(category, str) and category in CATEGORY_KINDS:
                 routed = variant_routes.get(model_id)
                 partner = self._category_of(by_id, routed) if routed else None
-                capabilities = (category, partner) if partner else (category,)
+                capabilities = (
+                    (category, partner) if partner in CATEGORY_KINDS and partner else (category,)
+                )
             entries.append(
                 ModelEntry(
                     id=model_id,
@@ -427,16 +433,29 @@ class FalBackend(Backend):
     def _config_for(self, model_slug: str, target: str) -> FalModelConfig:
         """Per-model config for a request that may have been routed elsewhere.
 
-        A configured block for the endpoint actually being called wins, so
-        ``[[providers.models]] id = "fal-ai/nano-banana-2/edit"`` still governs
-        an edit that arrived addressed to the base model. Falling back to the
-        requested id (rather than looking up the target directly) matters with
+        A block for the endpoint actually being called takes precedence, so
+        ``[[providers.models]] id = "fal-ai/nano-banana-2/edit"`` governs an
+        edit that arrived addressed to the base model. Falling back to the
+        requested id (rather than looking the target up directly) matters with
         ``discover_models = false``, where an unconfigured target would 404.
+
+        The sibling **layers over** the base rather than replacing it, and only
+        for fields it actually sets — ``exclude_unset`` is what distinguishes
+        "omitted" from "set to the default". Swapping wholesale would mean a
+        sibling block written to set, say, a display name silently reverted an
+        explicit ``disable_safety = false`` on the base back to the permissive
+        default, and dropped any pinned ``params``.
         """
+        base = self._model_config(model_slug)
         routed = self._models.get(target)
-        if routed is not None:
-            return routed
-        return self._model_config(model_slug)
+        if routed is None:
+            return base
+        overrides = routed.model_dump(exclude_unset=True)
+        if "params" in overrides:
+            # Merge rather than replace, so the sibling can add or override a
+            # key without discarding the base's pins.
+            overrides["params"] = {**base.params, **routed.params}
+        return base.model_copy(update=overrides)
 
     def _in_introspect_cooldown(self, model_id: str) -> bool:
         """True while a recent failure for this model should suppress retries."""

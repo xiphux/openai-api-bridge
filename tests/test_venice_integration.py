@@ -273,3 +273,33 @@ def test_both_catalog_listings_are_fetched_concurrently(
     respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
     assert client_with_venice.get("/v1/models", headers=HEADERS).status_code == 200
     assert inflight["max"] == 2, "the two listings should overlap"
+
+
+@respx.mock
+async def test_degraded_listing_leaves_routing_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listing that served generate models but lost the inpaint half must not
+    mark routing as resolved — otherwise an empty route map latches for the
+    life of the process and edits never route again, with the listing looking
+    perfectly healthy."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    from openai_api_bridge.backends.venice.adapter import VeniceBackend
+    from openai_api_bridge.config import VeniceProviderConfig
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("type") == "inpaint":
+            return httpx.Response(503, json={"error": "down"})
+        return httpx.Response(200, json={"data": [{"id": "gpt-image-2", "type": "image"}]})
+
+    respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
+    backend = VeniceBackend(
+        VeniceProviderConfig(backend="venice", id="vn", api_token_env="VENICE_API_TOKEN")
+    )
+    try:
+        entries = await backend.list_models()
+        assert [e.id for e in entries] == ["gpt-image-2"]
+        assert backend._routes_loaded is False, "a degraded listing must not latch routing"
+        assert backend._routes_failed_at is not None, "and must arm the retry cooldown"
+    finally:
+        await backend.aclose()

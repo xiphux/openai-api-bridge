@@ -32,12 +32,13 @@ log = logging.getLogger(__name__)
 # Venice, whose edit endpoint only accepts the `-edit` ids.
 _EDIT_SUFFIX = "-edit"
 
-# How long to wait before re-attempting a failed catalogue read for edit
-# routing. Without it every edit during an outage would re-run the fetch — and
-# because waiters acquire the lock in turn rather than sharing one result, N
-# concurrent edits would serialise into N sequential attempts. Mirrors the
-# cooldown fal's introspection uses for the same reason.
-_ROUTE_RETRY_SECONDS = 300.0
+# Without a cooldown every edit during an outage would re-run the catalogue
+# fetch — and because waiters acquire the lock in turn rather than sharing one
+# result, N concurrent edits serialise into N sequential attempts. This is the
+# same shape as fal's *catalogue* cooldown (not its schema introspection):
+# while the window is open the routes stay empty and edits go out unrouted,
+# so the residual cost is a bounded tail after the upstream recovers. The
+# window is configurable via `route_retry_seconds`.
 
 # Venice's image-generation endpoint always returns PNG; the API doesn't
 # include a content-type per image so we hard-code it (matches existing pipe).
@@ -139,7 +140,7 @@ class VeniceBackend(Backend):
     def _in_route_cooldown(self) -> bool:
         if self._routes_failed_at is None:
             return False
-        return time.monotonic() - self._routes_failed_at < _ROUTE_RETRY_SECONDS
+        return time.monotonic() - self._routes_failed_at < self.cfg.route_retry_seconds
 
     async def _edit_target(self, model_slug: str) -> str:
         """The model id Venice's edit endpoint will actually accept.

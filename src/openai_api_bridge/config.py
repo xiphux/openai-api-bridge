@@ -96,6 +96,12 @@ class VeniceProviderConfig(BaseModel):
     cfg_scale: float = 4.0
     default_width: int = 1024
     default_height: int = 1024
+    # Cooldown before re-reading the model catalogue after a failed attempt to
+    # resolve edit routing. During the window edits go out unrouted (Venice's
+    # edit endpoint only accepts the "-edit" ids, so they fail) — the cost is a
+    # bounded tail after Venice recovers, traded against re-fetching the
+    # catalogue on every single edit while it's down.
+    route_retry_seconds: float = 60.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)

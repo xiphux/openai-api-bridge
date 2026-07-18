@@ -89,8 +89,12 @@ request; with it, a frontend can enable or grey out image attachment per
 model.
 
 When a request is routed to a collapsed sibling, a `[[providers.models]]` block
-for the **sibling** governs it — it's the endpoint actually running — falling
-back to the requested model's block when the sibling has none.
+for the **sibling** takes precedence — it's the endpoint actually running — and
+**layers over** the base model's block rather than replacing it. Only fields
+the sibling actually sets win; anything it omits keeps the base's value, and
+`params` are merged key-by-key. So a sibling block written just to set a
+`display_name` won't quietly revert an explicit `disable_safety = false` on the
+base, or drop its pinned `params`.
 
 `[[providers.models]]` entries are per-model **overrides**, not a whitelist —
 they set `disable_safety`, `params`, `display_name`, or prompt metadata on a

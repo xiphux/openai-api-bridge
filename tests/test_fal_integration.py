@@ -1778,3 +1778,105 @@ def test_routed_edit_honours_the_siblings_own_config(
         assert r.status_code == 200, r.text
         assert _sent_body(gen)["marker"] == "from-the-edit-block"
     reset_caches_for_tests()
+
+
+@respx.mock
+def test_sibling_block_does_not_revert_an_explicit_safety_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sibling block layers over the base; it doesn't replace it.
+
+    `disable_safety` defaults to True (inject the loosest moderation params),
+    so if a sibling block written for some unrelated reason replaced the base
+    wholesale, an operator's explicit `disable_safety = false` would silently
+    flip back to permissive on routed edits — and pinned `params` would vanish.
+    """
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent(f"""
+        [[providers]]
+        id = "fal"
+        backend = "fal"
+        api_token_env = "TEST_FAL_TOKEN"
+        introspect_safety = false
+
+        [[providers.models]]
+        id = "{NANO}"
+        disable_safety = false
+        [providers.models.params]
+        aspect_ratio = "16:9"
+
+        # Written only to rename the edit half — it says nothing about safety.
+        [[providers.models]]
+        id = "{NANO}/edit"
+        display_name = "Nano (edit)"
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Edit"),
+        ]
+    )
+    gen = _mock_generation(f"{NANO}/edit")
+
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/v1/images/edits",
+            headers=HEADERS,
+            files={"image": ("in.png", b"PNG", "image/png")},
+            data={"model": f"fal/{NANO}", "prompt": "x"},
+        )
+        assert r.status_code == 200, r.text
+        body = _sent_body(gen)
+        # The base's opt-out survives: no moderation params injected.
+        assert "safety_tolerance" not in body
+        assert "enable_safety_checker" not in body
+        # And its pinned params aren't dropped by the sibling block.
+        assert body["aspect_ratio"] == "16:9"
+    reset_caches_for_tests()
+
+
+@respx.mock
+def test_unknown_category_publishes_no_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Categories double as capability strings, so an operator pointing
+    `categories` at something outside the known set must not publish a value
+    that isn't in the documented {input}-to-{output} vocabulary."""
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent("""
+        [[providers]]
+        id = "fal"
+        backend = "fal"
+        api_token_env = "TEST_FAL_TOKEN"
+        categories = ["upscaling"]
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    _stub_catalog_entries([_cat_entry("fal-ai/odd", "upscaling", "Odd")])
+    with TestClient(create_app()) as client:
+        by_id = {m["id"]: m for m in client.get("/v1/models", headers=HEADERS).json()["data"]}
+        assert "fal/fal-ai/odd" in by_id, "the configured category should still be listed"
+        assert "capabilities" not in by_id["fal/fal-ai/odd"]
+    reset_caches_for_tests()

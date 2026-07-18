@@ -174,6 +174,9 @@ api_token_env = "VENICE_API_TOKEN"
 #   discover_models = false     # serve only the [[providers.models]] above;
 #                               # a model outside that list becomes a 404
 #   categories = ["text-to-image", "image-to-image"]   # override the filter
+#   # A [[providers.models]] block for a collapsed sibling layers over the
+#   # base model's block on routed requests — fields it omits keep the base's
+#   # values, and params merge key-by-key.
 #   collapse_variants = false  # list a model's /edit half separately
 #                               # instead of routing edits to it automatically
 #   store_payloads = false      # send X-Fal-Store-IO: 0 so fal never stores
