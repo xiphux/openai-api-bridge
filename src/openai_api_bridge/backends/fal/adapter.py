@@ -30,7 +30,7 @@ import time
 from typing import Any
 
 from ...config import FalModelConfig, FalProviderConfig
-from ...errors import ModelNotFound
+from ...errors import ModelNotFound, UpstreamAuthError
 from ...util.sizes import parse_size
 from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
 from .client import FalClient
@@ -102,6 +102,10 @@ class FalBackend(Backend):
         self._catalog_cache: list[ModelEntry] | None = None
         self._catalog_lock = asyncio.Lock()
         self._catalog_failed_at: float | None = None
+        # Set once fal rejects our key. Unlike an outage this can't heal at
+        # runtime — the token is read from the environment at startup — so it
+        # permanently disables discovery and introspection instead of retrying.
+        self._auth_failed = False
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -124,6 +128,21 @@ class FalBackend(Backend):
             for m in self.cfg.models
         ]
 
+    def _note_auth_failure(self, e: Exception) -> None:
+        """Report a rejected credential once, loudly, and stop retrying."""
+        if self._auth_failed:
+            return
+        self._auth_failed = True
+        log.error(
+            "fal: provider %r credentials were rejected (%s). Check that env var %s "
+            "holds a valid fal API key — model discovery and moderation "
+            "introspection are disabled until the bridge restarts with a working "
+            "key, and generation requests will fail.",
+            self.cfg.id,
+            e,
+            self.cfg.api_token_env,
+        )
+
     async def list_models(self) -> list[ModelEntry]:
         """Models this provider serves.
 
@@ -136,7 +155,7 @@ class FalBackend(Backend):
         explicitly configured rather than dropping the provider's models from
         ``/v1/models`` entirely.
         """
-        if not self.cfg.discover_models:
+        if not self.cfg.discover_models or self._auth_failed:
             return self._configured_entries()
         async with self._catalog_lock:
             if self._catalog_cache is not None:
@@ -147,6 +166,9 @@ class FalBackend(Backend):
                     return self._configured_entries()
             try:
                 raw = await self.client.fetch_catalog(self._categories)
+            except UpstreamAuthError as e:
+                self._note_auth_failure(e)
+                return self._configured_entries()
             except Exception as e:  # never 500 /v1/models over a catalogue blip
                 self._catalog_failed_at = time.monotonic()
                 log.warning(
@@ -251,7 +273,7 @@ class FalBackend(Backend):
         the caller falls back to the static map. Nothing unsuccessful is ever
         cached, so a transient failure can't latch for the life of the process.
         """
-        if not self.cfg.introspect_safety:
+        if not self.cfg.introspect_safety or self._auth_failed:
             return None
         cached = self._schema_cache.get(model_id)
         if cached is not None:
@@ -265,6 +287,9 @@ class FalBackend(Backend):
                 return None
             try:
                 specs = await self.client.fetch_model_schemas([model_id])
+            except UpstreamAuthError as e:
+                self._note_auth_failure(e)
+                return None
             except Exception as e:  # never fail a generation over an introspection blip
                 self._arm_introspect_retry(model_id, f"schema lookup failed ({e})")
                 return None

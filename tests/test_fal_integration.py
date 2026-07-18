@@ -865,3 +865,67 @@ def test_catalog_is_cached(discovering_client: TestClient) -> None:
         assert discovering_client.get("/v1/models", headers=HEADERS).status_code == 200
     # One pass over the categories, not one per /v1/models request.
     assert route.call_count == 2
+
+
+# --- rejected credentials --------------------------------------------------
+#
+# A missing key already fails at startup (api_token_env is required and
+# resolve_api_token raises during dispatcher construction). A *wrong* key can't
+# be caught that way without putting a network call in the lifespan, so it's
+# handled at use: reported once at ERROR and never retried, since the token is
+# read from the environment at startup and can't heal at runtime.
+
+
+@respx.mock
+def test_rejected_key_is_not_retried_on_the_catalog(
+    discovering_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    route = respx.get(MODELS_API).mock(
+        return_value=httpx.Response(
+            401, json={"error": {"type": "authorization_error", "message": "Invalid API key"}}
+        )
+    )
+    with caplog.at_level("ERROR"):
+        for _ in range(3):
+            r = discovering_client.get("/v1/models", headers=HEADERS)
+            assert r.status_code == 200
+            # Degrades to the configured entry rather than 500-ing the listing.
+            assert {m["id"] for m in r.json()["data"]} == {f"fal/{NANO}"}
+
+    # One attempt only: a bad key cannot start working, so no cooldown retry.
+    assert route.call_count == 1
+    # And it says so once, actionably — naming the env var to fix.
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "TEST_FAL_TOKEN" in errors[0].getMessage()
+
+
+@respx.mock
+async def test_rejected_key_stops_schema_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = respx.get(MODELS_API).mock(return_value=httpx.Response(401, json={"error": "nope"}))
+
+    # retry_seconds=0 would retry every call if this were treated as transient.
+    backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
+    try:
+        for _ in range(3):
+            assert await backend._safety_params(backend.cfg.models[0]) == {}
+    finally:
+        await backend.aclose()
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_transient_failure_still_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression guard: only 401/403 are permanent — a 503 must still retry."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = respx.get(MODELS_API).mock(return_value=httpx.Response(503, json={"error": "down"}))
+
+    backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
+    try:
+        for _ in range(3):
+            assert await backend._safety_params(backend.cfg.models[0]) == {}
+    finally:
+        await backend.aclose()
+    # Each call re-attempts (batch + the client's own straggler retry per round).
+    assert route.call_count > 1

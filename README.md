@@ -70,6 +70,17 @@ If the catalogue can't be fetched, the provider degrades to whatever is
 explicitly configured (rather than serving nothing) and retries after
 `introspect_retry_seconds`.
 
+**API key failures.** A *missing* key fails fast: `api_token_env` is required,
+and the token is resolved while the dispatcher is built, so the bridge refuses
+to start (`ConfigError: Provider 'fal': env var 'FAL_API_KEY' is not set`). A
+*wrong* key can't be caught that way without putting a network call in the
+startup path — which would let a fal outage block the bridge from booting — so
+it's handled on first use: fal's `401`/`403` is reported **once at ERROR**,
+naming the env var to fix, and is never retried, since a token read from the
+environment at startup cannot start working again. Discovery and introspection
+switch off for the process, and generation fails with
+`code: "upstream_auth_error"` (HTTP 502) rather than degrading quietly.
+
 ### Content moderation on fal.ai
 
 The reason to reach for the `fal` backend over ImageRouter/OpenRouter is

@@ -97,6 +97,20 @@ class UpstreamError(BridgeError):
     code = "upstream_error"
 
 
+class UpstreamAuthError(UpstreamError):
+    """The upstream rejected our credentials (401/403).
+
+    Split from the generic UpstreamError because it is **not** transient:
+    provider tokens are read from the environment once at startup, so a
+    rejected credential cannot start working again without a restart. Backends
+    that retry failed calls should treat this as permanent and stop, rather
+    than re-attempting on a cooldown forever against a key that will never
+    work.
+    """
+
+    code = "upstream_auth_error"
+
+
 class GenerationTimeout(BridgeError):
     status_code = 504
     error_type = "api_error"

@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from ...errors import UpstreamError
+from ...errors import UpstreamAuthError, UpstreamError
 from ...util.http import fetch_asset_with_retry
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,19 @@ log = logging.getLogger(__name__)
 # models finish well inside a minute, but a busy queue or a 4K request can run
 # longer, so the read budget is generous. Connect stays low — DNS/TLS is fast.
 _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
+
+
+def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
+    """Map an upstream HTTP status to the right error class.
+
+    401/403 become UpstreamAuthError so callers can tell "bad key" (permanent,
+    stop retrying) from "fal is having a moment" (retry on a cooldown).
+    """
+    status = e.response.status_code
+    body = e.response.text[:300]
+    if status in (401, 403):
+        return UpstreamAuthError(f"fal rejected our credentials ({status}) on {what}: {body}")
+    return UpstreamError(f"fal {what} returned {status}: {body}")
 
 
 class FalClient:
@@ -72,9 +85,7 @@ class FalClient:
             resp = await self._client.post(url, json=body)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"fal {model_id} returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise _status_error(e, model_id) from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
         return _extract_image_urls(resp.json(), model_id)
@@ -109,10 +120,7 @@ class FalClient:
                     resp = await self._client.get(self.models_api_url, params=params, timeout=60.0)
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as e:
-                    raise UpstreamError(
-                        f"fal model API returned {e.response.status_code} listing "
-                        f"{category}: {e.response.text[:300]}"
-                    ) from e
+                    raise _status_error(e, f"listing {category}") from e
                 except httpx.HTTPError as e:
                     raise UpstreamError(f"fal model API listing {category} failed: {e}") from e
                 body = resp.json()
@@ -166,9 +174,7 @@ class FalClient:
             resp = await self._client.get(self.models_api_url, params=params, timeout=60.0)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"fal model API returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise _status_error(e, "the model API") from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal model API request failed: {e}") from e
         body = resp.json()
