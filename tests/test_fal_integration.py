@@ -16,6 +16,7 @@ Tests that leave that API unstubbed exercise the *fallback* static map; the
 
 from __future__ import annotations
 
+import asyncio
 import json
 import textwrap
 from collections.abc import Iterator
@@ -475,6 +476,53 @@ def test_truncated_batch_is_retried_per_model(client_with_fal: TestClient) -> No
     assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
     # Recovered via the per-model retry, not the static fallback.
     assert _sent_body(gen)["enable_safety_checker"] is False
+
+
+@respx.mock
+async def test_concurrent_first_requests_share_one_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A burst of simultaneous generations (e.g. a multi-model fan-out from the
+    UI) must collapse into a single schema lookup, with every request waiting
+    for it — not one racing ahead un-loosened while N fetches fire in parallel.
+    """
+    from openai_api_bridge.backends.fal.adapter import FalBackend
+    from openai_api_bridge.config import FalModelConfig, FalProviderConfig
+
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    ids = [SEEDREAM_T2I, NANO, GPT_IMAGE]
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+
+    async def slow_responder(request: httpx.Request) -> httpx.Response:
+        # Latency widens the window in which a broken lock would let other
+        # requests start their own fetch.
+        await asyncio.sleep(0.05)
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": m, "openapi": spec} for m in ids]},
+        )
+
+    route = respx.get(MODELS_API).mock(side_effect=slow_responder)
+
+    cfg = FalProviderConfig(
+        backend="fal",
+        id="fal",
+        api_token_env="TEST_FAL_TOKEN",
+        models=[FalModelConfig(id=m) for m in ids],
+    )
+    backend = FalBackend(cfg)
+    try:
+        results = await asyncio.gather(
+            *(backend._safety_params(cfg.models[i % len(ids)]) for i in range(8))
+        )
+    finally:
+        await backend.aclose()
+
+    # Exactly one lookup served all 8 concurrent callers (without the lock this
+    # would be 8).
+    assert route.call_count == 1
+    # And none of them slipped through before the cache was populated.
+    assert all(r == {"enable_safety_checker": False} for r in results)
 
 
 @respx.mock
