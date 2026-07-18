@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 
 from openai_api_bridge.backends.fal.adapter import SUPPORTED_CATEGORIES, FalBackend
 from openai_api_bridge.config import FalModelConfig, FalProviderConfig, reset_caches_for_tests
+from openai_api_bridge.errors import BridgeError
 
 FAL = "https://fal.run"
 
@@ -2005,3 +2006,149 @@ def test_ref_encoded_enums_are_resolved() -> None:
 
     assert safety_params_from_schema(spec) == {"safety_tolerance": "6"}
     assert duration_params(duration_property(spec), 5.0) == {"duration": "6s"}
+
+
+# --- abandoned upstream jobs ------------------------------------------------
+#
+# fal bills a render whether or not anyone collects it, so every way out of the
+# poll loop that isn't a finished clip has to tell fal to stop.
+
+
+def _stub_cancellable_job(model_id: str = VIDEO_MODEL) -> dict[str, respx.Route]:
+    req = "req-cancel"
+    base = f"{QUEUE}/{model_id}/requests/{req}"
+    submit = respx.post(f"{QUEUE}/{model_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "request_id": req,
+                "status_url": f"{base}/status",
+                "response_url": base,
+                "cancel_url": f"{base}/cancel",
+            },
+        )
+    )
+    cancel = respx.put(f"{base}/cancel").mock(
+        return_value=httpx.Response(202, json={"status": "CANCELLATION_REQUESTED"})
+    )
+    return {"submit": submit, "cancel": cancel, "base": base}
+
+
+@respx.mock
+async def test_client_cancellation_stops_the_upstream_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DELETE /v1/videos cancels our task; without this the fal job kept
+    rendering — and billing — to completion, unread."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    routes = _stub_cancellable_job()
+    respx.get(f"{routes['base']}/status").mock(
+        return_value=httpx.Response(200, json={"status": "IN_PROGRESS"})
+    )
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[VIDEO_MODEL])
+    try:
+        task = asyncio.create_task(backend.generate_video(model_slug=VIDEO_MODEL, prompt="a river"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await backend.aclose()
+
+    assert routes["cancel"].called, "an abandoned job must be cancelled upstream"
+
+
+@respx.mock
+async def test_timeout_stops_the_upstream_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Giving up locally leaves fal rendering just as surely as a DELETE does."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    routes = _stub_cancellable_job()
+    respx.get(f"{routes['base']}/status").mock(
+        return_value=httpx.Response(200, json={"status": "IN_QUEUE"})
+    )
+
+    from openai_api_bridge.backends.fal.adapter import FalBackend
+    from openai_api_bridge.config import FalModelConfig, FalProviderConfig
+
+    backend = FalBackend(
+        FalProviderConfig(
+            backend="fal",
+            id="fal",
+            api_token_env="TEST_FAL_TOKEN",
+            models=[FalModelConfig(id=VIDEO_MODEL)],
+            introspect_safety=False,
+            video_poll_interval_seconds=0.01,
+            video_poll_timeout_seconds=0.05,
+        )
+    )
+    try:
+        with pytest.raises(BridgeError):
+            await backend.generate_video(model_slug=VIDEO_MODEL, prompt="x")
+    finally:
+        await backend.aclose()
+
+    assert routes["cancel"].called
+
+
+@respx.mock
+async def test_completed_job_is_not_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only abandonment triggers it — a collected clip must not be cancelled."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    routes = _stub_cancellable_job()
+    respx.get(f"{routes['base']}/status").mock(
+        return_value=httpx.Response(200, json={"status": "COMPLETED"})
+    )
+    respx.get(routes["base"]).mock(
+        return_value=httpx.Response(200, json={"video": {"url": "https://v3.fal.media/o.mp4"}})
+    )
+    respx.get("https://v3.fal.media/o.mp4").mock(
+        return_value=httpx.Response(200, content=b"mp4", headers={"content-type": "video/mp4"})
+    )
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[VIDEO_MODEL])
+    try:
+        asset = await backend.generate_video(model_slug=VIDEO_MODEL, prompt="x")
+        assert asset.kind == "video"
+    finally:
+        await backend.aclose()
+
+    assert not routes["cancel"].called
+
+
+@respx.mock
+async def test_a_failing_cancel_does_not_mask_the_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cancel is best-effort; it must never replace the failure that caused
+    us to abandon the job."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    routes = _stub_cancellable_job()
+    respx.put(f"{routes['base']}/cancel").mock(
+        return_value=httpx.Response(500, json={"error": "cancel unavailable"})
+    )
+    respx.get(f"{routes['base']}/status").mock(
+        return_value=httpx.Response(200, json={"status": "IN_QUEUE"})
+    )
+
+    from openai_api_bridge.backends.fal.adapter import FalBackend
+    from openai_api_bridge.config import FalModelConfig, FalProviderConfig
+
+    backend = FalBackend(
+        FalProviderConfig(
+            backend="fal",
+            id="fal",
+            api_token_env="TEST_FAL_TOKEN",
+            models=[FalModelConfig(id=VIDEO_MODEL)],
+            introspect_safety=False,
+            video_poll_interval_seconds=0.01,
+            video_poll_timeout_seconds=0.05,
+        )
+    )
+    try:
+        with pytest.raises(BridgeError) as excinfo:
+            await backend.generate_video(model_slug=VIDEO_MODEL, prompt="x")
+        # The timeout, not the cancel failure.
+        assert "did not finish" in str(excinfo.value)
+    finally:
+        await backend.aclose()

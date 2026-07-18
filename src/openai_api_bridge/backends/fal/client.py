@@ -59,6 +59,7 @@ class QueuedRequest:
     request_id: str
     status_url: str
     response_url: str
+    cancel_url: str
 
 
 class FalClient:
@@ -146,17 +147,33 @@ class FalClient:
             raise UpstreamError(
                 f"fal {model_id} queue submit returned no request_id: {str(body_json)[:200]}"
             )
-        status_url = body_json.get("status_url")
-        response_url = body_json.get("response_url")
+
+        def link(key: str, fallback: str) -> str:
+            value = body_json.get(key)
+            return value if isinstance(value, str) and value else fallback
+
+        base = f"{url}/requests/{request_id}"
         return QueuedRequest(
             request_id=request_id,
-            status_url=status_url
-            if isinstance(status_url, str) and status_url
-            else f"{url}/requests/{request_id}/status",
-            response_url=response_url
-            if isinstance(response_url, str) and response_url
-            else f"{url}/requests/{request_id}",
+            status_url=link("status_url", f"{base}/status"),
+            response_url=link("response_url", base),
+            cancel_url=link("cancel_url", f"{base}/cancel"),
         )
+
+    async def cancel_queued(self, job: QueuedRequest, *, model_id: str) -> None:
+        """Ask fal to stop rendering a job we're no longer going to collect.
+
+        Best-effort by nature: fal answers 202 CANCELLATION_REQUESTED, and a
+        job already past the point of no return simply won't stop. Raises so
+        the caller can log; the caller is always on an unwind path.
+        """
+        try:
+            resp = await self._client.put(job.cancel_url, timeout=30.0)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e, f"{model_id} cancel") from e
+        except httpx.HTTPError as e:
+            raise UpstreamError(f"fal {model_id} cancel failed: {e}") from e
 
     async def poll_queued(self, job: QueuedRequest, *, model_id: str) -> str:
         """Current queue status: ``IN_QUEUE``, ``IN_PROGRESS`` or ``COMPLETED``."""

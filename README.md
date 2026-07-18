@@ -271,6 +271,17 @@ content. A reference image for image-to-video is forwarded as `image_url`.
 `video_poll_interval_seconds` (default 3) and `video_poll_timeout_seconds`
 (default 1800).
 
+**Abandoned jobs are cancelled upstream.** fal bills a render whether or not
+anyone collects it, so every exit from the poll loop that isn't a finished clip
+— a client `DELETE /v1/videos/{id}`, the bridge's own timeout, a poll that gave
+up — asks fal to stop via the queue's cancel endpoint. It's best-effort and
+bounded (a job past the point of no return won't stop, and the attempt can't
+stall shutdown), and a failed cancel is logged without masking the error that
+caused the abandonment. **Not** covered: a job in flight when the bridge
+restarts. Its row is failed by `mark_stale_failed`, but the fal job keeps
+rendering — the `upstream_id` is persisted, so cancelling those is possible,
+just not wired up.
+
 Because a long job issues hundreds of status polls, no single one is fatal: a
 bounded run of consecutive transient failures is treated as "not ready yet"
 (as the ComfyUI poller does), with the deadline bounding the loop. The result

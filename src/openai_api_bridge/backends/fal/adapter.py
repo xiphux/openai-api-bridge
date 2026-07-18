@@ -69,6 +69,10 @@ _MAX_TRACKED_MODELS = 1024
 _MAX_CONSECUTIVE_POLL_ERRORS = 5
 _RESULT_FETCH_ATTEMPTS = 3
 
+# Cancelling an abandoned job runs on the unwind path, so it can't be allowed
+# to stall shutdown or hold up a client's DELETE.
+_UPSTREAM_CANCEL_TIMEOUT_S = 10.0
+
 # fal publishes a model's text-driven and reference-image-driven halves as
 # separate endpoints, which is an easy trap: a client sends an edit to
 # `fal-ai/nano-banana-2` without knowing `/edit` exists, or a still to
@@ -625,7 +629,18 @@ class FalBackend(Backend):
         job = await self.client.submit_queued(model_slug, body)
         if on_upstream_id is not None:
             await on_upstream_id(job.request_id)
+        try:
+            return await self._await_queued_video(job, model_slug)
+        except BaseException:
+            # Every way out of here that isn't a finished clip means we've
+            # stopped caring about a job fal is still rendering — a client
+            # DELETE, our own timeout, a poll that gave up. fal bills the
+            # render regardless of whether anyone collects it, so say so on
+            # the way out rather than leaving it to run to completion unread.
+            await self._cancel_upstream(job, model_slug)
+            raise
 
+    async def _await_queued_video(self, job: QueuedRequest, model_slug: str) -> GeneratedAsset:
         deadline = time.monotonic() + self.cfg.video_poll_timeout_seconds
         consecutive_errors = 0
         while True:
@@ -666,6 +681,29 @@ class FalBackend(Backend):
         url = extract_video_url(result, model_slug)
         data, content_type = await self._fetch_asset(url)
         return GeneratedAsset(data=data, content_type=content_type, kind="video")
+
+    async def _cancel_upstream(self, job: QueuedRequest, model_slug: str) -> None:
+        """Tell fal to stop a job we're abandoning. Never raises.
+
+        Bounded because this runs while unwinding — often mid-cancellation, and
+        the scheduler is waiting on us during shutdown. A second cancellation
+        arriving here is honoured rather than swallowed: it propagates and
+        replaces the error we were already unwinding with.
+        """
+        try:
+            await asyncio.wait_for(
+                self.client.cancel_queued(job, model_id=model_slug),
+                timeout=_UPSTREAM_CANCEL_TIMEOUT_S,
+            )
+            log.info("fal: asked to cancel abandoned job %s (%s)", job.request_id, model_slug)
+        except Exception as e:
+            log.warning(
+                "fal: could not cancel abandoned job %s (%s); it may keep rendering "
+                "and billing: %s",
+                job.request_id,
+                model_slug,
+                e,
+            )
 
     async def _fetch_video_result(self, job: QueuedRequest, model_slug: str) -> dict[str, Any]:
         """Collect a finished job's payload, retrying transient failures.
