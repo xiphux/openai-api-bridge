@@ -23,7 +23,7 @@ client (LibreChat/LobeChat/curl/...)
         ├──► ComfyUI workflow (image or video, via user-defined workflow JSON)
         ├──► Venice.ai native /api/v1/image/{generate,edit} (image gen + img2img)
         ├──► ImageRouter / OpenRouter (cloud image · video · chat across many vendors)
-        ├──► fal.ai (tier-1 image models with per-model moderation control)
+        ├──► fal.ai (image + video, with per-model moderation control)
         └──► Any OpenAI-compatible upstream (llama-server, vLLM, OpenAI, ...)
               passthrough for /v1/chat/completions and /v1/embeddings
 ```
@@ -36,7 +36,7 @@ client (LibreChat/LobeChat/curl/...)
 | **Venice.ai** | Image generation (`/api/v1/image/generate`) and img2img edits (`/api/v1/image/edit`, single reference image) | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
 | **ImageRouter** | Image and video generation across many providers | OpenAI-compat *content* but path-divergent — model catalog is at `/v2/models`, inference at `/v1/openai/...`, and the video endpoint is sync (single POST) rather than OpenAI's async `/v1/videos` lifecycle |
 | **OpenRouter** | Chat, embeddings, and image generation across many vendors | Chat/embeddings are spec-compliant; image generation diverges — OpenRouter exposes it via chat completions with a non-standard `message.images` array on the response. The bridge translates so clients see standard `/v1/images/generations` and `/v1/images/edits` |
-| **fal.ai** | Image generation + edits across fal's catalogue (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …) | fal exposes each model's *native* input schema, so the bridge can reach the per-model **content-moderation** knob that flat brokers hide — and reads the loosest value out of that schema. Models are discovered from fal's model API and filtered to the categories this backend serves; calls hit fal's synchronous `fal.run/{model}` with `Authorization: Key …` |
+| **fal.ai** | Image generation + edits *and* video across fal's catalogue (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, Veo, Kling, …) | fal exposes each model's *native* input schema, so the bridge can reach the per-model **content-moderation** knob that flat brokers hide — and reads the loosest value out of that schema. Models are discovered from fal's model API and filtered to the categories this backend serves. Images run against fal's synchronous `fal.run/{model}`; video goes through the `queue.fal.run` lifecycle and is served as a standard async `/v1/videos` job |
 | **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
 
 Configure as many of each as you want. The most common deployment fronts a
@@ -51,15 +51,15 @@ see `src/openai_api_bridge/backends/` for the existing implementations.
 ### Model discovery on fal.ai
 
 `/v1/models` is populated from fal's model API, filtered to the categories this
-backend can actually serve — **`text-to-image` and `image-to-image`**, ~574
-models. The listing is fetched once and cached, and excludes deprecated models.
+backend serves — **`text-to-image`, `image-to-image`, `text-to-video` and
+`image-to-video`**, ~886 models. The listing is fetched once and cached, and
+excludes deprecated models. Each model's `kind` comes from its catalogue
+category, so a frontend can tell image models from video ones.
 
-fal's `text-to-video`, `image-to-video`, audio and 3D categories are
-deliberately **not** listed: the fal backend implements the image surface
-(generate + edit) only. Widening `categories` won't make them work — video
-needs `generate_video` implemented against fal's queue lifecycle first. Nothing
-stops a client naming such an endpoint by hand, though; fal will run the job
-and return a non-image envelope, which the bridge reports as
+fal's audio and 3D categories are deliberately **not** listed — there's no code
+path for them, so listing them would advertise models every request would fail
+on. Nothing stops a client naming such an endpoint by hand, though; fal will
+run the job and return a non-image envelope, which the bridge reports as
 `unsupported_operation` (HTTP 400) rather than a retryable upstream error.
 
 `[[providers.models]]` entries are per-model **overrides**, not a whitelist —
@@ -95,8 +95,9 @@ a model is configured with `disable_safety = true` (the default).
 
 Rather than mapping model name → knob (which would need a code change for every
 new model version), the bridge **reads the model's own OpenAPI schema** from
-fal's model API and derives the setting. A sweep of fal's ~600 image models
-found the knobs collapse to two field names, both stable across versions:
+fal's model API and derives the setting. A sweep of fal's image catalogue found
+the knobs collapse to two field names, both stable across versions (and they
+apply to video models too):
 
 | Input field | Models | What the bridge sets |
 |---|---|---|
@@ -138,6 +139,30 @@ Two caveats worth knowing:
   bridge doesn't recognize. `size` (`WxH`) maps to
   `image_size` for most families but is dropped for Nano Banana / Gemini, which
   take `aspect_ratio` + `resolution` instead.
+
+### Video on fal.ai
+
+Video uses fal's **queue** endpoint (`queue.fal.run`) rather than the
+synchronous one images use: a clip runs for minutes, past what a held
+connection tolerates. The bridge submits, records fal's `request_id` on the job
+row, polls to completion, then fetches the asset — so clients see the standard
+async `/v1/videos` lifecycle with no fal-specific handling.
+
+`seconds` is mapped onto whatever the model actually accepts, read from its
+schema, because the spellings don't agree: `fal-ai/veo3` takes `"4s"`/`"6s"`/`"8s"`,
+Kling takes `"5"`/`"10"`, Hailuo `"6"`/`"10"`, and `wan` has no duration field
+at all (it counts frames, so nothing is sent). The closest accepted value wins;
+ties go to the longer clip, since silently returning less than asked for loses
+content. A reference image for image-to-video is forwarded as `image_url`.
+
+`size` is **not** forwarded for video — these models take `aspect_ratio` and
+`resolution` enums rather than pixel dimensions, which don't follow from a
+`WxH` string. Pin them per model via `params`. Polling is governed by
+`video_poll_interval_seconds` (default 3) and `video_poll_timeout_seconds`
+(default 1800).
+
+Moderation works exactly as it does for images — the same schema introspection
+finds `safety_tolerance` on `fal-ai/veo3` and `enable_safety_checker` on `wan`.
 
 See the `fal` block in `config.toml.example` for a full example.
 

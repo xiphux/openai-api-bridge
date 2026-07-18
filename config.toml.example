@@ -133,9 +133,11 @@ api_token_env = "VENICE_API_TOKEN"
 # touch — and new model versions are picked up without a code change.
 #
 # By default the bridge populates /v1/models from fal's model API, filtered to
-# the categories it can serve: text-to-image and image-to-image (~574 models).
-# fal's video/audio/3d categories are NOT listed — the fal backend implements
-# the image surface only, so those models would fail on every request.
+# the categories it can serve: text-to-image, image-to-image, text-to-video and
+# image-to-video (~886 models). fal's audio/3d categories are NOT listed —
+# there's no code path for them, so those models would fail on every request.
+# Images run against the synchronous endpoint; video goes through fal's queue
+# and is served through the bridge's async /v1/videos lifecycle.
 #
 # [[providers.models]] entries are per-model *overrides*, not a whitelist: they
 # tweak a discovered model without restricting the rest. To serve only a fixed
@@ -172,6 +174,9 @@ api_token_env = "VENICE_API_TOKEN"
 #   discover_models = false     # serve only the [[providers.models]] above;
 #                               # a model outside that list becomes a 404
 #   categories = ["text-to-image", "image-to-image"]   # override the filter
+#   video_poll_interval_seconds = 3.0     # queue polling cadence for video
+#   video_poll_timeout_seconds = 1800.0   # give up on a video job after this
+#   queue_base_url = "https://queue.fal.run"          # rarely needs override
 #   introspect_safety = false   # skip the schema lookup, use the built-in
 #                               # fallback map (the bridge also falls back
 #                               # automatically if fal's model API is down)

@@ -2,11 +2,14 @@
 
 fal exposes every model both as a queue endpoint (``queue.fal.run``, with
 submit/poll/result) and a **synchronous** endpoint (``https://fal.run/{model_id}``)
-that blocks until the result is ready and returns it inline. Image generation
-finishes in seconds, so — like the ImageRouter backend — we use the synchronous
-endpoint and treat the whole call as one long await. (Video, which can run for
-minutes and is better served by the queue lifecycle, is intentionally out of
-scope for this backend.)
+that blocks until the result is ready and returns it inline. This client uses
+both, picked by modality:
+
+* **Images** run against the synchronous endpoint and are treated as one long
+  await, like the ImageRouter backend — they finish in seconds.
+* **Video** goes through the queue. A clip takes minutes, well past what
+  fal.run will hold a connection open for, and the queue's request id gives the
+  bridge something to record on the job row.
 
 Auth is a fal API key sent as ``Authorization: Key {token}`` (note: ``Key``,
 not ``Bearer``). Successful responses carry an ``images`` array of hosted asset
@@ -17,6 +20,7 @@ separately, mirroring the URL-then-fetch pattern used elsewhere in the bridge.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -46,6 +50,15 @@ def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
     return UpstreamError(f"fal {what} returned {status}: {body}")
 
 
+@dataclass(frozen=True, slots=True)
+class _QueuedRequest:
+    """Handles for an in-flight fal queue job."""
+
+    request_id: str
+    status_url: str
+    response_url: str
+
+
 class FalClient:
     def __init__(
         self,
@@ -54,9 +67,11 @@ class FalClient:
         api_token: str,
         request_timeout_seconds: float,
         models_api_url: str = "https://api.fal.ai/v1/models",
+        queue_base_url: str = "https://queue.fal.run",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.models_api_url = models_api_url
+        self.queue_base_url = queue_base_url.rstrip("/")
         self._auth_headers = {"Authorization": f"Key {api_token}"}
         self._client = httpx.AsyncClient(
             headers=self._auth_headers,
@@ -89,6 +104,73 @@ class FalClient:
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
         return _extract_image_urls(resp.json(), model_id)
+
+    # --- queued inference (video) ----------------------------------------
+
+    async def submit_queued(self, model_id: str, body: dict[str, Any]) -> _QueuedRequest:
+        """Submit a job to fal's queue and return its handles.
+
+        Video runs for minutes, well past what the synchronous ``fal.run``
+        endpoint will hold open, so it goes through ``queue.fal.run``:
+        submit → poll status → fetch result. The submit response carries the
+        status/response URLs, so we use those verbatim rather than rebuilding
+        them and guessing at fal's path layout.
+        """
+        url = f"{self.queue_base_url}/{model_id}"
+        try:
+            resp = await self._client.post(url, json=body)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e, model_id) from e
+        except httpx.HTTPError as e:
+            raise UpstreamError(f"fal {model_id} queue submit failed: {e}") from e
+        body_json = resp.json()
+        if not isinstance(body_json, dict):
+            raise UpstreamError(f"fal {model_id} queue submit returned non-dict body")
+        request_id = body_json.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise UpstreamError(
+                f"fal {model_id} queue submit returned no request_id: {str(body_json)[:200]}"
+            )
+        status_url = body_json.get("status_url")
+        response_url = body_json.get("response_url")
+        return _QueuedRequest(
+            request_id=request_id,
+            status_url=status_url
+            if isinstance(status_url, str) and status_url
+            else f"{url}/requests/{request_id}/status",
+            response_url=response_url
+            if isinstance(response_url, str) and response_url
+            else f"{url}/requests/{request_id}",
+        )
+
+    async def poll_queued(self, job: _QueuedRequest, *, model_id: str) -> str:
+        """Current queue status: ``IN_QUEUE``, ``IN_PROGRESS`` or ``COMPLETED``."""
+        try:
+            resp = await self._client.get(job.status_url, timeout=60.0)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e, f"{model_id} status") from e
+        except httpx.HTTPError as e:
+            raise UpstreamError(f"fal {model_id} status poll failed: {e}") from e
+        body = resp.json()
+        status = body.get("status") if isinstance(body, dict) else None
+        if not isinstance(status, str):
+            raise UpstreamError(f"fal {model_id} status had no status field: {str(body)[:200]}")
+        return status
+
+    async def fetch_queued_result(self, job: _QueuedRequest, *, model_id: str) -> dict[str, Any]:
+        try:
+            resp = await self._client.get(job.response_url, timeout=120.0)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise _status_error(e, f"{model_id} result") from e
+        except httpx.HTTPError as e:
+            raise UpstreamError(f"fal {model_id} result fetch failed: {e}") from e
+        body = resp.json()
+        if not isinstance(body, dict):
+            raise UpstreamError(f"fal {model_id} result was not an object: {str(body)[:200]}")
+        return body
 
     # --- model catalog ---------------------------------------------------
 
@@ -219,6 +301,31 @@ _NON_IMAGE_OUTPUT_KEYS = (
 )
 
 
+def extract_video_url(body: Any, model_id: str) -> str:
+    """Pull the output video URL out of a fal queue result.
+
+    fal video models return ``{"video": {"url": ...}}``; a few use a ``videos``
+    array. Anything else is reported as an upstream fault rather than guessed at.
+    """
+    if not isinstance(body, dict):
+        raise UpstreamError(f"fal {model_id} returned non-dict result: {str(body)[:200]}")
+    candidates: list[Any] = []
+    video = body.get("video")
+    if video is not None:
+        candidates.append(video)
+    videos = body.get("videos")
+    if isinstance(videos, list):
+        candidates.extend(videos)
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            url = candidate.get("url")
+            if isinstance(url, str) and url:
+                return url
+        elif isinstance(candidate, str) and candidate:
+            return candidate
+    raise UpstreamError(f"fal {model_id} returned no video: {str(body)[:300]}")
+
+
 def _extract_image_urls(body: Any, model_id: str) -> list[str]:
     """Pull every ``images[].url`` out of a fal response.
 
@@ -232,9 +339,9 @@ def _extract_image_urls(body: Any, model_id: str) -> list[str]:
     if not isinstance(images, list) or not images:
         for key in _NON_IMAGE_OUTPUT_KEYS:
             if key in body:
+                hint = " — use /v1/videos for video models" if key in ("video", "video_url") else ""
                 raise UnsupportedOperation(
-                    f"fal model {model_id!r} produced {key!r} output; this provider "
-                    "implements image generation and edits only",
+                    f"fal model {model_id!r} produced {key!r} output, not an image{hint}",
                     param="model",
                 )
         raise UpstreamError(f"fal {model_id} returned no images: {str(body)[:300]}")

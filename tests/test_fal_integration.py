@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import textwrap
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -27,7 +28,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from openai_api_bridge.backends.fal.adapter import FalBackend
+from openai_api_bridge.backends.fal.adapter import SUPPORTED_CATEGORIES, FalBackend
 from openai_api_bridge.config import FalModelConfig, FalProviderConfig, reset_caches_for_tests
 
 FAL = "https://fal.run"
@@ -715,6 +716,7 @@ def discovering_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
         id = "fal"
         backend = "fal"
         api_token_env = "TEST_FAL_TOKEN"
+        video_poll_interval_seconds = 0.01
 
         [[providers.models]]
         id = "{NANO}"
@@ -799,10 +801,10 @@ def test_discovery_only_requests_supported_categories(
     route = _stub_catalog({"text-to-image": [_catalog_page([(NANO, "Nano")])]})
     assert discovering_client.get("/v1/models", headers=HEADERS).status_code == 200
     asked = {c.request.url.params.get("category") for c in route.calls}
-    assert asked == {"text-to-image", "image-to-image"}
-    # Video models would all fail with UnsupportedOperation, so they're not listed.
-    assert "text-to-video" not in asked
-    assert "image-to-video" not in asked
+    assert asked == {"text-to-image", "image-to-image", "text-to-video", "image-to-video"}
+    # Audio/3d have no code path in this backend, so they're never advertised.
+    assert "text-to-audio" not in asked
+    assert "image-to-3d" not in asked
     # Deprecated models are excluded from the listing.
     assert all(c.request.url.params.get("status") == "active" for c in route.calls)
 
@@ -863,7 +865,7 @@ def test_catalog_is_cached(discovering_client: TestClient) -> None:
     for _ in range(3):
         assert discovering_client.get("/v1/models", headers=HEADERS).status_code == 200
     # One pass over the categories, not one per /v1/models request.
-    assert route.call_count == 2
+    assert route.call_count == len(SUPPORTED_CATEGORIES)
 
 
 # --- rejected credentials --------------------------------------------------
@@ -1007,3 +1009,222 @@ def test_rejected_key_on_generation_is_reported(
     assert r.json()["error"]["code"] == "upstream_auth_error"
     errors = [rec for rec in caplog.records if rec.levelname == "ERROR"]
     assert errors and "TEST_FAL_TOKEN" in errors[0].getMessage()
+
+
+@respx.mock
+async def test_cancelled_catalog_fetch_does_not_arm_the_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client disconnecting mid-fetch (uvicorn cancels the request task) must
+    not be mistaken for a fal outage: arming the cooldown there would degrade
+    /v1/models for every other caller for the whole retry window. It must also
+    leave no partial state and no held lock."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.2)
+        return httpx.Response(
+            200,
+            json={"models": [{"endpoint_id": NANO, "metadata": {"display_name": "N"}}]},
+        )
+
+    respx.get(MODELS_API).mock(side_effect=slow)
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[])
+    try:
+        task = asyncio.create_task(backend.list_models())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert backend._catalog_failed_at is None, "cancellation must not arm the cooldown"
+        assert backend._catalog_cache is None, "no partial catalogue may be cached"
+        assert not backend._catalog_lock.locked(), "the lock must be released"
+
+        # And a subsequent request still works — not stuck behind a cooldown.
+        assert len(await backend.list_models()) == 1
+    finally:
+        await backend.aclose()
+
+
+# --- video -----------------------------------------------------------------
+
+QUEUE = "https://queue.fal.run"
+VIDEO_MODEL = "fal-ai/veo3"
+
+
+def _stub_video_job(
+    model_id: str = VIDEO_MODEL,
+    *,
+    statuses: list[str] | None = None,
+    result: dict | None = None,
+) -> respx.Route:
+    """Stub fal's queue lifecycle: submit -> status -> result -> asset."""
+    req = "req-123"
+    submit = respx.post(f"{QUEUE}/{model_id}").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "request_id": req,
+                "status_url": f"{QUEUE}/{model_id}/requests/{req}/status",
+                "response_url": f"{QUEUE}/{model_id}/requests/{req}",
+            },
+        )
+    )
+    pending = list(statuses or ["COMPLETED"])
+    respx.get(f"{QUEUE}/{model_id}/requests/{req}/status").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json={"status": pending.pop(0) if len(pending) > 1 else pending[0]}
+        )
+    )
+    respx.get(f"{QUEUE}/{model_id}/requests/{req}").mock(
+        return_value=httpx.Response(
+            200, json=result or {"video": {"url": "https://v3.fal.media/out.mp4"}}
+        )
+    )
+    respx.get("https://v3.fal.media/out.mp4").mock(
+        return_value=httpx.Response(
+            200,
+            content=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 64,
+            headers={"content-type": "video/mp4"},
+        )
+    )
+    return submit
+
+
+def _await_video(client: TestClient, job_id: str) -> dict:
+    deadline = time.time() + 5.0
+    state: dict = {}
+    while time.time() < deadline:
+        r = client.get(f"/v1/videos/{job_id}", headers=HEADERS)
+        assert r.status_code == 200
+        state = r.json()
+        if state["status"] == "completed":
+            return state
+        if state["status"] == "failed":
+            pytest.fail(f"video job failed: {state.get('error', {}).get('message')}")
+        time.sleep(0.05)
+    pytest.fail(f"video job never completed (last status {state.get('status')})")
+
+
+@respx.mock
+def test_video_round_trip_through_the_queue(discovering_client: TestClient) -> None:
+    """POST /v1/videos -> fal queue submit -> poll -> result -> /content."""
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    submit = _stub_video_job(statuses=["IN_QUEUE", "IN_PROGRESS", "COMPLETED"])
+
+    r = discovering_client.post(
+        "/v1/videos",
+        headers=HEADERS,
+        data={"model": f"fal/{VIDEO_MODEL}", "prompt": "a soaring eagle"},
+    )
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["status"] in ("queued", "in_progress")
+
+    _await_video(discovering_client, job["id"])
+    content = discovering_client.get(f"/v1/videos/{job['id']}/content", headers=HEADERS)
+    assert content.status_code == 200
+    assert content.headers["content-type"] == "video/mp4"
+    # Submitted to the queue host, not the synchronous endpoint.
+    assert submit.called
+    assert json.loads(submit.calls.last.request.read())["prompt"] == "a soaring eagle"
+
+
+@respx.mock
+def test_video_duration_uses_the_models_own_spelling(discovering_client: TestClient) -> None:
+    """`seconds` maps onto whatever the model's duration enum accepts: veo3
+    wants "4s"/"6s"/"8s", so 5s becomes "6s" — a bare "5" would 422."""
+    spec = _openapi("V", {"duration": {"enum": ["4s", "6s", "8s"], "default": "8s"}})
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("expand"):
+            return httpx.Response(
+                200, json={"models": [{"endpoint_id": VIDEO_MODEL, "openapi": spec}]}
+            )
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+    submit = _stub_video_job()
+
+    r = discovering_client.post(
+        "/v1/videos",
+        headers=HEADERS,
+        data={"model": f"fal/{VIDEO_MODEL}", "prompt": "x", "seconds": "5"},
+    )
+    assert r.status_code == 200, r.text
+    _await_video(discovering_client, r.json()["id"])
+    assert json.loads(submit.calls.last.request.read())["duration"] == "6s"
+
+
+@respx.mock
+def test_video_model_without_duration_gets_none_injected(
+    discovering_client: TestClient,
+) -> None:
+    """`wan` counts frames and has no duration field — sending one would 422."""
+    spec = _openapi("V", {"num_frames": {"type": "integer"}})
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("expand"):
+            return httpx.Response(
+                200, json={"models": [{"endpoint_id": VIDEO_MODEL, "openapi": spec}]}
+            )
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+    submit = _stub_video_job()
+
+    r = discovering_client.post(
+        "/v1/videos",
+        headers=HEADERS,
+        data={"model": f"fal/{VIDEO_MODEL}", "prompt": "x", "seconds": "5"},
+    )
+    assert r.status_code == 200, r.text
+    _await_video(discovering_client, r.json()["id"])
+    assert "duration" not in json.loads(submit.calls.last.request.read())
+
+
+@respx.mock
+def test_image_to_video_forwards_the_still_as_image_url(
+    discovering_client: TestClient,
+) -> None:
+    respx.get(MODELS_API).mock(return_value=httpx.Response(200, json={"models": []}))
+    submit = _stub_video_job()
+
+    r = discovering_client.post(
+        "/v1/videos",
+        headers=HEADERS,
+        files={"input_reference": ("still.png", b"PNG-BYTES", "image/png")},
+        data={"model": f"fal/{VIDEO_MODEL}", "prompt": "animate this"},
+    )
+    assert r.status_code == 200, r.text
+    _await_video(discovering_client, r.json()["id"])
+    body = json.loads(submit.calls.last.request.read())
+    assert body["image_url"].startswith("data:image/png;base64,")
+
+
+@respx.mock
+def test_video_models_are_listed_with_video_kind(discovering_client: TestClient) -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("expand"):
+            return httpx.Response(200, json={"models": []})
+        category = request.url.params.get("category")
+        if category == "text-to-video":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "endpoint_id": VIDEO_MODEL,
+                            "metadata": {"display_name": "Veo 3", "category": "text-to-video"},
+                        }
+                    ],
+                    "has_more": False,
+                },
+            )
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    assert by_id[f"fal/{VIDEO_MODEL}"]["kind"] == "video"

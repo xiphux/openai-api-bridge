@@ -29,24 +29,29 @@ import base64
 import logging
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 from ...config import FalModelConfig, FalProviderConfig
-from ...errors import ModelNotFound, UpstreamAuthError
+from ...errors import GenerationTimeout, ModelNotFound, UpstreamAuthError
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
-from .client import FalClient
+from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
+from .client import FalClient, extract_video_url
 from .safety import fallback_safety_params, safety_params_from_schema
+from .schema import duration_params, duration_property
 
 log = logging.getLogger(__name__)
 
-# fal categories this backend can actually serve. It implements the image
-# surface (generate + edit) only, so the video/audio/3d categories fal also
-# publishes are deliberately excluded — listing them would advertise models
-# every request would fail on with UnsupportedOperation. Adding video here
-# means implementing generate_video for fal first (its queue lifecycle), not
-# just widening the filter.
-SUPPORTED_CATEGORIES: tuple[str, ...] = ("text-to-image", "image-to-image")
+# fal categories this backend serves, mapped to the bridge's `kind` hint. The
+# audio and 3d categories fal also publishes stay out: there's no code path for
+# them, so listing them would advertise models every request would fail on.
+CATEGORY_KINDS: dict[str, str] = {
+    "text-to-image": "image",
+    "image-to-image": "image",
+    "text-to-video": "video",
+    "image-to-video": "video",
+}
+SUPPORTED_CATEGORIES: tuple[str, ...] = tuple(CATEGORY_KINDS)
 
 # With discovery on, any slug a client sends is accepted (fal rejects unknown
 # ids itself), so per-model bookkeeping is keyed by unvalidated input. Bound it
@@ -63,6 +68,19 @@ def _remember[T](mapping: OrderedDict[str, T], key: str, value: T) -> None:
     mapping.move_to_end(key)
     while len(mapping) > _MAX_TRACKED_MODELS:
         mapping.popitem(last=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivedParams:
+    """What we keep from a model's schema, per model.
+
+    Deliberately not the whole OpenAPI document: discovery surfaces hundreds of
+    models and the documents are large, while all we need is the moderation
+    settings and the shape of the ``duration`` field.
+    """
+
+    safety: dict[str, Any]
+    duration_prop: dict[str, Any] | None
 
 
 def _apply_size(body: dict[str, Any], model_slug: str, size: str | None) -> None:
@@ -99,6 +117,7 @@ class FalBackend(Backend):
             api_token=cfg.resolve_api_token(),
             request_timeout_seconds=cfg.request_timeout_seconds,
             models_api_url=cfg.models_api_url,
+            queue_base_url=cfg.queue_base_url,
         )
         # Schema-derived safety params, resolved per model on first use and
         # cached for the process. Per-model rather than one batch over the whole
@@ -106,7 +125,7 @@ class FalBackend(Backend):
         # ones actually generated with. Lazy rather than at startup so the
         # lifespan graph keeps no network dependency and a fal outage can't
         # block boot.
-        self._schema_cache: dict[str, dict[str, Any]] = {}
+        self._schema_cache: dict[str, _DerivedParams] = {}
         # One lock per model, so a fan-out across different models resolves
         # concurrently while duplicate requests for the *same* model still
         # collapse into a single lookup.
@@ -187,6 +206,14 @@ class FalBackend(Backend):
             except UpstreamAuthError as e:
                 self._note_auth_failure(e)
                 return self._configured_entries()
+            # NB: asyncio.CancelledError is BaseException, so it deliberately
+            # escapes this handler. A client disconnecting mid-fetch is no
+            # evidence fal is unhealthy — arming the cooldown there would
+            # degrade the listing for every other caller for the full retry
+            # window because one client hung up. Cancellation leaves no partial
+            # state and releases the lock, so the next request simply retries;
+            # the only cost is discarded work, and only until the first
+            # successful fetch caches the catalogue for the process.
             except Exception as e:  # never 500 /v1/models over a catalogue blip
                 self._catalog_failed_at = time.monotonic()
                 log.warning(
@@ -236,12 +263,14 @@ class FalBackend(Backend):
                 display = override.display_name
             elif isinstance(meta.get("display_name"), str):
                 display = meta["display_name"]
+            category = meta.get("category")
+            kind = CATEGORY_KINDS.get(category) if isinstance(category, str) else None
             entries.append(
                 ModelEntry(
                     id=model_id,
-                    # Both surfaced categories are image; the bridge picks the
-                    # code path from the request shape, so this is just a hint.
-                    kind="image",
+                    # The bridge picks the code path from the request shape
+                    # (POST /v1/images vs /v1/videos), so this is just a hint.
+                    kind=kind or "image",
                     display_name=display or model_id,
                     prompt_style=override.prompt_style if override else None,
                     prompt_hint=override.prompt_hint if override else None,
@@ -294,8 +323,8 @@ class FalBackend(Backend):
             _remember(self._schema_locks, model_id, lock)
             return lock
 
-    async def _derived_safety_params(self, model_id: str) -> dict[str, Any] | None:
-        """Schema-derived moderation settings for one model.
+    async def _derived_params(self, model_id: str) -> _DerivedParams | None:
+        """Schema-derived request settings for one model.
 
         ``None`` means unavailable — introspection off, the lookup failed, the
         model wasn't in the response, or we're inside its retry cooldown — and
@@ -326,7 +355,10 @@ class FalBackend(Backend):
             if spec is None:
                 self._arm_introspect_retry(model_id, "no schema returned")
                 return None
-            params = safety_params_from_schema(spec)
+            params = _DerivedParams(
+                safety=safety_params_from_schema(spec),
+                duration_prop=duration_property(spec),
+            )
             self._schema_cache[model_id] = params
             self._introspect_failed_at.pop(model_id, None)
             return params
@@ -336,11 +368,11 @@ class FalBackend(Backend):
         read the schema, else the built-in fallback map."""
         if not mcfg.disable_safety:
             return {}
-        derived = await self._derived_safety_params(mcfg.id)
+        derived = await self._derived_params(mcfg.id)
         if derived is not None:
-            if not derived:
+            if not derived.safety:
                 log.debug("fal: %r exposes no moderation knob; leaving defaults", mcfg.id)
-            return dict(derived)
+            return dict(derived.safety)
         return fallback_safety_params(mcfg.id)
 
     async def _build_body(
@@ -354,6 +386,74 @@ class FalBackend(Backend):
         if mcfg.params:
             body.update(mcfg.params)
         return body
+
+    async def generate_video(
+        self,
+        *,
+        model_slug: str,
+        prompt: str,
+        size: str | None = None,
+        seconds: float | None = None,
+        input_reference: bytes | None = None,
+        input_reference_content_type: str | None = None,
+        on_upstream_id: UpstreamIdCallback | None = None,
+    ) -> GeneratedAsset:
+        """Generate a video through fal's queue lifecycle.
+
+        Unlike images, video goes through ``queue.fal.run`` rather than the
+        synchronous endpoint: a clip takes minutes, well past what fal.run will
+        hold a connection open for. Submit returns a request id — surfaced via
+        ``on_upstream_id`` so the job row can be cross-referenced — then we poll
+        to completion and fetch the result.
+
+        ``size`` is not forwarded: video models take ``aspect_ratio`` and
+        ``resolution`` enums rather than pixel dimensions, and those don't
+        follow from a ``WxH`` string. Pin them per model via ``params``.
+        """
+        del size
+        mcfg = self._model_config(model_slug)
+        body: dict[str, Any] = {"prompt": prompt}
+        if input_reference is not None:
+            # fal's image-to-video models take the still as `image_url`, and
+            # accept a data URI inline — no separate upload step.
+            content_type = input_reference_content_type or "image/png"
+            encoded = base64.b64encode(input_reference).decode("ascii")
+            body["image_url"] = f"data:{content_type};base64,{encoded}"
+        derived = await self._derived_params(model_slug)
+        if seconds is not None and derived is not None:
+            # Duration spellings differ per model ("8s" vs "10"), so the value
+            # comes from this model's own enum. See schema.duration_params.
+            body.update(duration_params(derived.duration_prop, seconds))
+        if mcfg.disable_safety:
+            body.update(await self._safety_params(mcfg))
+        if mcfg.params:
+            body.update(mcfg.params)
+
+        try:
+            job = await self.client.submit_queued(model_slug, body)
+        except UpstreamAuthError as e:
+            self._note_auth_failure(e)
+            raise
+        if on_upstream_id is not None:
+            await on_upstream_id(job.request_id)
+
+        deadline = time.monotonic() + self.cfg.video_poll_timeout_seconds
+        while True:
+            status = await self.client.poll_queued(job, model_id=model_slug)
+            if status == "COMPLETED":
+                break
+            if time.monotonic() >= deadline:
+                raise GenerationTimeout(
+                    f"fal video job {job.request_id} for {model_slug!r} did not finish "
+                    f"within {self.cfg.video_poll_timeout_seconds:.0f}s (last status "
+                    f"{status!r})"
+                )
+            await asyncio.sleep(self.cfg.video_poll_interval_seconds)
+
+        result = await self.client.fetch_queued_result(job, model_id=model_slug)
+        url = extract_video_url(result, model_slug)
+        data, content_type = await self.client.fetch_asset(url)
+        return GeneratedAsset(data=data, content_type=content_type, kind="video")
 
     async def _run_image(self, model_slug: str, body: dict[str, Any]) -> list[str]:
         """Run a generation, reporting a rejected key on the way past.

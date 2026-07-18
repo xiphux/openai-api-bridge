@@ -38,85 +38,15 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from .schema import enum_of, input_properties
+
 log = logging.getLogger(__name__)
-
-
-# --- schema helpers ---------------------------------------------------------
-
-
-def _resolve_ref(spec: dict[str, Any], node: Any) -> dict[str, Any] | None:
-    """Follow a ``$ref`` into ``components.schemas``; pass other dicts through."""
-    if not isinstance(node, dict):
-        return None
-    ref = node.get("$ref")
-    if not isinstance(ref, str):
-        return node
-    # Only local refs ("#/components/schemas/Foo") appear in fal's specs.
-    parts = ref.lstrip("#/").split("/")
-    cur: Any = spec
-    for p in parts:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(p)
-    return cur if isinstance(cur, dict) else None
-
-
-def input_schema(spec: dict[str, Any]) -> dict[str, Any] | None:
-    """The request-body schema for a fal model's OpenAPI document.
-
-    Prefers the POST ``requestBody`` whose ``$ref`` names an ``*Input`` schema
-    (fal's convention), falling back to the first resolvable request body, then
-    to any ``components.schemas`` entry ending in ``Input``.
-    """
-    fallback: dict[str, Any] | None = None
-    paths = spec.get("paths")
-    if isinstance(paths, dict):
-        for item in paths.values():
-            if not isinstance(item, dict):
-                continue
-            post = item.get("post")
-            if not isinstance(post, dict):
-                continue
-            content = (post.get("requestBody") or {}).get("content")
-            if not isinstance(content, dict):
-                continue
-            for media in content.values():
-                if not isinstance(media, dict):
-                    continue
-                raw = media.get("schema")
-                resolved = _resolve_ref(spec, raw)
-                if not resolved or "properties" not in resolved:
-                    continue
-                ref = raw.get("$ref") if isinstance(raw, dict) else None
-                if isinstance(ref, str) and ref.endswith("Input"):
-                    return resolved
-                fallback = fallback or resolved
-    if fallback is not None:
-        return fallback
-
-    schemas = (spec.get("components") or {}).get("schemas")
-    if isinstance(schemas, dict):
-        for name, s in schemas.items():
-            if name.endswith("Input") and isinstance(s, dict):
-                return s
-    return None
-
-
-def _enum_of(schema: dict[str, Any]) -> list[Any] | None:
-    if isinstance(schema.get("enum"), list) and schema["enum"]:
-        return list(schema["enum"])
-    # fal often wraps enums behind anyOf/allOf (e.g. for Optional[...]).
-    for key in ("anyOf", "allOf", "oneOf"):
-        for sub in schema.get(key) or []:
-            if isinstance(sub, dict) and isinstance(sub.get("enum"), list) and sub["enum"]:
-                return list(sub["enum"])
-    return None
 
 
 def _loosest_enum(schema: dict[str, Any]) -> Any | None:
     """Highest value in the field's own enum — fal's tolerance scales run
     strict->loose, so the maximum is the most permissive."""
-    values = _enum_of(schema)
+    values = enum_of(schema)
     if not values:
         return None
     try:
@@ -146,12 +76,7 @@ def safety_params_from_schema(spec: dict[str, Any]) -> dict[str, Any]:
     GPT-Image wrapper, which has no moderation field at all) — nothing is
     guessed, since an unknown field would 422 upstream.
     """
-    schema = input_schema(spec)
-    if not schema:
-        return {}
-    props = schema.get("properties")
-    if not isinstance(props, dict):
-        return {}
+    props = input_properties(spec)
     out: dict[str, Any] = {}
     # Only top-level request properties are considered, so output-side fields
     # such as has_nsfw_concepts can never be picked up.

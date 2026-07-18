@@ -161,9 +161,11 @@ class FalModelConfig(BaseModel):
     """
 
     id: str
-    # fal serves image and video; the bridge's fal backend implements the
-    # image surface (generate + edit). Only "image" is accepted for now.
-    kind: Literal["image"] = "image"
+    # Surfaced on /v1/models as a hint. With discovery on this is taken from
+    # the catalogue category; set it here only for a model you're declaring
+    # explicitly. The bridge picks the actual code path from the request shape
+    # (POST /v1/images vs /v1/videos), not from this field.
+    kind: Literal["image", "video"] = "image"
     display_name: str | None = None
     prompt_style: str | None = None
     prompt_hint: str | None = None
@@ -217,11 +219,19 @@ class FalProviderConfig(BaseModel):
     # fal's model API, used both to list models and to introspect each model's
     # OpenAPI input schema so the moderation knob can be derived, not hardcoded.
     models_api_url: str = "https://api.fal.ai/v1/models"
-    # When true (default), the loosest moderation setting is read from each
-    # model's own schema — which keeps working across new model versions and
-    # picks up per-model enum ceilings (most accept "1".."6"; flux-2-flex tops
-    # out at "5"). Set false to skip the lookup and use the built-in fallback
-    # map instead; the bridge also falls back automatically if the fetch fails.
+    # fal's queue host, used for video. Images run against the synchronous
+    # endpoint; a video clip takes minutes, past what that will hold open.
+    queue_base_url: str = "https://queue.fal.run"
+    video_poll_interval_seconds: float = 3.0
+    video_poll_timeout_seconds: float = 1800.0
+    # When true (default), request settings are read from each model's own
+    # schema — the loosest moderation value, and the accepted spelling of
+    # `duration` for video. That keeps working across new model versions and
+    # picks up per-model enums (moderation is "1".."6" on most models but tops
+    # out at "5" on flux-2-flex; duration is "8s" on veo3 and "10" on Kling).
+    # False skips the lookup: moderation falls back to a small built-in map and
+    # video duration is left to the model's default. The bridge also falls back
+    # automatically if the fetch fails.
     introspect_safety: bool = True
     # Cooldown before a *failed* introspection is retried. Until it elapses,
     # requests use the built-in fallback map, so a fal outage costs one round
