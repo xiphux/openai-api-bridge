@@ -35,7 +35,14 @@ from typing import Any
 from ...config import FalModelConfig, FalProviderConfig
 from ...errors import GenerationTimeout, ModelNotFound, UpstreamAuthError, UpstreamError
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, UpstreamIdCallback
+from ..base import (
+    Backend,
+    GeneratedAsset,
+    InputImage,
+    ModelEntry,
+    UpstreamIdCallback,
+    disambiguate_display_names,
+)
 from .client import FalClient, QueuedRequest, extract_video_url
 from .safety import fallback_safety_params, safety_params_from_schema
 from .schema import duration_params, duration_property
@@ -325,6 +332,7 @@ class FalBackend(Backend):
 
         entries: list[ModelEntry] = []
         seen: set[str] = set()
+        pinned: set[str] = set()
         for item in raw:
             model_id = item.get("endpoint_id")
             if not isinstance(model_id, str) or not model_id or model_id in seen:
@@ -341,6 +349,7 @@ class FalBackend(Backend):
             display = None
             if override is not None and override.display_name:
                 display = override.display_name
+                pinned.add(model_id)
             elif isinstance(meta.get("display_name"), str):
                 display = meta["display_name"]
             category = meta.get("category")
@@ -371,7 +380,9 @@ class FalBackend(Backend):
                     capabilities=capabilities,
                 )
             )
-        return entries
+        # fal titles an endpoint after its model family, so multi-endpoint
+        # families arrive as a run of identically-named rows.
+        return disambiguate_display_names(entries, pinned=frozenset(pinned))
 
     def _category_of(self, by_id: dict[str, dict[str, Any]], model_id: str) -> str | None:
         meta = by_id.get(model_id, {}).get("metadata")

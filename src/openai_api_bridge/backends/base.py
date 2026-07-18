@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..errors import UnsupportedOperation
@@ -104,6 +104,64 @@ def make_capabilities(inputs: Iterable[str], output: str | None) -> tuple[str, .
     seen = set(inputs)
     ordered = [m for m in _INPUT_MODALITY_ORDER if m in seen]
     return tuple(f"{m}-to-{output}" for m in ordered) or None
+
+
+def disambiguate_display_names(
+    entries: list[ModelEntry], *, pinned: frozenset[str] = frozenset()
+) -> list[ModelEntry]:
+    """Make each entry's ``display_name`` unique by appending its id's variant path.
+
+    Upstreams title an endpoint after the model *family*, not the endpoint: fal
+    serves Florence-2 Large as eight task endpoints
+    (``fal-ai/florence-2-large/object-detection``, ``/ocr-with-region``, …) and
+    titles all eight ``Florence-2 Large``. The ids stay distinct and every one
+    is separately callable, but a frontend that renders ``display_name`` — which
+    is the point of the field — shows eight identical rows and the user cannot
+    tell which is which. Nearly a third of fal's catalogue collides this way.
+
+    Disambiguation appends only the part of the id that actually differs within
+    the colliding group, so ``Wan`` becomes ``Wan (v2.7/text-to-image)`` rather
+    than repeating the family segment every client already sees. The suffix is
+    the id verbatim: it matches what the caller passes as ``model``, and
+    prettifying it would mangle the version strings that carry the distinction
+    (``v2.2-a14b`` is not "V2.2 A14B").
+
+    ``pinned`` ids are never renamed — an operator who set ``display_name`` in
+    config asked for that exact string, collision or not. They still take part
+    in *detecting* a collision, so a catalogue entry that happens to clash with
+    a pinned name is still pulled apart from it — the pin is honoured without
+    letting it mask a duplicate.
+    """
+    groups: dict[str, list[int]] = {}
+    for i, entry in enumerate(entries):
+        if not entry.display_name:
+            continue
+        groups.setdefault(entry.display_name, []).append(i)
+
+    out = list(entries)
+    for name, idxs in groups.items():
+        if len(idxs) < 2:
+            continue
+        renaming = [i for i in idxs if out[i].id not in pinned]
+        if not renaming:
+            continue
+        # The shared prefix spans only the ids being renamed, not the whole
+        # colliding group: a pinned id can be a strict prefix of its sibling
+        # (``…/nano-banana-2`` vs ``…/nano-banana-2/lite``), and including it
+        # would halt the scan early to preserve a segment for an entry that is
+        # never rewritten — leaving the sibling labelled with the family name
+        # it already collides on.
+        segments = [out[i].id.split("/") for i in renaming]
+        # Stop one short of the shortest id so every renamed entry keeps at
+        # least one distinguishing segment.
+        shared = 0
+        while (
+            all(len(s) > shared + 1 for s in segments) and len({s[shared] for s in segments}) == 1
+        ):
+            shared += 1
+        for i, segs in zip(renaming, segments, strict=True):
+            out[i] = replace(out[i], display_name=f"{name} ({'/'.join(segs[shared:])})")
+    return out
 
 
 @dataclass(frozen=True, slots=True)

@@ -2152,3 +2152,74 @@ async def test_a_failing_cancel_does_not_mask_the_original_error(
         assert "did not finish" in str(excinfo.value)
     finally:
         await backend.aclose()
+
+
+# --- display-name disambiguation -------------------------------------------
+
+
+@respx.mock
+def test_family_named_endpoints_are_disambiguated(discovering_client: TestClient) -> None:
+    """fal titles every endpoint of a family after the family, so a picker
+    rendering display_name shows a run of identical rows."""
+    _stub_catalog_entries(
+        [
+            _cat_entry("fal-ai/florence-2-large/object-detection", "image-to-image", "Florence-2"),
+            _cat_entry("fal-ai/florence-2-large/ocr-with-region", "image-to-image", "Florence-2"),
+            _cat_entry("fal-ai/florence-2-large/region-proposal", "image-to-image", "Florence-2"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    assert names["fal/fal-ai/florence-2-large/object-detection"] == "Florence-2 (object-detection)"
+    assert names["fal/fal-ai/florence-2-large/ocr-with-region"] == "Florence-2 (ocr-with-region)"
+    assert names["fal/fal-ai/florence-2-large/region-proposal"] == "Florence-2 (region-proposal)"
+
+
+@respx.mock
+def test_disambiguation_keeps_only_the_differing_path(discovering_client: TestClient) -> None:
+    """The suffix is what actually differs within the group — the shared
+    family segments are already visible in the id and would be noise."""
+    _stub_catalog_entries(
+        [
+            _cat_entry("fal-ai/wan/v2.7/text-to-image", "text-to-image", "Wan"),
+            _cat_entry("fal-ai/wan/v2.2-a14b/text-to-image", "text-to-image", "Wan"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    assert names["fal/fal-ai/wan/v2.7/text-to-image"] == "Wan (v2.7/text-to-image)"
+    assert names["fal/fal-ai/wan/v2.2-a14b/text-to-image"] == "Wan (v2.2-a14b/text-to-image)"
+
+
+@respx.mock
+def test_unique_display_names_are_left_alone(discovering_client: TestClient) -> None:
+    _stub_catalog_entries(
+        [
+            _cat_entry(SEEDREAM_T2I, "text-to-image", "Seedream 4"),
+            _cat_entry(GPT_IMAGE, "text-to-image", "GPT Image 2"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    assert names[f"fal/{SEEDREAM_T2I}"] == "Seedream 4"
+    assert names[f"fal/{GPT_IMAGE}"] == "GPT Image 2"
+
+
+@respx.mock
+def test_configured_display_name_is_not_disambiguated(discovering_client: TestClient) -> None:
+    """An operator who pinned a name in config asked for that exact string."""
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano Banana 2"),
+            _cat_entry(f"{NANO}/lite", "text-to-image", "Nano (renamed locally)"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    # NANO is pinned by the fixture's [[providers.models]] block, so it keeps
+    # the operator's exact string.
+    assert names[f"fal/{NANO}"] == "Nano (renamed locally)"
+    # Its catalogue-named sibling collides with that pin, and is pulled apart
+    # from it — honouring the pin must not leave a duplicate standing.
+    assert names[f"fal/{NANO}/lite"] == "Nano (renamed locally) (lite)"
