@@ -191,6 +191,27 @@ def test_disable_safety_false_injects_nothing(client_with_fal: TestClient) -> No
 
 
 @respx.mock
+def test_multiple_images_from_single_call(client_with_fal: TestClient) -> None:
+    # fal honours num_images server-side: one generation call returns all n
+    # image URLs, which the bridge fetches concurrently.
+    u1 = "https://v3.fal.media/files/one.png"
+    u2 = "https://v3.fal.media/files/two.png"
+    gen = respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(200, json={"images": [{"url": u1}, {"url": u2}], "seed": 7})
+    )
+    for u in (u1, u2):
+        respx.get(u).mock(
+            return_value=httpx.Response(200, content=_PNG, headers={"content-type": "image/png"})
+        )
+    r = _generate(client_with_fal, SEEDREAM_T2I, n=2)
+    assert r.status_code == 200, r.text
+    assert len(r.json()["data"]) == 2
+    # A single upstream generation call, num_images forwarded.
+    assert gen.call_count == 1
+    assert _sent_body(gen)["num_images"] == 2
+
+
+@respx.mock
 def test_params_override_wins_over_family_default(client_with_fal: TestClient) -> None:
     # NANO_PRO is Nano-Banana family (default safety_tolerance="6") but config
     # pins it to "3" — the explicit params must win.

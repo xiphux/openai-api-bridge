@@ -29,13 +29,13 @@ is fine since ImageRouter's CDN is fast.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 import httpx
 
 from ...errors import UpstreamError
+from ...util.http import fetch_asset_with_retry
 from ..base import InputImage
 
 log = logging.getLogger(__name__)
@@ -48,7 +48,6 @@ log = logging.getLogger(__name__)
 # generous budget.
 _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
 _DEFAULT_VIDEO_READ_TIMEOUT_S = 1800.0
-_FETCH_ASSET_TIMEOUT_S = 120.0
 
 
 class ImageRouterClient:
@@ -228,86 +227,14 @@ class ImageRouterClient:
     async def fetch_asset(self, url: str) -> tuple[bytes, str]:
         """Download a generated asset (image or video) by URL.
 
-        Returns ``(bytes, content_type)``. Used by the adapter to convert
-        ImageRouter's ``response_format=url`` envelope into the byte
-        payload the bridge's FileStore expects.
-
-        Retries with exponential backoff on 401/404/5xx errors to handle
-        potential race conditions where the generation API returns a URL
-        before the file is fully uploaded to storage.
+        Returns ``(bytes, content_type)`` — converting ImageRouter's
+        ``response_format=url`` envelope into the byte payload the FileStore
+        expects. ImageRouter's asset URLs (``storage.imagerouter.io/...``) are
+        publicly accessible, so the shared helper fetches them unauthenticated
+        with retry/backoff. See
+        :func:`~openai_api_bridge.util.http.fetch_asset_with_retry`.
         """
-        # ImageRouter's asset URLs (``storage.imagerouter.io/...``) are
-        # publicly accessible per their documentation — no authentication
-        # required. We use a separate client without auth headers to avoid
-        # any potential issues with the storage server rejecting requests
-        # that include unexpected Authorization headers, and to avoid
-        # httpx's cross-origin header-stripping behavior on redirects.
-        max_attempts = 3
-        base_delay = 1.0
-        last_error: httpx.HTTPError | None = None
-        resp: httpx.Response | None = None
-
-        for attempt in range(max_attempts):
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(
-                        url,
-                        timeout=_FETCH_ASSET_TIMEOUT_S,
-                        follow_redirects=True,
-                    )
-                # Retry on 401, 404, or 5xx (potential race condition or transient error)
-                if (
-                    resp is not None
-                    and (resp.status_code in (401, 404) or resp.status_code >= 500)
-                    and attempt < max_attempts - 1
-                ):
-                    delay = base_delay * (2**attempt)
-                    log.warning(
-                        f"ImageRouter asset fetch got {resp.status_code} for {url}, "
-                        f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                if resp is not None:
-                    resp.raise_for_status()
-                break
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    delay = base_delay * (2**attempt)
-                    log.warning(
-                        f"ImageRouter asset fetch failed for {url}, "
-                        f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise UpstreamError(
-                    f"ImageRouter asset fetch returned {e.response.status_code} for {url} "
-                    f"after {max_attempts} attempts"
-                ) from e
-            except httpx.HTTPError as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    delay = base_delay * (2**attempt)
-                    log.warning(
-                        f"ImageRouter asset fetch failed for {url}, "
-                        f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise UpstreamError(
-                    f"ImageRouter asset fetch failed for {url} after {max_attempts} attempts: {e}"
-                ) from e
-
-        if resp is None:
-            raise UpstreamError(
-                f"ImageRouter asset fetch failed for {url} after {max_attempts} attempts"
-            ) from last_error
-
-        content_type = resp.headers.get("content-type", "application/octet-stream")
-        # Strip charset / boundary suffixes for clean storage.
-        content_type = content_type.split(";", 1)[0].strip()
-        return resp.content, content_type
+        return await fetch_asset_with_retry(url, provider_label="ImageRouter")
 
 
 def _extract_first_url(body: Any, label: str) -> str:

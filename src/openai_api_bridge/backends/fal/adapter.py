@@ -15,6 +15,7 @@ declared in the provider's TOML block rather than a live upstream listing.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any
@@ -130,11 +131,15 @@ class FalBackend(Backend):
         return body
 
     async def _fetch_all(self, urls: list[str]) -> list[GeneratedAsset]:
-        out: list[GeneratedAsset] = []
-        for url in urls:
-            data, content_type = await self.client.fetch_asset(url)
-            out.append(GeneratedAsset(data=data, content_type=content_type, kind="image"))
-        return out
+        # fal returns every image from a single call, so the URLs are all in
+        # hand at once — fetch them concurrently rather than serially. Order is
+        # preserved; if any fetch exhausts its retries, gather propagates the
+        # error and the whole request fails (all-or-nothing, as before).
+        assets = await asyncio.gather(*(self.client.fetch_asset(url) for url in urls))
+        return [
+            GeneratedAsset(data=data, content_type=content_type, kind="image")
+            for data, content_type in assets
+        ]
 
     async def generate_image(
         self,

@@ -16,13 +16,13 @@ separately, mirroring the URL-then-fetch pattern used elsewhere in the bridge.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
 import httpx
 
 from ...errors import UpstreamError
+from ...util.http import fetch_asset_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +31,6 @@ log = logging.getLogger(__name__)
 # models finish well inside a minute, but a busy queue or a 4K request can run
 # longer, so the read budget is generous. Connect stays low — DNS/TLS is fast.
 _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
-_FETCH_ASSET_TIMEOUT_S = 120.0
 
 
 class FalClient:
@@ -77,77 +76,11 @@ class FalClient:
     async def fetch_asset(self, url: str) -> tuple[bytes, str]:
         """Download a generated asset by URL, returning ``(bytes, content_type)``.
 
-        fal's output URLs (``*.fal.media``) are publicly accessible, so — as with
-        the ImageRouter backend — we fetch them with a separate unauthenticated
-        client to avoid attaching our fal key to a CDN request or tripping
-        httpx's cross-origin header-stripping on redirects. Retries with
-        exponential backoff cover the brief window where a just-minted URL isn't
-        yet readable from storage.
+        fal's output URLs (``*.fal.media``) are publicly accessible; the shared
+        helper fetches them unauthenticated with retry/backoff. See
+        :func:`~openai_api_bridge.util.http.fetch_asset_with_retry`.
         """
-        max_attempts = 3
-        base_delay = 1.0
-        last_error: httpx.HTTPError | None = None
-        resp: httpx.Response | None = None
-
-        for attempt in range(max_attempts):
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(
-                        url,
-                        timeout=_FETCH_ASSET_TIMEOUT_S,
-                        follow_redirects=True,
-                    )
-                if (
-                    resp is not None
-                    and (resp.status_code in (401, 404) or resp.status_code >= 500)
-                    and attempt < max_attempts - 1
-                ):
-                    delay = base_delay * (2**attempt)
-                    log.warning(
-                        f"fal asset fetch got {resp.status_code} for {url}, "
-                        f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                if resp is not None:
-                    resp.raise_for_status()
-                break
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    delay = base_delay * (2**attempt)
-                    log.warning(
-                        f"fal asset fetch failed for {url}, "
-                        f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise UpstreamError(
-                    f"fal asset fetch returned {e.response.status_code} for {url} "
-                    f"after {max_attempts} attempts"
-                ) from e
-            except httpx.HTTPError as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    delay = base_delay * (2**attempt)
-                    log.warning(
-                        f"fal asset fetch failed for {url}, "
-                        f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise UpstreamError(
-                    f"fal asset fetch failed for {url} after {max_attempts} attempts: {e}"
-                ) from e
-
-        if resp is None:
-            raise UpstreamError(
-                f"fal asset fetch failed for {url} after {max_attempts} attempts"
-            ) from last_error
-
-        content_type = resp.headers.get("content-type", "application/octet-stream")
-        content_type = content_type.split(";", 1)[0].strip()
-        return resp.content, content_type
+        return await fetch_asset_with_retry(url, provider_label="fal")
 
 
 def _extract_image_urls(body: Any, model_id: str) -> list[str]:
