@@ -17,6 +17,7 @@ from typing import Any
 
 from ...config import VeniceProviderConfig
 from ...errors import InvalidRequest, UnsupportedOperation
+from ...util.cache import AsyncTTLCache
 from ...util.sizes import parse_size
 from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, make_capabilities
 from .client import VeniceClient
@@ -57,11 +58,24 @@ class VeniceBackend(Backend):
         self._routes_lock = asyncio.Lock()
         self._routes_loaded = False
         self._routes_failed_at: float | None = None
+        # Only *complete* listings are stored: caching a degraded one (inpaint
+        # half missing) would pin routing unresolved for the whole TTL,
+        # outliving the shorter route-retry cooldown that is supposed to govern
+        # when we try again. That's why this drives the cache by hand rather
+        # than using AsyncTTLCache.get(), which would store whatever came back.
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(cfg.catalog_ttl_seconds)
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
+        async with self._catalog.lock:
+            cached = self._catalog.fresh()
+            if cached is not None:
+                return cached
+            return await self._fetch_catalog()
+
+    async def _fetch_catalog(self) -> list[ModelEntry]:
         # Two independent listings, fetched together — neither feeds the other,
         # and serialising them would double this endpoint's tail latency while
         # every other provider waits behind it.
@@ -135,6 +149,8 @@ class VeniceBackend(Backend):
             for model_id in edit_ids
             if model_id not in collapsed
         ]
+        if edit_available:
+            self._catalog.store(entries)
         return entries
 
     def _in_route_cooldown(self) -> bool:

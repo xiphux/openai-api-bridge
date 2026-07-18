@@ -476,3 +476,26 @@ def test_models_expose_capabilities_from_architecture(
     assert by_id["or/vendor/vision-chat"]["capabilities"] == ["text-to-text", "image-to-text"]
     assert by_id["or/vendor/text-chat"]["capabilities"] == ["text-to-text"]
     assert by_id["or/vendor/img"]["capabilities"] == ["text-to-image", "image-to-image"]
+
+
+@respx.mock
+def test_model_catalog_is_cached(client_with_openrouter: TestClient) -> None:
+    route = respx.get(f"{UPSTREAM}/v1/models").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "vendor/img",
+                        "architecture": {
+                            "input_modalities": ["text"],
+                            "output_modalities": ["image"],
+                        },
+                    }
+                ]
+            },
+        )
+    )
+    for _ in range(3):
+        assert client_with_openrouter.get("/v1/models", headers=HEADERS).status_code == 200
+    assert route.call_count == 1

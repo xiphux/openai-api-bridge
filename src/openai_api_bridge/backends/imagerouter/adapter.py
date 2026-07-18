@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 
 from ...config import ImageRouterProviderConfig
+from ...util.cache import AsyncTTLCache
 from ..base import (
     Backend,
     GeneratedAsset,
@@ -37,11 +38,15 @@ class ImageRouterBackend(Backend):
             base_url=cfg.base_url,
             api_token=cfg.resolve_api_token(),
         )
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(cfg.catalog_ttl_seconds)
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
+        return await self._catalog.get(self._fetch_models)
+
+    async def _fetch_models(self) -> list[ModelEntry]:
         raw = await self.client.list_models()
         entries: list[ModelEntry] = []
         for info in raw:

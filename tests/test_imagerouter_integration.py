@@ -364,3 +364,35 @@ def test_images_generations_upstream_error_surfaces(
     # not crash.
     assert r.status_code >= 400
     assert "rate limited" in r.text.lower() or "500" not in r.text
+
+
+@respx.mock
+def test_model_catalog_is_cached(client_with_imagerouter: TestClient) -> None:
+    """/v1/models fans out to every provider on each request, so repeating it
+    shouldn't keep costing an upstream round trip."""
+    route = respx.get(f"{UPSTREAM}/v2/models").mock(
+        return_value=httpx.Response(200, json=_MODELS_FIXTURE)
+    )
+    for _ in range(3):
+        assert client_with_imagerouter.get("/v1/models", headers=HEADERS).status_code == 200
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_catalog_fetch_failure_is_not_cached(client_with_imagerouter: TestClient) -> None:
+    """A failed listing must not be remembered — the provider should come back
+    on its own once the upstream recovers."""
+    calls = {"n": 0}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": "down"})
+        return httpx.Response(200, json=_MODELS_FIXTURE)
+
+    respx.get(f"{UPSTREAM}/v2/models").mock(side_effect=responder)
+
+    first = client_with_imagerouter.get("/v1/models", headers=HEADERS)
+    assert not [m for m in first.json().get("data", []) if m["id"].startswith("ir/")]
+    second = client_with_imagerouter.get("/v1/models", headers=HEADERS)
+    assert [m for m in second.json()["data"] if m["id"].startswith("ir/")]

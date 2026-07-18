@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from ...config import OpenRouterProviderConfig
+from ...util.cache import AsyncTTLCache
 from ..base import (
     KIND_OUTPUT_MODALITY,
     Backend,
@@ -55,6 +56,7 @@ class OpenRouterBackend(Backend):
         # few models return hosted URLs that we'd want to GET without our
         # bridge-side Authorization header attached.
         self._download_client = httpx.AsyncClient(timeout=120.0)
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(cfg.catalog_ttl_seconds)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -63,6 +65,9 @@ class OpenRouterBackend(Backend):
     # --- model catalog ---------------------------------------------------
 
     async def list_models(self) -> list[ModelEntry]:
+        return await self._catalog.get(self._fetch_models)
+
+    async def _fetch_models(self) -> list[ModelEntry]:
         raw = await self._client.list_models()
         entries: list[ModelEntry] = []
         for m in raw:

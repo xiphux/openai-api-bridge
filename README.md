@@ -48,6 +48,20 @@ Adding a future backend (Replicate, a second ComfyUI instance, etc.) is a
 single new `[[providers]]` block in `config.toml` plus an adapter module —
 see `src/openai_api_bridge/backends/` for the existing implementations.
 
+### Model catalogue caching
+
+`GET /v1/models` fans out to every configured provider, so an uncached backend
+pays an upstream round trip each time a client refreshes its model picker.
+ImageRouter, OpenRouter and Venice cache their listing for
+`catalog_ttl_seconds` (default 300; `0` disables). Fetches happen under a lock,
+so a burst of concurrent requests collapses into one upstream call they all
+share rather than each firing its own.
+
+It's a TTL rather than a permanent cache so a model added upstream appears
+without restarting the bridge. A failed fetch is never cached, so a provider
+returns on its own once its upstream recovers. (ComfyUI is separate — it scans
+workflow files from disk, governed by `cache_workflows`.)
+
 ### Edit models on Venice
 
 Venice files text-to-image under `type=image` and image-to-image under

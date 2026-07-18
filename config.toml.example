@@ -65,6 +65,13 @@ api_token_env = "VENICE_API_TOKEN"
 # re-fetching the catalogue on every edit during an outage. 0 disables the
 # cooldown — which reinstates exactly that retry storm.
 # route_retry_seconds = 60.0
+#
+# How long a successfully-read model catalogue is reused. /v1/models costs two
+# upstream calls here (the text-to-image and image-to-image listings), and edit
+# routing reads the same catalogue. A listing whose inpaint half failed is
+# never cached, so routing retries on the shorter route_retry_seconds instead.
+# 0 disables caching.
+# catalog_ttl_seconds = 300.0
 
 
 # --- ImageRouter ------------------------------------------------------------
@@ -79,6 +86,8 @@ api_token_env = "VENICE_API_TOKEN"
 # backend = "imagerouter"
 # api_token_env = "IMAGEROUTER_API_KEY"
 # # base_url defaults to https://api.imagerouter.io and rarely needs override
+# # catalog_ttl_seconds = 300.0   # reuse the model listing for this long
+# #                               # (0 = re-fetch on every /v1/models)
 
 
 # --- OpenAI passthrough -----------------------------------------------------
@@ -133,6 +142,8 @@ api_token_env = "VENICE_API_TOKEN"
 # api_token_env = "OPENROUTER_API_KEY"
 # # base_url defaults to https://openrouter.ai/api and rarely needs override
 # # request_timeout_seconds = 120.0
+# # catalog_ttl_seconds = 300.0   # reuse the model listing for this long
+# #                               # (0 = re-fetch on every /v1/models)
 
 
 # --- fal.ai -----------------------------------------------------------------

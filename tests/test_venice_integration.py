@@ -303,3 +303,117 @@ async def test_degraded_listing_leaves_routing_unresolved(
         assert backend._routes_failed_at is not None, "and must arm the retry cooldown"
     finally:
         await backend.aclose()
+
+
+# --- catalogue caching -----------------------------------------------------
+
+
+def _venice_backend(**overrides: object) -> object:
+    from openai_api_bridge.backends.venice.adapter import VeniceBackend
+    from openai_api_bridge.config import VeniceProviderConfig
+
+    return VeniceBackend(
+        VeniceProviderConfig(
+            backend="venice", id="vn", api_token_env="VENICE_API_TOKEN", **overrides
+        )
+    )
+
+
+def _counting_catalog(calls: dict[str, int], *, inpaint_ok: bool = True) -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls["n"] = calls.get("n", 0) + 1
+        model_type = request.url.params.get("type")
+        if model_type == "inpaint" and not inpaint_ok:
+            return httpx.Response(503, json={"error": "down"})
+        ids = ["gpt-image-2"] if model_type == "image" else ["gpt-image-2-edit"]
+        return httpx.Response(200, json={"data": [{"id": i, "type": model_type} for i in ids]})
+
+    respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
+
+
+@respx.mock
+async def test_catalog_is_cached_across_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/v1/models costs two upstream calls on Venice, so repeating it shouldn't
+    keep paying for both."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls)
+
+    backend = _venice_backend(catalog_ttl_seconds=300.0)
+    try:
+        for _ in range(4):
+            assert len(await backend.list_models()) == 1
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 2, f"expected one image+inpaint pair, got {calls['n']} calls"
+
+
+@respx.mock
+async def test_catalog_cache_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TTL rather than a permanent cache, so models Venice adds show up
+    without restarting the bridge."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls)
+
+    backend = _venice_backend(catalog_ttl_seconds=0.05)
+    try:
+        await backend.list_models()
+        assert calls["n"] == 2
+        await asyncio.sleep(0.1)
+        await backend.list_models()
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 4, "the catalogue should be re-read once the TTL lapses"
+
+
+@respx.mock
+async def test_catalog_caching_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls)
+
+    backend = _venice_backend(catalog_ttl_seconds=0)
+    try:
+        await backend.list_models()
+        await backend.list_models()
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 4
+
+
+@respx.mock
+async def test_degraded_listing_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Caching a listing whose inpaint half failed would pin routing unresolved
+    for the whole TTL, outliving the shorter route-retry cooldown that's meant
+    to decide when we try again."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls, inpaint_ok=False)
+
+    backend = _venice_backend(catalog_ttl_seconds=300.0)
+    try:
+        await backend.list_models()
+        assert backend._catalog.fresh() is None, "a degraded listing must not be cached"
+        await backend.list_models()
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 4, "a degraded listing should be re-attempted, not served from cache"
+
+
+@respx.mock
+async def test_edit_routing_reuses_the_cached_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Routing reads the same catalogue, so an edit after a listing shouldn't
+    re-fetch it."""
+    monkeypatch.setenv("VENICE_API_TOKEN", "venice-secret")
+    calls: dict[str, int] = {}
+    _counting_catalog(calls)
+
+    backend = _venice_backend(catalog_ttl_seconds=300.0)
+    try:
+        await backend.list_models()
+        assert calls["n"] == 2
+        assert await backend._edit_target("gpt-image-2") == "gpt-image-2-edit"
+    finally:
+        await backend.aclose()
+    assert calls["n"] == 2, "edit routing should hit the cache, not re-fetch"

@@ -102,6 +102,14 @@ class VeniceProviderConfig(BaseModel):
     # bounded tail after Venice recovers, traded against re-fetching the
     # catalogue on every single edit while it's down.
     route_retry_seconds: float = 60.0
+    # How long a successfully-read model catalogue is reused before being
+    # re-fetched. /v1/models costs two upstream calls on Venice (the
+    # text-to-image and image-to-image listings), and edit routing reads the
+    # same catalogue, so without this every listing request and every
+    # first-of-process edit pays for both. A TTL rather than a permanent cache
+    # so models Venice adds appear without restarting the bridge. 0 disables
+    # caching entirely.
+    catalog_ttl_seconds: float = 300.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
@@ -124,6 +132,12 @@ class ImageRouterProviderConfig(BaseModel):
     id: str
     base_url: str = "https://api.imagerouter.io"
     api_token_env: str
+    # How long the model catalogue is reused before being re-fetched.
+    # /v1/models fans out to every provider on every request, so without this
+    # each client refresh costs an upstream round trip. A TTL rather than a
+    # permanent cache so newly added models appear without a restart.
+    # 0 disables caching.
+    catalog_ttl_seconds: float = 300.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
@@ -146,6 +160,12 @@ class OpenRouterProviderConfig(BaseModel):
     base_url: str = "https://openrouter.ai/api"
     api_token_env: str
     request_timeout_seconds: float = 120.0
+    # How long the model catalogue is reused before being re-fetched.
+    # /v1/models fans out to every provider on every request, so without this
+    # each client refresh costs an upstream round trip. A TTL rather than a
+    # permanent cache so newly added models appear without a restart.
+    # 0 disables caching.
+    catalog_ttl_seconds: float = 300.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
