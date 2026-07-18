@@ -19,8 +19,12 @@ Two ways in:
   to store a listing whose second half failed, since that would pin its edit
   routing unresolved for the whole TTL.
 
-Nothing is stored when a fetch raises, so a failure is retried by the next
-caller; backends needing to damp that down layer their own cooldown on top.
+A failure is remembered for ``failure_cooldown_seconds`` and re-raised to
+callers arriving inside that window. That matters because the fetch runs *under
+the lock*: without it, a burst arriving during an upstream hang would each
+re-acquire and start their own fetch, so the Nth caller waits N x timeout —
+worse than the uncached behaviour, where they at least hung concurrently. With
+it, the first caller pays the timeout and the rest fail fast.
 """
 
 from __future__ import annotations
@@ -31,11 +35,14 @@ from collections.abc import Awaitable, Callable
 
 
 class AsyncTTLCache[T]:
-    def __init__(self, ttl_seconds: float) -> None:
+    def __init__(self, ttl_seconds: float, failure_cooldown_seconds: float = 0.0) -> None:
         self.ttl_seconds = ttl_seconds
+        self.failure_cooldown_seconds = failure_cooldown_seconds
         self.lock = asyncio.Lock()
         self._value: T | None = None
         self._stored_at: float | None = None
+        self._failure: BaseException | None = None
+        self._failed_at: float | None = None
 
     def fresh(self) -> T | None:
         """The cached value if it hasn't aged out, else ``None``.
@@ -54,10 +61,29 @@ class AsyncTTLCache[T]:
     def store(self, value: T) -> None:
         self._value = value
         self._stored_at = time.monotonic()
+        self._failure = None
+        self._failed_at = None
+
+    def note_failure(self, error: BaseException) -> None:
+        """Remember a failed fetch so callers in the cooldown fail fast."""
+        self._failure = error
+        self._failed_at = time.monotonic()
+
+    def pending_failure(self) -> BaseException | None:
+        """The remembered error while its cooldown is open, else ``None``."""
+        if self._failure is None or self._failed_at is None:
+            return None
+        if self.failure_cooldown_seconds <= 0:
+            return None
+        if time.monotonic() - self._failed_at >= self.failure_cooldown_seconds:
+            return None
+        return self._failure
 
     def invalidate(self) -> None:
         self._value = None
         self._stored_at = None
+        self._failure = None
+        self._failed_at = None
 
     async def get(self, fetch: Callable[[], Awaitable[T]]) -> T:
         """Return the cached value, fetching it under the lock if stale."""
@@ -65,6 +91,13 @@ class AsyncTTLCache[T]:
             cached = self.fresh()
             if cached is not None:
                 return cached
-            value = await fetch()
+            recent = self.pending_failure()
+            if recent is not None:
+                raise recent
+            try:
+                value = await fetch()
+            except Exception as e:
+                self.note_failure(e)
+                raise
             self.store(value)
             return value

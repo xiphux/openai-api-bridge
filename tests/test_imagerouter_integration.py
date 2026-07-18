@@ -379,9 +379,53 @@ def test_model_catalog_is_cached(client_with_imagerouter: TestClient) -> None:
 
 
 @respx.mock
-def test_catalog_fetch_failure_is_not_cached(client_with_imagerouter: TestClient) -> None:
-    """A failed listing must not be remembered — the provider should come back
-    on its own once the upstream recovers."""
+def test_failed_catalog_fetch_is_not_retried_during_the_cooldown(
+    client_with_imagerouter: TestClient,
+) -> None:
+    """The fetch runs under a lock, so a remembered failure is what stops a
+    burst during an upstream hang from queueing up — each waiter otherwise
+    starts its own fetch once the previous one gives up."""
+    calls = {"n": 0}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"error": "down"})
+
+    respx.get(f"{UPSTREAM}/v2/models").mock(side_effect=responder)
+
+    for _ in range(3):
+        r = client_with_imagerouter.get("/v1/models", headers=HEADERS)
+        # The listing itself still works; this provider is just absent.
+        assert r.status_code == 200
+        assert not [m for m in r.json().get("data", []) if m["id"].startswith("ir/")]
+    assert calls["n"] == 1, f"one attempt expected during the cooldown, got {calls['n']}"
+
+
+@respx.mock
+def test_failed_catalog_fetch_recovers_after_the_cooldown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure is remembered, not latched — the provider returns on its own."""
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent("""
+        [[providers]]
+        id = "ir"
+        backend = "imagerouter"
+        api_token_env = "TEST_IR_TOKEN"
+        catalog_retry_seconds = 0
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_IR_TOKEN", "ir-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
     calls = {"n": 0}
 
     def responder(request: httpx.Request) -> httpx.Response:
@@ -392,7 +436,9 @@ def test_catalog_fetch_failure_is_not_cached(client_with_imagerouter: TestClient
 
     respx.get(f"{UPSTREAM}/v2/models").mock(side_effect=responder)
 
-    first = client_with_imagerouter.get("/v1/models", headers=HEADERS)
-    assert not [m for m in first.json().get("data", []) if m["id"].startswith("ir/")]
-    second = client_with_imagerouter.get("/v1/models", headers=HEADERS)
-    assert [m for m in second.json()["data"] if m["id"].startswith("ir/")]
+    with TestClient(create_app()) as client:
+        first = client.get("/v1/models", headers=HEADERS)
+        assert not [m for m in first.json().get("data", []) if m["id"].startswith("ir/")]
+        second = client.get("/v1/models", headers=HEADERS)
+        assert [m for m in second.json()["data"] if m["id"].startswith("ir/")]
+    reset_caches_for_tests()

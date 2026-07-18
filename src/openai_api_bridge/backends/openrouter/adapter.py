@@ -56,7 +56,9 @@ class OpenRouterBackend(Backend):
         # few models return hosted URLs that we'd want to GET without our
         # bridge-side Authorization header attached.
         self._download_client = httpx.AsyncClient(timeout=120.0)
-        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(cfg.catalog_ttl_seconds)
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
+            cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()

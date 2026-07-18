@@ -63,7 +63,9 @@ class VeniceBackend(Backend):
         # outliving the shorter route-retry cooldown that is supposed to govern
         # when we try again. That's why this drives the cache by hand rather
         # than using AsyncTTLCache.get(), which would store whatever came back.
-        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(cfg.catalog_ttl_seconds)
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
+            cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
+        )
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -73,7 +75,17 @@ class VeniceBackend(Backend):
             cached = self._catalog.fresh()
             if cached is not None:
                 return cached
-            return await self._fetch_catalog()
+            # The fetch happens under the lock, so a failure has to be
+            # remembered or a burst during an upstream hang would queue up,
+            # each waiter starting its own fetch after the last one gave up.
+            recent = self._catalog.pending_failure()
+            if recent is not None:
+                raise recent
+            try:
+                return await self._fetch_catalog()
+            except Exception as e:
+                self._catalog.note_failure(e)
+                raise
 
     async def _fetch_catalog(self) -> list[ModelEntry]:
         # Two independent listings, fetched together — neither feeds the other,

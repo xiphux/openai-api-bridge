@@ -38,7 +38,9 @@ class ImageRouterBackend(Backend):
             base_url=cfg.base_url,
             api_token=cfg.resolve_api_token(),
         )
-        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(cfg.catalog_ttl_seconds)
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
+            cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
+        )
 
     async def aclose(self) -> None:
         await self.client.aclose()

@@ -110,6 +110,12 @@ class VeniceProviderConfig(BaseModel):
     # so models Venice adds appear without restarting the bridge. 0 disables
     # caching entirely.
     catalog_ttl_seconds: float = 300.0
+    # After a failed catalogue fetch, how long before another is attempted.
+    # The fetch runs under a lock, so without this a burst arriving during an
+    # upstream hang would each start their own fetch and queue behind one
+    # another; instead the first pays the timeout and the rest fail fast.
+    # 0 retries immediately.
+    catalog_retry_seconds: float = 30.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
@@ -138,6 +144,12 @@ class ImageRouterProviderConfig(BaseModel):
     # permanent cache so newly added models appear without a restart.
     # 0 disables caching.
     catalog_ttl_seconds: float = 300.0
+    # After a failed catalogue fetch, how long before another is attempted.
+    # The fetch runs under a lock, so without this a burst arriving during an
+    # upstream hang would each start their own fetch and queue behind one
+    # another; instead the first pays the timeout and the rest fail fast.
+    # 0 retries immediately.
+    catalog_retry_seconds: float = 30.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)
@@ -166,6 +178,12 @@ class OpenRouterProviderConfig(BaseModel):
     # permanent cache so newly added models appear without a restart.
     # 0 disables caching.
     catalog_ttl_seconds: float = 300.0
+    # After a failed catalogue fetch, how long before another is attempted.
+    # The fetch runs under a lock, so without this a burst arriving during an
+    # upstream hang would each start their own fetch and queue behind one
+    # another; instead the first pays the timeout and the rest fail fast.
+    # 0 retries immediately.
+    catalog_retry_seconds: float = 30.0
 
     def resolve_api_token(self) -> str:
         token = os.environ.get(self.api_token_env)

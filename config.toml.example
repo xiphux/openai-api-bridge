@@ -72,6 +72,10 @@ api_token_env = "VENICE_API_TOKEN"
 # never cached, so routing retries on the shorter route_retry_seconds instead.
 # 0 disables caching.
 # catalog_ttl_seconds = 300.0
+#
+# After a failed fetch, callers arriving within this window get the remembered
+# error instead of starting another attempt. 0 retries immediately.
+# catalog_retry_seconds = 30.0
 
 
 # --- ImageRouter ------------------------------------------------------------
@@ -88,6 +92,8 @@ api_token_env = "VENICE_API_TOKEN"
 # # base_url defaults to https://api.imagerouter.io and rarely needs override
 # # catalog_ttl_seconds = 300.0   # reuse the model listing for this long
 # #                               # (0 = re-fetch on every /v1/models)
+# # catalog_retry_seconds = 30.0  # after a failed fetch, fail fast for this
+# #                               # long instead of each caller retrying
 
 
 # --- OpenAI passthrough -----------------------------------------------------
@@ -144,6 +150,8 @@ api_token_env = "VENICE_API_TOKEN"
 # # request_timeout_seconds = 120.0
 # # catalog_ttl_seconds = 300.0   # reuse the model listing for this long
 # #                               # (0 = re-fetch on every /v1/models)
+# # catalog_retry_seconds = 30.0  # after a failed fetch, fail fast for this
+# #                               # long instead of each caller retrying
 
 
 # --- fal.ai -----------------------------------------------------------------
