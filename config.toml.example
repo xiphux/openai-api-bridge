@@ -69,8 +69,9 @@ api_token_env = "VENICE_API_TOKEN"
 # How long a successfully-read model catalogue is reused. /v1/models costs two
 # upstream calls here (the text-to-image and image-to-image listings), and edit
 # routing reads the same catalogue. A listing whose inpaint half failed is
-# never cached, so routing retries on the shorter route_retry_seconds instead.
-# 0 disables caching.
+# still served, but held only for catalog_retry_seconds below (or this value,
+# whichever is shorter), so the missing half is re-attempted sooner than a
+# healthy listing would be. 0 disables caching.
 # catalog_ttl_seconds = 300.0
 #
 # After a failed fetch, callers arriving within this window get the remembered

@@ -115,8 +115,9 @@ class VeniceProviderConfig(BaseModel):
     # upstream hang would each start their own fetch and queue behind one
     # another; instead the first pays the timeout and the rest fail fast.
     # 0 retries immediately. This also bounds how long an *incomplete* listing
-    # is served, so when it exceeds route_retry_seconds it — not that knob — is
-    # what governs when edit routing recovers.
+    # is served — for that, whichever of this and catalog_ttl_seconds is
+    # shorter applies — so when that bound exceeds route_retry_seconds it, not
+    # that knob, is what governs when edit routing recovers.
     catalog_retry_seconds: float = 30.0
 
     def resolve_api_token(self) -> str:

@@ -59,7 +59,7 @@ class VeniceBackend(Backend):
         self._routes_loaded = False
         self._routes_failed_at: float | None = None
         # A degraded listing (inpaint half missing) is cached too, but only
-        # for the short failure window — long enough that a burst can't queue
+        # for the short failure window (clamped to the TTL) — long enough that a burst can't queue
         # up behind the lock, short enough that the missing half is retried
         # soon rather than pinned for the full TTL.
         # Caches ``(entries, complete)``: whether both halves arrived decides
@@ -75,8 +75,9 @@ class VeniceBackend(Backend):
     async def list_models(self) -> list[ModelEntry]:
         # A listing whose inpaint half failed is still worth serving — dropping
         # the provider over its narrower query is what an earlier review
-        # rejected — but it is *incomplete*, so it's cached only for the
-        # failure window rather than the full TTL. Without caching it at all,
+        # rejected — but it is *incomplete*, so it's held only for the failure
+        # window (clamped to the TTL, which an override may shorten but never
+        # extend) rather than for the full TTL. Without caching it at all,
         # a burst during an inpaint hang would queue up behind the lock and
         # each waiter would start its own fetch: the exact storm the failure
         # cooldown exists to damp, reached without ever raising.

@@ -10,14 +10,15 @@ without restarting the bridge. Fetches run under the lock, so a burst of
 concurrent callers collapses into one fetch that they all wait for, rather than
 each firing its own.
 
-Two ways in:
+:meth:`get` is the whole pattern. Its ``ttl_for`` hook lets a caller pick the
+window from the value it just fetched, for a result that is usable but
+incomplete — Venice serves a listing whose second half failed, but keeps it
+only briefly so the missing half is re-attempted soon. An override may only
+shorten the window, never create or extend one, so ``ttl_seconds = 0`` always
+means "no caching".
 
-* :meth:`get` is the whole pattern for a backend whose listing is one call and
-  whose result is always cacheable.
-* ``ttl_for`` on :meth:`get`, plus :attr:`lock` / :meth:`fresh` / :meth:`store`
-  directly, are for a backend whose result may be worth caching for less than
-  the full window — Venice serves a listing whose second half failed but keeps
-  it only briefly, so the missing half is re-attempted soon.
+:attr:`lock`, :meth:`fresh` and :meth:`store` are exposed for a caller that
+needs to drive the sequence itself; nothing does today.
 
 A failure is remembered for ``failure_cooldown_seconds`` and re-raised to
 callers arriving inside that window. That matters because the fetch runs *under
@@ -90,12 +91,6 @@ class AsyncTTLCache[T]:
         if time.monotonic() - self._failed_at >= self.failure_cooldown_seconds:
             return None
         return self._failure
-
-    def invalidate(self) -> None:
-        self._value = None
-        self._stored_at = None
-        self._failure = None
-        self._failed_at = None
 
     async def get(
         self,
