@@ -41,6 +41,12 @@ poll_timeout_video_seconds = 900
 # --- Venice -----------------------------------------------------------------
 # Native API (not OpenAI-compatible upstream — the bridge translates).
 # Set VENICE_API_TOKEN in the environment to enable this provider.
+#
+# Venice files text-to-image under type=image and image-to-image under
+# type=inpaint, naming the latter by suffixing the base id (`gpt-image-2` ->
+# `gpt-image-2-edit`), and its edit endpoint accepts *only* the suffixed form.
+# The bridge lists the pair once and routes edits to the counterpart, so
+# clients address one model id either way.
 
 [[providers]]
 id = "venice"
@@ -52,6 +58,13 @@ api_token_env = "VENICE_API_TOKEN"
 # cfg_scale = 4.0
 # default_width = 1024
 # default_height = 1024
+#
+# Cooldown before re-reading the model catalogue after a failed attempt to
+# resolve edit routing. While the window is open edits go out unrouted and
+# Venice rejects them, so this trades a bounded tail after recovery against
+# re-fetching the catalogue on every edit during an outage. 0 disables the
+# cooldown — which reinstates exactly that retry storm.
+# route_retry_seconds = 60.0
 
 
 # --- ImageRouter ------------------------------------------------------------

@@ -48,6 +48,25 @@ Adding a future backend (Replicate, a second ComfyUI instance, etc.) is a
 single new `[[providers]]` block in `config.toml` plus an adapter module —
 see `src/openai_api_bridge/backends/` for the existing implementations.
 
+### Edit models on Venice
+
+Venice files text-to-image under `type=image` and image-to-image under
+`type=inpaint`, naming the latter by suffixing the base id — `gpt-image-2` /
+`gpt-image-2-edit` — and its edit endpoint accepts **only** the suffixed form.
+The bridge fetches both listings, lists a matched pair once (advertising
+`["text-to-image", "image-to-image"]`), and routes edits to the counterpart, so
+a client addresses one model id whichever operation it wants. Edit-only models
+are listed in their own right as `["image-to-image"]`.
+
+Routing needs the catalogue, so the first edit loads it if `/v1/models` hasn't
+already. A failed load is retried after **`route_retry_seconds`** (default 60);
+during that window edits go out unrouted and Venice rejects them, which trades
+a bounded tail after recovery against re-fetching the catalogue on every edit
+while it's down. Setting it to `0` disables the cooldown and reinstates that
+per-request retry. If the `type=inpaint` listing fails, the text-to-image
+catalogue is still served — a narrower query failing shouldn't take a healthy
+provider off `/v1/models`.
+
 ### Model discovery on fal.ai
 
 `/v1/models` is populated from fal's model API, filtered to the categories this
