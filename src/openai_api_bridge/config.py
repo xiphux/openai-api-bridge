@@ -201,9 +201,21 @@ class FalProviderConfig(BaseModel):
     base_url: str = "https://fal.run"
     api_token_env: str
     request_timeout_seconds: float = 600.0
+    # Per-model overrides (moderation, extra body params, prompt metadata).
+    # These do NOT restrict what's served while ``discover_models`` is on — set
+    # that false to serve only what's listed here.
     models: list[FalModelConfig] = Field(default_factory=list)
-    # fal's model-catalog API, used to introspect each model's OpenAPI input
-    # schema so the moderation knob can be derived rather than hardcoded.
+    # When true (default), ``/v1/models`` is populated from fal's model API,
+    # filtered to ``categories``. False serves only the ``models`` above, and
+    # a model id outside that list is a 404.
+    discover_models: bool = True
+    # fal categories to surface. None uses the backend's own set — the ones it
+    # can actually serve (text-to-image, image-to-image). fal also publishes
+    # video/audio/3d categories; listing those here would advertise models the
+    # fal backend has no code path for.
+    categories: list[str] | None = None
+    # fal's model API, used both to list models and to introspect each model's
+    # OpenAPI input schema so the moderation knob can be derived, not hardcoded.
     models_api_url: str = "https://api.fal.ai/v1/models"
     # When true (default), the loosest moderation setting is read from each
     # model's own schema — which keeps working across new model versions and

@@ -36,7 +36,7 @@ client (LibreChat/LobeChat/curl/...)
 | **Venice.ai** | Image generation (`/api/v1/image/generate`) and img2img edits (`/api/v1/image/edit`, single reference image) | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
 | **ImageRouter** | Image and video generation across many providers | OpenAI-compat *content* but path-divergent — model catalog is at `/v2/models`, inference at `/v1/openai/...`, and the video endpoint is sync (single POST) rather than OpenAI's async `/v1/videos` lifecycle |
 | **OpenRouter** | Chat, embeddings, and image generation across many vendors | Chat/embeddings are spec-compliant; image generation diverges — OpenRouter exposes it via chat completions with a non-standard `message.images` array on the response. The bridge translates so clients see standard `/v1/images/generations` and `/v1/images/edits` |
-| **fal.ai** | Image generation + edits for tier-1 models (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …) | fal exposes each model's *native* input schema, so the bridge can reach the per-model **content-moderation** knob that flat brokers hide — and hardcodes the loosest setting per model family. No catalog endpoint, so models are declared explicitly; calls hit fal's synchronous `fal.run/{model}` with `Authorization: Key …` |
+| **fal.ai** | Image generation + edits across fal's catalogue (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …) | fal exposes each model's *native* input schema, so the bridge can reach the per-model **content-moderation** knob that flat brokers hide — and reads the loosest value out of that schema. Models are discovered from fal's model API and filtered to the categories this backend serves; calls hit fal's synchronous `fal.run/{model}` with `Authorization: Key …` |
 | **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
 
 Configure as many of each as you want. The most common deployment fronts a
@@ -47,6 +47,28 @@ embedding) — all behind one bridge URL.
 Adding a future backend (Replicate, a second ComfyUI instance, etc.) is a
 single new `[[providers]]` block in `config.toml` plus an adapter module —
 see `src/openai_api_bridge/backends/` for the existing implementations.
+
+### Model discovery on fal.ai
+
+`/v1/models` is populated from fal's model API, filtered to the categories this
+backend can actually serve — **`text-to-image` and `image-to-image`**, ~574
+models. The listing is fetched once and cached, and excludes deprecated models.
+
+fal's `text-to-video`, `image-to-video`, audio and 3D categories are
+deliberately **not** listed: the fal backend implements the image surface
+(generate + edit) only, so those models would fail every request with
+`unsupported_operation`. Widening `categories` alone won't make them work —
+video needs `generate_video` implemented against fal's queue lifecycle first.
+
+`[[providers.models]]` entries are per-model **overrides**, not a whitelist —
+they set `disable_safety`, `params`, `display_name`, or prompt metadata on a
+discovered model without restricting the rest. To serve a fixed set instead,
+set `discover_models = false` and list them; a model outside that list is then
+a 404.
+
+If the catalogue can't be fetched, the provider degrades to whatever is
+explicitly configured (rather than serving nothing) and retries after
+`introspect_retry_seconds`.
 
 ### Content moderation on fal.ai
 

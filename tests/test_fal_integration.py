@@ -36,7 +36,7 @@ SEEDREAM_T2I = "fal-ai/bytedance/seedream/v4/text-to-image"
 SEEDREAM_EDIT = "fal-ai/bytedance/seedream/v4/edit"
 NANO = "fal-ai/nano-banana-2"
 NANO_PRO = "fal-ai/nano-banana-pro"
-GPT_IMAGE = "fal-ai/gpt-image-2"
+GPT_IMAGE = "openai/gpt-image-2"
 PLAIN = "fal-ai/some/plain-model"
 
 
@@ -49,6 +49,8 @@ def client_with_fal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator
         id = "fal"
         backend = "fal"
         api_token_env = "TEST_FAL_TOKEN"
+        # These tests cover moderation and request shaping, not discovery.
+        discover_models = false
 
         [[providers.models]]
         id = "{SEEDREAM_T2I}"
@@ -516,9 +518,9 @@ async def test_concurrent_first_requests_share_one_lookup(
     finally:
         await backend.aclose()
 
-    # Exactly one lookup served all 8 concurrent callers (without the lock this
-    # would be 8).
-    assert route.call_count == 1
+    # 8 concurrent callers over 3 distinct models -> one lookup per model, not
+    # one per caller (without the per-model lock this would be 8).
+    assert route.call_count == len(ids)
     # And none of them slipped through before the cache was populated.
     assert all(r == {"enable_safety_checker": False} for r in results)
 
@@ -698,3 +700,168 @@ def test_introspection_failure_falls_back_to_static_map(client_with_fal: TestCli
     assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
     # Static fallback still loosens the seedream family.
     assert _sent_body(gen)["enable_safety_checker"] is False
+
+
+# --- model discovery -------------------------------------------------------
+
+
+@pytest.fixture
+def discovering_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
+    """A fal provider using catalogue discovery (the default), with one
+    [[providers.models]] entry present purely as an override."""
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent(f"""
+        [[providers]]
+        id = "fal"
+        backend = "fal"
+        api_token_env = "TEST_FAL_TOKEN"
+
+        [[providers.models]]
+        id = "{NANO}"
+        display_name = "Nano (renamed locally)"
+        prompt_style = "natural-language"
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
+    reset_caches_for_tests()
+
+
+def _catalog_page(models: list[tuple[str, str]], has_more: bool = False) -> dict:
+    return {
+        "models": [
+            {"endpoint_id": mid, "metadata": {"display_name": name, "category": "text-to-image"}}
+            for mid, name in models
+        ],
+        "next_cursor": "next" if has_more else None,
+        "has_more": has_more,
+    }
+
+
+def _stub_catalog(pages_by_category: dict[str, list[dict]]) -> respx.Route:
+    """Serve catalogue pages per category, honouring the cursor for pagination."""
+    state: dict[str, int] = {}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("category")
+        # `expand` marks a schema lookup, not a listing — leave those alone.
+        if request.url.params.get("expand"):
+            return httpx.Response(200, json={"models": []})
+        pages = pages_by_category.get(category or "", [])
+        idx = state.get(category or "", 0)
+        state[category or ""] = idx + 1
+        if idx >= len(pages):
+            return httpx.Response(200, json={"models": [], "has_more": False})
+        return httpx.Response(200, json=pages[idx])
+
+    return respx.get(MODELS_API).mock(side_effect=responder)
+
+
+@respx.mock
+def test_discovery_lists_catalog_filtered_to_supported_categories(
+    discovering_client: TestClient,
+) -> None:
+    _stub_catalog(
+        {
+            "text-to-image": [_catalog_page([(NANO, "Nano Banana 2"), (GPT_IMAGE, "GPT Image 2")])],
+            "image-to-image": [_catalog_page([(SEEDREAM_EDIT, "Seedream 4 Edit")])],
+        }
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    # Everything the catalogue returned for the supported categories is served,
+    # not just what's in config.
+    assert f"fal/{GPT_IMAGE}" in by_id
+    assert f"fal/{SEEDREAM_EDIT}" in by_id
+    assert by_id[f"fal/{GPT_IMAGE}"]["display_name"] == "GPT Image 2"
+    assert by_id[f"fal/{GPT_IMAGE}"]["kind"] == "image"
+    # A [[providers.models]] entry enriches its match rather than restricting.
+    assert by_id[f"fal/{NANO}"]["display_name"] == "Nano (renamed locally)"
+    assert by_id[f"fal/{NANO}"]["prompt_style"] == "natural-language"
+
+
+@respx.mock
+def test_discovery_only_requests_supported_categories(
+    discovering_client: TestClient,
+) -> None:
+    route = _stub_catalog({"text-to-image": [_catalog_page([(NANO, "Nano")])]})
+    assert discovering_client.get("/v1/models", headers=HEADERS).status_code == 200
+    asked = {c.request.url.params.get("category") for c in route.calls}
+    assert asked == {"text-to-image", "image-to-image"}
+    # Video models would all fail with UnsupportedOperation, so they're not listed.
+    assert "text-to-video" not in asked
+    assert "image-to-video" not in asked
+    # Deprecated models are excluded from the listing.
+    assert all(c.request.url.params.get("status") == "active" for c in route.calls)
+
+
+@respx.mock
+def test_discovery_paginates(discovering_client: TestClient) -> None:
+    _stub_catalog(
+        {
+            "text-to-image": [
+                _catalog_page([(NANO, "Nano")], has_more=True),
+                _catalog_page([(GPT_IMAGE, "GPT Image 2")]),
+            ]
+        }
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    by_id = {m["id"] for m in r.json()["data"]}
+    assert f"fal/{NANO}" in by_id and f"fal/{GPT_IMAGE}" in by_id
+
+
+@respx.mock
+def test_discovered_model_generates_without_being_configured(
+    discovering_client: TestClient,
+) -> None:
+    """A model that exists only in the catalogue is usable — no 404 — and still
+    gets its moderation knob derived from its schema."""
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("expand"):
+            return httpx.Response(
+                200, json={"models": [{"endpoint_id": SEEDREAM_T2I, "openapi": spec}]}
+            )
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+    gen = _mock_generation(SEEDREAM_T2I)
+
+    r = _generate(discovering_client, SEEDREAM_T2I)
+    assert r.status_code == 200, r.text
+    assert _sent_body(gen)["enable_safety_checker"] is False
+
+
+@respx.mock
+def test_catalog_failure_falls_back_to_configured_models(
+    discovering_client: TestClient,
+) -> None:
+    respx.get(MODELS_API).mock(return_value=httpx.Response(503, json={"error": "down"}))
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    by_id = {m["id"] for m in r.json()["data"]}
+    # Degrades to the explicitly configured entry rather than serving nothing.
+    assert by_id == {f"fal/{NANO}"}
+
+
+@respx.mock
+def test_catalog_is_cached(discovering_client: TestClient) -> None:
+    route = _stub_catalog({"text-to-image": [_catalog_page([(NANO, "Nano")])]})
+    for _ in range(3):
+        assert discovering_client.get("/v1/models", headers=HEADERS).status_code == 200
+    # One pass over the categories, not one per /v1/models request.
+    assert route.call_count == 2

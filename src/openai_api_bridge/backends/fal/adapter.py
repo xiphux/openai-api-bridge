@@ -38,6 +38,14 @@ from .safety import fallback_safety_params, safety_params_from_schema
 
 log = logging.getLogger(__name__)
 
+# fal categories this backend can actually serve. It implements the image
+# surface (generate + edit) only, so the video/audio/3d categories fal also
+# publishes are deliberately excluded — listing them would advertise models
+# every request would fail on with UnsupportedOperation. Adding video here
+# means implementing generate_video for fal first (its queue lifecycle), not
+# just widening the filter.
+SUPPORTED_CATEGORIES: tuple[str, ...] = ("text-to-image", "image-to-image")
+
 
 def _apply_size(body: dict[str, Any], model_slug: str, size: str | None) -> None:
     """Translate OpenAI's ``WxH`` size into fal's field for this model family.
@@ -74,24 +82,37 @@ class FalBackend(Backend):
             request_timeout_seconds=cfg.request_timeout_seconds,
             models_api_url=cfg.models_api_url,
         )
-        # Schema-derived safety params, resolved lazily on first image request
-        # (one batched call covering every configured model) and cached for the
-        # process. Lazy rather than at startup so the lifespan graph keeps no
-        # network dependency and a fal outage can't block boot.
-        self._safety_cache: dict[str, dict[str, Any]] | None = None
-        self._safety_lock = asyncio.Lock()
-        # Monotonic timestamp of the last failed lookup, or None if we haven't
-        # failed. Drives the retry cooldown so an outage degrades temporarily
-        # rather than for the life of the process.
-        self._introspect_failed_at: float | None = None
+        # Schema-derived safety params, resolved per model on first use and
+        # cached for the process. Per-model rather than one batch over the whole
+        # catalog: discovery surfaces hundreds of models and we only pay for the
+        # ones actually generated with. Lazy rather than at startup so the
+        # lifespan graph keeps no network dependency and a fal outage can't
+        # block boot.
+        self._schema_cache: dict[str, dict[str, Any]] = {}
+        # One lock per model, so a fan-out across different models resolves
+        # concurrently while duplicate requests for the *same* model still
+        # collapse into a single lookup.
+        self._schema_locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+        # Monotonic timestamp of each model's last failed lookup. Drives the
+        # retry cooldown so an outage degrades temporarily rather than for the
+        # life of the process.
+        self._introspect_failed_at: dict[str, float] = {}
+        # Discovered catalog, with its own cooldown on failure.
+        self._catalog_cache: list[ModelEntry] | None = None
+        self._catalog_lock = asyncio.Lock()
+        self._catalog_failed_at: float | None = None
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
-    async def list_models(self) -> list[ModelEntry]:
-        # The models this provider serves are the ones declared in config —
-        # fal's model API catalogues the whole platform, not a per-account
-        # selection, so it isn't a listing we can surface directly.
+    # --- model catalog ---------------------------------------------------
+
+    @property
+    def _categories(self) -> list[str]:
+        return list(self.cfg.categories) if self.cfg.categories else list(SUPPORTED_CATEGORIES)
+
+    def _configured_entries(self) -> list[ModelEntry]:
         return [
             ModelEntry(
                 id=m.id,
@@ -103,96 +124,169 @@ class FalBackend(Backend):
             for m in self.cfg.models
         ]
 
-    def _require_model(self, model_slug: str) -> FalModelConfig:
+    async def list_models(self) -> list[ModelEntry]:
+        """Models this provider serves.
+
+        With ``discover_models`` on (the default) this is fal's catalogue,
+        filtered to the categories the backend can actually serve; any
+        ``[[providers.models]]`` entry enriches its match with per-model
+        overrides. With it off, only the configured models are served.
+
+        If the catalogue can't be fetched we fall back to whatever is
+        explicitly configured rather than dropping the provider's models from
+        ``/v1/models`` entirely.
+        """
+        if not self.cfg.discover_models:
+            return self._configured_entries()
+        async with self._catalog_lock:
+            if self._catalog_cache is not None:
+                return self._catalog_cache
+            if self._catalog_failed_at is not None:
+                elapsed = time.monotonic() - self._catalog_failed_at
+                if elapsed < self.cfg.introspect_retry_seconds:
+                    return self._configured_entries()
+            try:
+                raw = await self.client.fetch_catalog(self._categories)
+            except Exception as e:  # never 500 /v1/models over a catalogue blip
+                self._catalog_failed_at = time.monotonic()
+                log.warning(
+                    "fal: could not list models (%s); serving only explicitly "
+                    "configured models, retrying in %.0fs",
+                    e,
+                    self.cfg.introspect_retry_seconds,
+                )
+                return self._configured_entries()
+            entries = self._entries_from_catalog(raw)
+            if not entries:
+                self._catalog_failed_at = time.monotonic()
+                log.warning(
+                    "fal: model API returned no models for categories %s; serving "
+                    "only explicitly configured models, retrying in %.0fs",
+                    self._categories,
+                    self.cfg.introspect_retry_seconds,
+                )
+                return self._configured_entries()
+            self._catalog_failed_at = None
+            self._catalog_cache = entries
+            return entries
+
+    def _entries_from_catalog(self, raw: list[dict[str, Any]]) -> list[ModelEntry]:
+        entries: list[ModelEntry] = []
+        seen: set[str] = set()
+        for item in raw:
+            model_id = item.get("endpoint_id")
+            if not isinstance(model_id, str) or not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            meta = item.get("metadata")
+            meta = meta if isinstance(meta, dict) else {}
+            override = self._models.get(model_id)
+            display = None
+            if override is not None and override.display_name:
+                display = override.display_name
+            elif isinstance(meta.get("display_name"), str):
+                display = meta["display_name"]
+            entries.append(
+                ModelEntry(
+                    id=model_id,
+                    # Both surfaced categories are image; the bridge picks the
+                    # code path from the request shape, so this is just a hint.
+                    kind="image",
+                    display_name=display or model_id,
+                    prompt_style=override.prompt_style if override else None,
+                    prompt_hint=override.prompt_hint if override else None,
+                )
+            )
+        return entries
+
+    # --- moderation settings ---------------------------------------------
+
+    def _model_config(self, model_slug: str) -> FalModelConfig:
+        """Per-model config for a request, defaulting for discovered models.
+
+        With discovery off an unlisted model is a 404. With it on we don't
+        validate against the catalogue — that would put a listing fetch on the
+        generation path — and let fal reject an unknown id itself.
+        """
         mcfg = self._models.get(model_slug)
-        if mcfg is None:
+        if mcfg is not None:
+            return mcfg
+        if not self.cfg.discover_models:
             raise ModelNotFound(
                 f"Model {model_slug!r} is not configured for fal provider {self.cfg.id!r}",
                 param="model",
             )
-        return mcfg
+        return FalModelConfig(id=model_slug)
 
-    def _in_introspect_cooldown(self) -> bool:
-        """True while a recent introspection failure should suppress retries."""
-        if self._introspect_failed_at is None:
+    def _in_introspect_cooldown(self, model_id: str) -> bool:
+        """True while a recent failure for this model should suppress retries."""
+        failed_at = self._introspect_failed_at.get(model_id)
+        if failed_at is None:
             return False
-        elapsed = time.monotonic() - self._introspect_failed_at
-        return elapsed < self.cfg.introspect_retry_seconds
+        return time.monotonic() - failed_at < self.cfg.introspect_retry_seconds
 
-    def _arm_introspect_retry(self, reason: str) -> None:
+    def _arm_introspect_retry(self, model_id: str, reason: str) -> None:
         """Record a lookup as unsuccessful so the cooldown — and therefore a
-        later retry — engages."""
-        self._introspect_failed_at = time.monotonic()
+        later retry — engages for this model."""
+        self._introspect_failed_at[model_id] = time.monotonic()
         log.warning(
-            "fal: %s; using built-in moderation defaults for the affected models, "
-            "retrying in %.0fs",
+            "fal: %s for %r; using built-in moderation defaults, retrying in %.0fs",
             reason,
+            model_id,
             self.cfg.introspect_retry_seconds,
         )
 
-    async def _ensure_safety_cache(self) -> dict[str, dict[str, Any]] | None:
-        """Resolve schema-derived safety params for the configured models.
+    async def _lock_for(self, model_id: str) -> asyncio.Lock:
+        async with self._locks_guard:
+            lock = self._schema_locks.get(model_id)
+            if lock is None:
+                lock = self._schema_locks[model_id] = asyncio.Lock()
+            return lock
 
-        Returns the map — which may be **partial** — or ``None`` when
-        introspection is off or nothing has resolved yet. Callers fall back to
-        the static map for any model absent from it.
+    async def _derived_safety_params(self, model_id: str) -> dict[str, Any] | None:
+        """Schema-derived moderation settings for one model.
 
-        Anything short of a complete result arms the retry cooldown: a raised
-        error, a response carrying no usable schemas, or a response that simply
-        omits some models. That matters because a *successful* but empty or
-        partial response would otherwise latch a cache that never retries —
-        the same "degraded until restart" failure the cooldown exists to
-        prevent, just reached without an exception. Only the still-missing
-        models are re-fetched on a retry.
+        ``None`` means unavailable — introspection off, the lookup failed, the
+        model wasn't in the response, or we're inside its retry cooldown — and
+        the caller falls back to the static map. Nothing unsuccessful is ever
+        cached, so a transient failure can't latch for the life of the process.
         """
         if not self.cfg.introspect_safety:
             return None
-        model_ids = [m.id for m in self.cfg.models]
-        if not model_ids:
-            return {}
-        # Always taken under the lock: it collapses a burst of concurrent first
-        # requests into exactly one batched lookup, and once fully resolved the
-        # body is a single completeness check — an uncontended acquire.
-        async with self._safety_lock:
-            cached = self._safety_cache
-            missing = [mid for mid in model_ids if cached is None or mid not in cached]
-            if not missing:
+        cached = self._schema_cache.get(model_id)
+        if cached is not None:
+            return cached
+        lock = await self._lock_for(model_id)
+        async with lock:
+            cached = self._schema_cache.get(model_id)
+            if cached is not None:
                 return cached
-            if self._in_introspect_cooldown():
-                return cached
+            if self._in_introspect_cooldown(model_id):
+                return None
             try:
-                specs = await self.client.fetch_model_schemas(missing)
+                specs = await self.client.fetch_model_schemas([model_id])
             except Exception as e:  # never fail a generation over an introspection blip
-                self._arm_introspect_retry(f"could not introspect model schemas ({e})")
-                return cached
-            resolved = {mid: safety_params_from_schema(spec) for mid, spec in specs.items()}
-            if not resolved:
-                # HTTP succeeded but nothing usable came back (empty catalog
-                # response, changed payload shape, auth downgrade). Treat it as
-                # a failure rather than caching the void.
-                self._arm_introspect_retry(f"model API returned no schemas for {missing}")
-                return cached
-            merged = dict(cached or {})
-            merged.update(resolved)
-            self._safety_cache = merged
-            still_missing = [mid for mid in model_ids if mid not in merged]
-            if still_missing:
-                self._arm_introspect_retry(f"no schema returned for {still_missing}")
-            else:
-                self._introspect_failed_at = None
-            return merged
+                self._arm_introspect_retry(model_id, f"schema lookup failed ({e})")
+                return None
+            spec = specs.get(model_id)
+            if spec is None:
+                self._arm_introspect_retry(model_id, "no schema returned")
+                return None
+            params = safety_params_from_schema(spec)
+            self._schema_cache[model_id] = params
+            self._introspect_failed_at.pop(model_id, None)
+            return params
 
     async def _safety_params(self, mcfg: FalModelConfig) -> dict[str, Any]:
         """Loosest moderation settings for a model: schema-derived when we can
         read the schema, else the built-in fallback map."""
         if not mcfg.disable_safety:
             return {}
-        cache = await self._ensure_safety_cache()
-        if cache is not None and mcfg.id in cache:
-            params = dict(cache[mcfg.id])
-            if not params:
+        derived = await self._derived_safety_params(mcfg.id)
+        if derived is not None:
+            if not derived:
                 log.debug("fal: %r exposes no moderation knob; leaving defaults", mcfg.id)
-            return params
+            return dict(derived)
         return fallback_safety_params(mcfg.id)
 
     async def _build_body(
@@ -226,7 +320,7 @@ class FalBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        mcfg = self._require_model(model_slug)
+        mcfg = self._model_config(model_slug)
         # fal honours ``num_images`` server-side, so a single call yields n
         # images — no per-image request loop (unlike ImageRouter).
         body = await self._build_body(mcfg, prompt=prompt, size=size, n=n)
@@ -242,7 +336,7 @@ class FalBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        mcfg = self._require_model(model_slug)
+        mcfg = self._model_config(model_slug)
         # fal's edit endpoints take reference images as ``image_urls``; they
         # accept data URIs inline, so no separate upload step is needed. All
         # supplied references are forwarded in order — a model that only honours

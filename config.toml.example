@@ -132,10 +132,14 @@ api_token_env = "VENICE_API_TOKEN"
 # over-eager default guardrails that flat OpenAI-shaped brokers don't let you
 # touch — and new model versions are picked up without a code change.
 #
-# Unlike ImageRouter, you declare the models this provider serves explicitly,
-# one [[providers.models]] per model. (fal does publish a model search API —
-# it's where the bridge reads schemas from — but it catalogues the whole
-# platform rather than a per-account selection, so it isn't a usable listing.)
+# By default the bridge populates /v1/models from fal's model API, filtered to
+# the categories it can serve: text-to-image and image-to-image (~574 models).
+# fal's video/audio/3d categories are NOT listed — the fal backend implements
+# the image surface only, so those models would fail on every request.
+#
+# [[providers.models]] entries are per-model *overrides*, not a whitelist: they
+# tweak a discovered model without restricting the rest. To serve only a fixed
+# set instead, set discover_models = false and list them.
 # `id` is the fal model path (also the /v1/models slug, addressed by the client
 # as `fal/<id>`). Set FAL_API_KEY in the environment to enable this provider.
 
@@ -161,10 +165,13 @@ api_token_env = "VENICE_API_TOKEN"
 #   display_name = "Nano Banana 2"                # safety_tolerance="6"
 #
 #   [[providers.models]]
-#   id = "fal-ai/gpt-image-2"                     # fal's gpt-image exposes NO
+#   id = "openai/gpt-image-2"                     # fal's gpt-image exposes NO
 #   display_name = "GPT Image 2"                  # moderation knob; nothing injected
 #
 # Provider-level:
+#   discover_models = false     # serve only the [[providers.models]] above;
+#                               # a model outside that list becomes a 404
+#   categories = ["text-to-image", "image-to-image"]   # override the filter
 #   introspect_safety = false   # skip the schema lookup, use the built-in
 #                               # fallback map (the bridge also falls back
 #                               # automatically if fal's model API is down)

@@ -79,6 +79,53 @@ class FalClient:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
         return _extract_image_urls(resp.json(), model_id)
 
+    # --- model catalog ---------------------------------------------------
+
+    async def fetch_catalog(self, categories: list[str]) -> list[dict[str, Any]]:
+        """List active models in the given fal categories.
+
+        Paginates fal's model API per category and returns the raw entries
+        (``{"endpoint_id": ..., "metadata": {...}}``). ``status=active`` keeps
+        deprecated models out of the bridge's ``/v1/models`` listing — fal does
+        still serve them from the catalog otherwise.
+
+        No ``expand`` here, so the 10-item truncation that afflicts schema
+        responses doesn't apply and full pages come back.
+        """
+        out: list[dict[str, Any]] = []
+        for category in categories:
+            cursor: str | None = None
+            # Guard against a malformed cursor loop; 50 pages is ~5000 models,
+            # far beyond any real category.
+            for _ in range(50):
+                params: list[tuple[str, str | int | float | bool | None]] = [
+                    ("category", category),
+                    ("status", "active"),
+                    ("limit", 100),
+                ]
+                if cursor:
+                    params.append(("cursor", cursor))
+                try:
+                    resp = await self._client.get(self.models_api_url, params=params, timeout=60.0)
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    raise UpstreamError(
+                        f"fal model API returned {e.response.status_code} listing "
+                        f"{category}: {e.response.text[:300]}"
+                    ) from e
+                except httpx.HTTPError as e:
+                    raise UpstreamError(f"fal model API listing {category} failed: {e}") from e
+                body = resp.json()
+                if not isinstance(body, dict):
+                    raise UpstreamError(f"fal model API returned non-dict body: {str(body)[:200]}")
+                for entry in body.get("models") or []:
+                    if isinstance(entry, dict) and isinstance(entry.get("endpoint_id"), str):
+                        out.append(entry)
+                cursor = body.get("next_cursor")
+                if not body.get("has_more") or not cursor:
+                    break
+        return out
+
     # --- model schemas ---------------------------------------------------
 
     async def fetch_model_schemas(self, model_ids: list[str]) -> dict[str, dict[str, Any]]:
