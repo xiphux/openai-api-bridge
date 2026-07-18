@@ -1,6 +1,6 @@
 """Async HTTP client for the Venice.ai image API.
 
-Wraps three endpoints:
+Wraps four endpoints:
   * ``GET  /api/v1/models?type=image`` — text-to-image models
   * ``GET  /api/v1/models?type=inpaint`` — image-to-image ("-edit") models
   * ``POST /api/v1/image/generate``    — synchronous text-to-image

@@ -1726,3 +1726,55 @@ def test_video_without_a_still_uses_the_text_half(discovering_client: TestClient
     _await_video(discovering_client, r.json()["id"])
     assert t2v_submit.called
     assert not i2v_submit.called
+
+
+@respx.mock
+def test_routed_edit_honours_the_siblings_own_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config on the `/edit` half must govern a routed edit. It's the endpoint
+    actually running, so taking the base model's settings would silently ignore
+    the block an operator wrote for it."""
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent(f"""
+        [[providers]]
+        id = "fal"
+        backend = "fal"
+        api_token_env = "TEST_FAL_TOKEN"
+        introspect_safety = false
+
+        [[providers.models]]
+        id = "{NANO}/edit"
+        [providers.models.params]
+        marker = "from-the-edit-block"
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Edit"),
+        ]
+    )
+    gen = _mock_generation(f"{NANO}/edit")
+
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/v1/images/edits",
+            headers=HEADERS,
+            files={"image": ("in.png", b"PNG", "image/png")},
+            data={"model": f"fal/{NANO}", "prompt": "x"},
+        )
+        assert r.status_code == 200, r.text
+        assert _sent_body(gen)["marker"] == "from-the-edit-block"
+    reset_caches_for_tests()

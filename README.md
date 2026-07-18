@@ -88,6 +88,10 @@ text-only one, and a client would discover the difference from a failed
 request; with it, a frontend can enable or grey out image attachment per
 model.
 
+When a request is routed to a collapsed sibling, a `[[providers.models]]` block
+for the **sibling** governs it — it's the endpoint actually running — falling
+back to the requested model's block when the sibling has none.
+
 `[[providers.models]]` entries are per-model **overrides**, not a whitelist —
 they set `disable_safety`, `params`, `display_name`, or prompt metadata on a
 discovered model without restricting the rest. A configured model the catalogue
@@ -267,7 +271,7 @@ entry so clients can build a useful picker without per-model hardcoding
 | `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`; fal: the per-model `kind` from config. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
 | `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
 | `context_window` | max context size in tokens, omitted when unknown | OpenAI-passthrough upstreams that expose it: llama.cpp's `meta.n_ctx` (a loaded model) or router `--ctx-size`, vLLM's `max_model_len`. The bridge strips the `meta`/`status` blocks otherwise, so this is the only way the size survives the proxy. Clients use it for a "N / max tokens" budget |
-| `capabilities` | list of `{input}-to-{output}` operations, omitted when unknown | What a model actually accepts — `["text-to-image"]` vs `["text-to-image", "image-to-image"]`, or `["text-to-text", "image-to-text"]` for a vision chat model. A frontend uses it to enable or grey out image attachment per model. Read from each upstream's own metadata: fal's catalogue categories, ImageRouter's `inputs` map, OpenRouter's `architecture.input_modalities`, ComfyUI's `image_inputs` meta declaration, Venice's `type=image` / `type=inpaint` listings. Only OpenAI-passthrough omits it — a generic upstream doesn't report modality |
+| `capabilities` | list of `{input}-to-{output}` operations, omitted when unknown | What a model actually accepts — `["text-to-image"]` vs `["text-to-image", "image-to-image"]`, or `["text-to-text", "image-to-text"]` for a vision chat model. A frontend uses it to enable or grey out image attachment per model. Read from each upstream's own metadata: fal's catalogue categories, ImageRouter's `inputs` map, OpenRouter's `architecture.input_modalities`, ComfyUI's `image_inputs` meta declaration, Venice's `type=image` / `type=inpaint` listings. **Always treat it as optional**: OpenAI-passthrough never has it, and every other backend omits it per-model whenever that model's upstream metadata is silent — an ImageRouter entry with no `inputs` map, say. Omission means "the upstream didn't say", never "accepts nothing" |
 | `prompt_style` / `prompt_hint` | preferred prompt format + a freeform per-model nudge, omitted when unset | ComfyUI: the workflow's `meta.json` (see the meta schema below). Image and video models — a gateway-aware client uses them to rewrite a prompt into the model's preferred format before generation |
 
 Standard OpenAI clients ignore the extra fields; nothing nonstandard is

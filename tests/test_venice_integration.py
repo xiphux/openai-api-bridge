@@ -8,6 +8,7 @@ Stubs the upstream Venice HTTP surface with respx and verifies:
 
 from __future__ import annotations
 
+import asyncio
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
@@ -202,3 +203,73 @@ def test_edit_routing_works_without_a_prior_models_call(
     assert "gpt-image-2-edit" in edit_route.calls.last.request.content.decode(
         "utf-8", errors="replace"
     )
+
+
+@respx.mock
+def test_inpaint_failure_does_not_drop_the_whole_provider(
+    client_with_venice: TestClient,
+) -> None:
+    """`type=inpaint` is a narrower query than `type=image`; a proxy or older
+    API version could reject it outright. That must not take a perfectly
+    healthy text-to-image catalogue down with it."""
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("type") == "inpaint":
+            return httpx.Response(400, json={"error": "unknown type"})
+        return httpx.Response(200, json={"data": [{"id": "flux-2-pro", "type": "image"}]})
+
+    respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
+
+    r = client_with_venice.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    ids = {m["id"] for m in r.json()["data"]}
+    assert "vn/flux-2-pro" in ids, "generate models must survive an inpaint failure"
+
+
+@respx.mock
+def test_failed_route_load_is_not_retried_every_request(
+    client_with_venice: TestClient,
+) -> None:
+    """Without a cooldown each edit during an outage re-runs the catalogue
+    fetch — and because waiters take the lock in turn rather than sharing one
+    result, concurrent edits serialise into sequential attempts."""
+    calls = {"n": 0}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"error": "down"})
+
+    respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
+    respx.post(f"{UPSTREAM}/api/v1/image/edit").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+
+    for _ in range(3):
+        client_with_venice.post(
+            "/v1/images/edits",
+            headers=HEADERS,
+            files={"image": ("in.png", b"png", "image/png")},
+            data={"model": "vn/gpt-image-2", "prompt": "x"},
+        )
+    # One attempt (both listings issued together), not one per request.
+    assert calls["n"] <= 2, f"catalogue re-fetched per request: {calls['n']} calls"
+
+
+@respx.mock
+def test_both_catalog_listings_are_fetched_concurrently(
+    client_with_venice: TestClient,
+) -> None:
+    """Serialising them would double this endpoint's tail latency while every
+    other provider waits behind it."""
+    inflight = {"now": 0, "max": 0}
+
+    async def responder(request: httpx.Request) -> httpx.Response:
+        inflight["now"] += 1
+        inflight["max"] = max(inflight["max"], inflight["now"])
+        await asyncio.sleep(0.05)
+        inflight["now"] -= 1
+        return httpx.Response(200, json={"data": []})
+
+    respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
+    assert client_with_venice.get("/v1/models", headers=HEADERS).status_code == 200
+    assert inflight["max"] == 2, "the two listings should overlap"

@@ -424,6 +424,20 @@ class FalBackend(Backend):
             )
         return FalModelConfig(id=model_slug)
 
+    def _config_for(self, model_slug: str, target: str) -> FalModelConfig:
+        """Per-model config for a request that may have been routed elsewhere.
+
+        A configured block for the endpoint actually being called wins, so
+        ``[[providers.models]] id = "fal-ai/nano-banana-2/edit"`` still governs
+        an edit that arrived addressed to the base model. Falling back to the
+        requested id (rather than looking up the target directly) matters with
+        ``discover_models = false``, where an unconfigured target would 404.
+        """
+        routed = self._models.get(target)
+        if routed is not None:
+            return routed
+        return self._model_config(model_slug)
+
     def _in_introspect_cooldown(self, model_id: str) -> bool:
         """True while a recent failure for this model should suppress retries."""
         failed_at = self._introspect_failed_at.get(model_id)
@@ -543,13 +557,13 @@ class FalBackend(Backend):
         follow from a ``WxH`` string. Pin them per model via ``params``.
         """
         del size
-        mcfg = self._model_config(model_slug)
         # A still means this is really an image-to-video request, which fal may
         # serve from a sibling endpoint — /v1/videos is one endpoint for both,
         # so the caller has no way to express the difference itself.
         target = await self._reference_variant(model_slug) if input_reference else model_slug
         if target != model_slug:
             log.debug("fal: routing image-to-video for %r to %r", model_slug, target)
+        mcfg = self._config_for(model_slug, target)
         body: dict[str, Any] = {"prompt": prompt}
         if input_reference is not None:
             # fal's image-to-video models take the still as `image_url`, and
@@ -726,13 +740,13 @@ class FalBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        mcfg = self._model_config(model_slug)
         # A model listed as text-to-image may have its edits served by a
         # sibling endpoint; send this there so callers don't have to know the
         # `/edit` half exists.
         target = await self._reference_variant(model_slug)
         if target != model_slug:
             log.debug("fal: routing edit for %r to %r", model_slug, target)
+        mcfg = self._config_for(model_slug, target)
         # fal's edit endpoints take reference images as ``image_urls``; they
         # accept data URIs inline, so no separate upload step is needed. All
         # supplied references are forwarded in order — a model that only honours

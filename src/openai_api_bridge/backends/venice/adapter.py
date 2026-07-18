@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections.abc import Sequence
+from typing import Any
 
 from ...config import VeniceProviderConfig
 from ...errors import InvalidRequest, UnsupportedOperation
@@ -29,6 +32,13 @@ log = logging.getLogger(__name__)
 # Venice, whose edit endpoint only accepts the `-edit` ids.
 _EDIT_SUFFIX = "-edit"
 
+# How long to wait before re-attempting a failed catalogue read for edit
+# routing. Without it every edit during an outage would re-run the fetch — and
+# because waiters acquire the lock in turn rather than sharing one result, N
+# concurrent edits would serialise into N sequential attempts. Mirrors the
+# cooldown fal's introspection uses for the same reason.
+_ROUTE_RETRY_SECONDS = 300.0
+
 # Venice's image-generation endpoint always returns PNG; the API doesn't
 # include a content-type per image so we hard-code it (matches existing pipe).
 _VENICE_CONTENT_TYPE = "image/png"
@@ -45,14 +55,44 @@ class VeniceBackend(Backend):
         self._edit_routes: dict[str, str] = {}
         self._routes_lock = asyncio.Lock()
         self._routes_loaded = False
+        self._routes_failed_at: float | None = None
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
-        generate = await self.client.list_image_models("image")
-        edit = await self.client.list_image_models("inpaint")
-        gen_ids = [m["id"] for m in generate if isinstance(m, dict) and "id" in m]
+        # Two independent listings, fetched together — neither feeds the other,
+        # and serialising them would double this endpoint's tail latency while
+        # every other provider waits behind it.
+        # Sequence[Any] because return_exceptions widens each slot to
+        # "result or exception", which defeats inference on a tuple unpack.
+        results: Sequence[Any] = await asyncio.gather(
+            self.client.list_image_models("image"),
+            self.client.list_image_models("inpaint"),
+            return_exceptions=True,
+        )
+        generate_result, edit_result = results[0], results[1]
+        # The generate listing is the provider's reason to exist; without it
+        # there is nothing to serve.
+        if isinstance(generate_result, BaseException):
+            raise generate_result
+        # The inpaint listing is not. `type=inpaint` is a narrower query than
+        # `type=image`, so a Venice-compatible proxy or an older API version
+        # could reject it outright — and letting that take the whole provider
+        # down with it would drop a perfectly healthy text-to-image catalogue
+        # from /v1/models. Degrade instead, as the fal backend does.
+        edit: list[dict[str, Any]] = []
+        edit_available = not isinstance(edit_result, BaseException)
+        if edit_available:
+            edit = edit_result
+        else:
+            log.warning(
+                "Venice: inpaint catalogue unavailable (%s); listing text-to-image "
+                "models only, and edits will not be routed until it recovers",
+                edit_result,
+            )
+
+        gen_ids = [m["id"] for m in generate_result if isinstance(m, dict) and "id" in m]
         edit_ids = [m["id"] for m in edit if isinstance(m, dict) and "id" in m]
 
         routes = {
@@ -60,8 +100,15 @@ class VeniceBackend(Backend):
             for e in edit_ids
             if e.endswith(_EDIT_SUFFIX) and e[: -len(_EDIT_SUFFIX)] in set(gen_ids)
         }
-        self._edit_routes = routes
-        self._routes_loaded = True
+        if edit_available:
+            # Only treat routing as resolved when the half it depends on was
+            # actually read, so a degraded listing retries later instead of
+            # latching an empty map.
+            self._edit_routes = routes
+            self._routes_loaded = True
+            self._routes_failed_at = None
+        else:
+            self._routes_failed_at = time.monotonic()
         collapsed = set(routes.values())
 
         entries = [
@@ -89,18 +136,26 @@ class VeniceBackend(Backend):
         ]
         return entries
 
+    def _in_route_cooldown(self) -> bool:
+        if self._routes_failed_at is None:
+            return False
+        return time.monotonic() - self._routes_failed_at < _ROUTE_RETRY_SECONDS
+
     async def _edit_target(self, model_slug: str) -> str:
         """The model id Venice's edit endpoint will actually accept.
 
         Loads the catalogue if it hasn't been read yet, so routing doesn't
-        depend on whether some earlier request happened to populate it.
+        depend on whether some earlier request happened to populate it. A
+        failed read is remembered for a cooldown, so an outage costs one
+        attempt per window rather than one per request.
         """
-        if not self._routes_loaded:
+        if not self._routes_loaded and not self._in_route_cooldown():
             async with self._routes_lock:
-                if not self._routes_loaded:
+                if not self._routes_loaded and not self._in_route_cooldown():
                     try:
                         await self.list_models()
                     except Exception as e:  # fall through to the id as given
+                        self._routes_failed_at = time.monotonic()
                         log.warning("Venice: could not load model list for edit routing: %s", e)
         return self._edit_routes.get(model_slug, model_slug)
 
