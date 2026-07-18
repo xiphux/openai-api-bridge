@@ -54,6 +54,12 @@ async def list_models(request: Request) -> dict:
             # client falls back to its own per-endpoint config.
             if entry.context_window is not None:
                 row["context_window"] = entry.context_window
+            # Which operations the model accepts ("text-to-image",
+            # "image-to-image", ...). Backends that merge a model's text-driven
+            # and reference-image halves into one id set this so a client can
+            # still tell whether an image may be attached; omitted when unknown.
+            if entry.capabilities is not None:
+                row["capabilities"] = list(entry.capabilities)
             # Additive image-model hints for a frontend's prompt-enhancement
             # pass — the preferred prompt format and an optional per-model nudge.
             # Omitted when unset.

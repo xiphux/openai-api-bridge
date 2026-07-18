@@ -1617,3 +1617,112 @@ def test_edit_routing_does_not_depend_on_prior_traffic(
     )
     assert r.status_code == 200, r.text
     assert edit_route.called
+
+
+# --- capability metadata ---------------------------------------------------
+#
+# Collapsing removes the `/edit` suffix that used to signal a model's modality,
+# so the listing has to say it explicitly — otherwise a client can't tell a
+# text-only model from one that also takes a reference image, and would learn
+# the difference from a failed request.
+
+
+@respx.mock
+def test_collapsed_model_advertises_both_halves(discovering_client: TestClient) -> None:
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano Banana 2"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Banana 2 Edit"),
+        ]
+    )
+    by_id = {
+        m["id"]: m for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]
+    }
+    assert by_id[f"fal/{NANO}"]["capabilities"] == ["text-to-image", "image-to-image"]
+
+
+@respx.mock
+def test_unpaired_text_model_advertises_text_only(discovering_client: TestClient) -> None:
+    """The inverse of the collapsing problem: a text-only model must not look
+    like it accepts an image."""
+    _stub_catalog_entries([_cat_entry(NANO, "text-to-image", "Nano Banana 2")])
+    by_id = {
+        m["id"]: m for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]
+    }
+    assert by_id[f"fal/{NANO}"]["capabilities"] == ["text-to-image"]
+
+
+@respx.mock
+def test_reference_only_model_advertises_image_input(discovering_client: TestClient) -> None:
+    _stub_catalog_entries([_cat_entry("fal-ai/some-upscaler", "image-to-image", "Upscaler")])
+    by_id = {
+        m["id"]: m for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]
+    }
+    assert by_id["fal/fal-ai/some-upscaler"]["capabilities"] == ["image-to-image"]
+
+
+@respx.mock
+def test_video_capabilities_and_collapsing(discovering_client: TestClient) -> None:
+    """/v1/videos is a single endpoint for both text-to-video and
+    image-to-video, so the caller can't express which half it wants — making
+    the pairing more load-bearing here than for images."""
+    t2v = "fal-ai/veo3.1"
+    _stub_catalog_entries(
+        [
+            _cat_entry(t2v, "text-to-video", "Veo 3.1"),
+            _cat_entry(f"{t2v}/image-to-video", "image-to-video", "Veo 3.1 I2V"),
+        ]
+    )
+    by_id = {
+        m["id"]: m for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]
+    }
+    assert f"fal/{t2v}/image-to-video" not in by_id
+    assert by_id[f"fal/{t2v}"]["kind"] == "video"
+    assert by_id[f"fal/{t2v}"]["capabilities"] == ["text-to-video", "image-to-video"]
+
+
+@respx.mock
+def test_video_with_a_still_routes_to_the_image_to_video_half(
+    discovering_client: TestClient,
+) -> None:
+    t2v = "fal-ai/veo3.1"
+    _stub_catalog_entries(
+        [
+            _cat_entry(t2v, "text-to-video", "Veo 3.1"),
+            _cat_entry(f"{t2v}/image-to-video", "image-to-video", "Veo 3.1 I2V"),
+        ]
+    )
+    i2v_submit = _stub_video_job(f"{t2v}/image-to-video")
+    t2v_submit = respx.post(f"{QUEUE}/{t2v}")
+
+    r = discovering_client.post(
+        "/v1/videos",
+        headers=HEADERS,
+        files={"input_reference": ("still.png", b"PNG", "image/png")},
+        data={"model": f"fal/{t2v}", "prompt": "animate"},
+    )
+    assert r.status_code == 200, r.text
+    _await_video(discovering_client, r.json()["id"])
+    assert i2v_submit.called, "a still should reach the image-to-video endpoint"
+    assert not t2v_submit.called
+
+
+@respx.mock
+def test_video_without_a_still_uses_the_text_half(discovering_client: TestClient) -> None:
+    t2v = "fal-ai/veo3.1"
+    _stub_catalog_entries(
+        [
+            _cat_entry(t2v, "text-to-video", "Veo 3.1"),
+            _cat_entry(f"{t2v}/image-to-video", "image-to-video", "Veo 3.1 I2V"),
+        ]
+    )
+    t2v_submit = _stub_video_job(t2v)
+    i2v_submit = respx.post(f"{QUEUE}/{t2v}/image-to-video")
+
+    r = discovering_client.post(
+        "/v1/videos", headers=HEADERS, data={"model": f"fal/{t2v}", "prompt": "a river"}
+    )
+    assert r.status_code == 200, r.text
+    _await_video(discovering_client, r.json()["id"])
+    assert t2v_submit.called
+    assert not i2v_submit.called

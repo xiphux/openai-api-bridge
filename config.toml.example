@@ -174,7 +174,7 @@ api_token_env = "VENICE_API_TOKEN"
 #   discover_models = false     # serve only the [[providers.models]] above;
 #                               # a model outside that list becomes a 404
 #   categories = ["text-to-image", "image-to-image"]   # override the filter
-#   collapse_edit_variants = false  # list a model's /edit half separately
+#   collapse_variants = false  # list a model's /edit half separately
 #                               # instead of routing edits to it automatically
 #   store_payloads = false      # send X-Fal-Store-IO: 0 so fal never stores
 #                               # your prompts (otherwise kept for 30 days)

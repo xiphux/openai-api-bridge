@@ -39,6 +39,17 @@ class ModelEntry:
     the OpenAI ``/v1/models`` row carries no such field, so a frontend showing
     a "N / max tokens" budget falls back to its own config.
 
+    ``capabilities`` is a non-standard extension listing the operations a model
+    accepts, in ``{input}-to-{output}`` form: ``("text-to-image",)``,
+    ``("text-to-image", "image-to-image")``, ``("image-to-video",)``, and so on.
+    ``None`` when the backend didn't say. It exists because a model id no longer
+    tells you: where a backend serves one model's text-driven and
+    reference-image-driven halves as separate endpoints, the bridge may present
+    them as a single model — at which point nothing in the name distinguishes
+    "text only" from "also accepts a reference image", and a client would learn
+    the difference from a failed request. A frontend can use this to enable or
+    grey out image attachment per model.
+
     ``prompt_style`` and ``prompt_hint`` are non-standard extensions for image
     and video models, consumed by a gateway-aware frontend's prompt-enhancement
     pass. ``prompt_style`` is the prompt FORMAT this model prefers — for images
@@ -57,6 +68,7 @@ class ModelEntry:
     context_window: int | None = None
     prompt_style: str | None = None
     prompt_hint: str | None = None
+    capabilities: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

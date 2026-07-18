@@ -69,37 +69,45 @@ _MAX_TRACKED_MODELS = 1024
 _MAX_CONSECUTIVE_POLL_ERRORS = 5
 _RESULT_FETCH_ATTEMPTS = 3
 
-# fal publishes the text-to-image and image-to-image halves of one model as
+# fal publishes a model's text-driven and reference-image-driven halves as
 # separate endpoints, which is an easy trap: a client sends an edit to
-# `fal-ai/nano-banana-2` without knowing `/edit` exists. Where we can pair the
+# `fal-ai/nano-banana-2` without knowing `/edit` exists, or a still to
+# `fal-ai/veo3.1` without knowing `/image-to-video` does. Where we can pair the
 # two *confidently*, the bridge lists one model and routes by request shape.
 #
 # "Confidently" means both ids exist in the catalogue and sit in the expected
-# categories — never a guess. The suffix vocabulary below covers the common
-# conventions (~81 of 194 text-to-image models pair); anything unpaired, and
-# every edit-only model — inpainting, upscalers, background removal, of which
-# there are ~299 — is left exactly as it is.
-_EDIT_SUFFIXES: tuple[str, ...] = ("/edit", "/image-to-image", "/edit-image")
-_TEXT_SUFFIX = "/text-to-image"
+# categories — never a guess from a name. Against the live catalogue this pairs
+# ~81 of 194 text-to-image models and ~74 of 125 text-to-video ones; anything
+# unpaired, and every reference-only model (inpainting, upscalers, background
+# removal), is left exactly as it is.
+#
+# text-driven category -> (its reference-image counterpart, endpoint suffixes)
+_VARIANT_PAIRS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "text-to-image": ("image-to-image", ("/edit", "/image-to-image", "/edit-image")),
+    "text-to-video": ("image-to-video", ("/image-to-video", "/edit")),
+}
 
 
-def edit_sibling_candidates(text_model_id: str) -> list[str]:
-    """Ids that would be the image-to-image half of ``text_model_id``.
+def variant_candidates(text_model_id: str, category: str) -> list[str]:
+    """Ids that would be the reference-image half of ``text_model_id``.
 
     Two shapes occur: a bare base gaining a suffix
     (``fal-ai/nano-banana-2`` -> ``fal-ai/nano-banana-2/edit``), and sibling
     suffixes under a shared stem
     (``bytedance/seedream/v5/pro/text-to-image`` -> ``.../pro/edit``).
     """
+    pair = _VARIANT_PAIRS.get(category)
+    if pair is None:
+        return []
+    _, suffixes = pair
+    text_suffix = f"/{category}"
     stem = (
-        text_model_id[: -len(_TEXT_SUFFIX)]
-        if text_model_id.endswith(_TEXT_SUFFIX)
-        else text_model_id
+        text_model_id[: -len(text_suffix)] if text_model_id.endswith(text_suffix) else text_model_id
     )
-    candidates = [stem + suffix for suffix in _EDIT_SUFFIXES]
+    candidates = [stem + suffix for suffix in suffixes]
     if stem != text_model_id:
         # A stem-suffixed model can also pair with `<full id>/edit`.
-        candidates += [text_model_id + suffix for suffix in _EDIT_SUFFIXES]
+        candidates += [text_model_id + suffix for suffix in suffixes]
     return candidates
 
 
@@ -183,9 +191,9 @@ class FalBackend(Backend):
         self._catalog_cache: list[ModelEntry] | None = None
         self._catalog_lock = asyncio.Lock()
         self._catalog_failed_at: float | None = None
-        # text-to-image id -> its image-to-image sibling, filled in alongside
-        # the catalogue. Empty when collapsing is off or discovery is off.
-        self._edit_routes: dict[str, str] = {}
+        # text-driven id -> the sibling that accepts a reference image, filled
+        # in alongside the catalogue. Empty when collapsing or discovery is off.
+        self._variant_routes: dict[str, str] = {}
         # Set once fal rejects our key. Unlike an outage this can't heal at
         # runtime — the token is read from the environment at startup — so it
         # permanently disables discovery and introspection instead of retrying.
@@ -300,8 +308,8 @@ class FalBackend(Backend):
             for item in raw
             if isinstance(item.get("endpoint_id"), str) and item["endpoint_id"]
         }
-        edit_routes, collapsed = self._pair_edit_variants(by_id)
-        self._edit_routes = edit_routes
+        variant_routes, collapsed = self._pair_variants(by_id)
+        self._variant_routes = variant_routes
 
         entries: list[ModelEntry] = []
         seen: set[str] = set()
@@ -310,8 +318,9 @@ class FalBackend(Backend):
             if not isinstance(model_id, str) or not model_id or model_id in seen:
                 continue
             if model_id in collapsed:
-                # Folded into its text-to-image half, which routes here for
-                # edits. Listing both is what invites picking the wrong one.
+                # Folded into its text-driven half, which routes here when a
+                # reference image is supplied. Listing both is what invites
+                # picking the wrong one.
                 continue
             seen.add(model_id)
             meta = item.get("metadata")
@@ -324,6 +333,14 @@ class FalBackend(Backend):
                 display = meta["display_name"]
             category = meta.get("category")
             kind = CATEGORY_KINDS.get(category) if isinstance(category, str) else None
+            # What this entry actually accepts. A collapsed model covers both
+            # halves; without this the merged id would be indistinguishable
+            # from a text-only one, and a client would find out by failing.
+            capabilities: tuple[str, ...] | None = None
+            if isinstance(category, str):
+                routed = variant_routes.get(model_id)
+                partner = self._category_of(by_id, routed) if routed else None
+                capabilities = (category, partner) if partner else (category,)
             entries.append(
                 ModelEntry(
                     id=model_id,
@@ -333,59 +350,60 @@ class FalBackend(Backend):
                     display_name=display or model_id,
                     prompt_style=override.prompt_style if override else None,
                     prompt_hint=override.prompt_hint if override else None,
+                    capabilities=capabilities,
                 )
             )
         return entries
 
-    def _pair_edit_variants(
-        self, by_id: dict[str, dict[str, Any]]
-    ) -> tuple[dict[str, str], set[str]]:
-        """Match text-to-image models to their image-to-image half.
+    def _category_of(self, by_id: dict[str, dict[str, Any]], model_id: str) -> str | None:
+        meta = by_id.get(model_id, {}).get("metadata")
+        category = meta.get("category") if isinstance(meta, dict) else None
+        return category if isinstance(category, str) else None
 
-        Returns ``(routes, collapsed)`` — where to send an edit for a given
-        model, and which ids to drop from the listing because they're now
-        reachable through their sibling.
+    def _pair_variants(self, by_id: dict[str, dict[str, Any]]) -> tuple[dict[str, str], set[str]]:
+        """Match text-driven models to their reference-image half.
+
+        Returns ``(routes, collapsed)`` — where to send a request carrying a
+        reference image, and which ids to drop from the listing because they're
+        now reachable through their sibling.
 
         A pair is only made when both ids are in this catalogue *and* their
         categories are the expected halves, so nothing is inferred from a name
-        alone. Models without a partner — including every edit-only endpoint —
-        are untouched.
+        alone. Models without a partner — including every reference-only
+        endpoint — are untouched.
         """
-        if not self.cfg.collapse_edit_variants:
+        if not self.cfg.collapse_variants:
             return {}, set()
-
-        def category_of(model_id: str) -> str | None:
-            meta = by_id[model_id].get("metadata")
-            category = meta.get("category") if isinstance(meta, dict) else None
-            return category if isinstance(category, str) else None
-
         routes: dict[str, str] = {}
         collapsed: set[str] = set()
         for model_id in by_id:
-            if category_of(model_id) != "text-to-image":
+            category = self._category_of(by_id, model_id)
+            pair = _VARIANT_PAIRS.get(category) if category else None
+            if category is None or pair is None:
                 continue
-            for candidate in edit_sibling_candidates(model_id):
-                if candidate in by_id and category_of(candidate) == "image-to-image":
+            partner_category, _ = pair
+            for candidate in variant_candidates(model_id, category):
+                if candidate in by_id and self._category_of(by_id, candidate) == partner_category:
                     routes[model_id] = candidate
                     collapsed.add(candidate)
                     break
         if routes:
-            log.debug("fal: collapsed %d edit variants into their base models", len(routes))
+            log.debug("fal: collapsed %d variant pairs into their base models", len(routes))
         return routes, collapsed
 
-    async def _edit_target(self, model_slug: str) -> str:
-        """The endpoint an edit request should actually hit.
+    async def _reference_variant(self, model_slug: str) -> str:
+        """The endpoint a request carrying a reference image should hit.
 
         Pairing comes from the catalogue, so this makes sure it's loaded rather
         than letting routing depend on whether some earlier request happened to
         populate it — that would make the same call behave differently based on
         unrelated traffic.
         """
-        if not self.cfg.collapse_edit_variants or not self.cfg.discover_models:
+        if not self.cfg.collapse_variants or not self.cfg.discover_models:
             return model_slug
         if self._catalog_cache is None:
             await self.list_models()
-        return self._edit_routes.get(model_slug, model_slug)
+        return self._variant_routes.get(model_slug, model_slug)
 
     # --- moderation settings ---------------------------------------------
 
@@ -526,6 +544,12 @@ class FalBackend(Backend):
         """
         del size
         mcfg = self._model_config(model_slug)
+        # A still means this is really an image-to-video request, which fal may
+        # serve from a sibling endpoint — /v1/videos is one endpoint for both,
+        # so the caller has no way to express the difference itself.
+        target = await self._reference_variant(model_slug) if input_reference else model_slug
+        if target != model_slug:
+            log.debug("fal: routing image-to-video for %r to %r", model_slug, target)
         body: dict[str, Any] = {"prompt": prompt}
         if input_reference is not None:
             # fal's image-to-video models take the still as `image_url`, and
@@ -533,20 +557,20 @@ class FalBackend(Backend):
             content_type = input_reference_content_type or "image/png"
             encoded = base64.b64encode(input_reference).decode("ascii")
             body["image_url"] = f"data:{content_type};base64,{encoded}"
-        derived = await self._derived_params(model_slug)
+        derived = await self._derived_params(target)
         if seconds is not None and derived is not None:
             # Duration spellings differ per model ("8s" vs "10"), so the value
             # comes from this model's own enum. See schema.duration_params.
             body.update(duration_params(derived.duration_prop, seconds))
         if mcfg.disable_safety:
-            body.update(await self._safety_params(mcfg, model_slug))
+            body.update(await self._safety_params(mcfg, target))
         if mcfg.params:
             body.update(mcfg.params)
 
         # One handler for the whole submit -> poll -> fetch sequence, so a key
         # revoked mid-job is reported like one rejected at submit.
         try:
-            return await self._run_video_job(model_slug, body, on_upstream_id)
+            return await self._run_video_job(target, body, on_upstream_id)
         except UpstreamAuthError as e:
             self._note_auth_failure(e)
             raise
@@ -706,7 +730,7 @@ class FalBackend(Backend):
         # A model listed as text-to-image may have its edits served by a
         # sibling endpoint; send this there so callers don't have to know the
         # `/edit` half exists.
-        target = await self._edit_target(model_slug)
+        target = await self._reference_variant(model_slug)
         if target != model_slug:
             log.debug("fal: routing edit for %r to %r", model_slug, target)
         # fal's edit endpoints take reference images as ``image_urls``; they

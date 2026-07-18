@@ -223,13 +223,16 @@ class FalProviderConfig(BaseModel):
     # image-to-video. fal also publishes audio/3d categories; listing those
     # here would advertise models the fal backend has no code path for.
     categories: list[str] | None = None
-    # fal splits a model's text-to-image and image-to-image halves across two
-    # endpoints (`fal-ai/nano-banana-2` and `fal-ai/nano-banana-2/edit`), which
-    # is easy to pick wrong. When true (default) the bridge lists only the
-    # text-to-image id for pairs it can identify confidently, and sends edit
-    # requests to the sibling. Models without an identifiable partner —
-    # including every edit-only endpoint — are listed unchanged.
-    collapse_edit_variants: bool = True
+    # fal splits a model's text-driven and reference-image halves across two
+    # endpoints — `fal-ai/nano-banana-2` and `.../edit`, `fal-ai/veo3.1` and
+    # `.../image-to-video` — which is easy to pick wrong. When true (default)
+    # the bridge lists only the text-driven id for pairs it can identify
+    # confidently, and routes requests carrying a reference image to the
+    # sibling. Models without an identifiable partner — including every
+    # reference-only endpoint — are listed unchanged. The merged entry
+    # advertises both halves in its `capabilities`, so a client can still tell
+    # whether an image may be attached.
+    collapse_variants: bool = True
     # fal's model API, used both to list models and to introspect each model's
     # OpenAPI input schema so the moderation knob can be derived, not hardcoded.
     models_api_url: str = "https://api.fal.ai/v1/models"

@@ -62,17 +62,31 @@ on. Nothing stops a client naming such an endpoint by hand, though; fal will
 run the job and return a non-image envelope, which the bridge reports as
 `unsupported_operation` (HTTP 400) rather than a retryable upstream error.
 
-**Edit variants are collapsed.** fal publishes a model's text-to-image and
-image-to-image halves as separate endpoints — `fal-ai/nano-banana-2` and
-`fal-ai/nano-banana-2/edit` — which is easy to pick wrong. Where the bridge can
-pair them *confidently* (both ids present in the catalogue, in the expected
-categories) it lists only the text-to-image id and sends edits to the sibling,
-so `POST /v1/images/edits` against `fal-ai/nano-banana-2` just works. Against
-the live catalogue that pairs **81 of 194** text-to-image models — including
-Nano Banana 2/Pro, both Seedream generations, GPT Image 2 and FLUX 2 Flex —
-shrinking the listing from 574 to 493. Nothing is inferred from a name alone,
-and the ~299 **edit-only** models (inpainting, upscalers, background removal)
-are listed untouched. Set `collapse_edit_variants = false` to list both halves.
+**Paired variants are collapsed.** fal publishes a model's text-driven and
+reference-image halves as separate endpoints — `fal-ai/nano-banana-2` and
+`.../edit`, `fal-ai/veo3.1` and `.../image-to-video` — which is easy to pick
+wrong. Where the bridge can pair them *confidently* (both ids present in the
+catalogue, in the expected categories) it lists only the text-driven id and
+routes requests carrying a reference image to the sibling, so `POST
+/v1/images/edits` against `fal-ai/nano-banana-2` just works. This matters most
+for video, where `/v1/videos` is a **single endpoint** for both text-to-video
+and image-to-video — the caller has no way to express which half it wants.
+
+Against the live catalogue that pairs **81 of 194** text-to-image models and
+**74 of 125** text-to-video ones — Nano Banana 2/Pro, both Seedream
+generations, GPT Image 2, FLUX 2 Flex, Veo, Kling, Seedance. Nothing is
+inferred from a name alone: a same-shaped id in the wrong category doesn't
+pair. Models without a partner, and every reference-only endpoint (inpainting,
+upscalers, background removal), are listed untouched. Set
+`collapse_variants = false` to list both halves separately.
+
+Because collapsing removes the `/edit` suffix that used to signal modality,
+each entry carries a **`capabilities`** list saying what it actually accepts —
+`["text-to-image"]`, `["text-to-image", "image-to-image"]`,
+`["image-to-video"]`. Without it a merged id would be indistinguishable from a
+text-only one, and a client would discover the difference from a failed
+request; with it, a frontend can enable or grey out image attachment per
+model.
 
 `[[providers.models]]` entries are per-model **overrides**, not a whitelist —
 they set `disable_safety`, `params`, `display_name`, or prompt metadata on a
@@ -253,6 +267,7 @@ entry so clients can build a useful picker without per-model hardcoding
 | `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`; fal: the per-model `kind` from config. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
 | `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
 | `context_window` | max context size in tokens, omitted when unknown | OpenAI-passthrough upstreams that expose it: llama.cpp's `meta.n_ctx` (a loaded model) or router `--ctx-size`, vLLM's `max_model_len`. The bridge strips the `meta`/`status` blocks otherwise, so this is the only way the size survives the proxy. Clients use it for a "N / max tokens" budget |
+| `capabilities` | list of `{input}-to-{output}` operations, omitted when unknown | fal only today. Says what a model actually accepts — `["text-to-image"]` vs `["text-to-image", "image-to-image"]` — which the model id no longer tells you once paired endpoints are collapsed into one entry. A frontend uses it to enable or grey out image attachment per model |
 | `prompt_style` / `prompt_hint` | preferred prompt format + a freeform per-model nudge, omitted when unset | ComfyUI: the workflow's `meta.json` (see the meta schema below). Image and video models — a gateway-aware client uses them to rewrite a prompt into the model's preferred format before generation |
 
 Standard OpenAI clients ignore the extra fields; nothing nonstandard is
