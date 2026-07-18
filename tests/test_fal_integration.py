@@ -589,6 +589,109 @@ async def test_introspection_retries_after_cooldown_and_recovers(
 
 
 @respx.mock
+async def test_empty_but_successful_response_arms_the_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200 carrying no schemas must not latch an empty cache. Without arming
+    the cooldown the first call would poison the cache and no later call would
+    ever retry — the exact degraded-until-restart mode the cooldown prevents,
+    reached without an exception."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+    calls: list[list[str]] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        asked = request.url.params.get_list("endpoint_id")
+        calls.append(asked)
+        # The client itself retries a missing id once (its truncation guard),
+        # so the whole first round — batch + straggler — must come back empty
+        # for the adapter to see a successful-but-useless lookup.
+        if len(calls) <= 2:
+            return httpx.Response(200, json={"models": []})
+        return httpx.Response(200, json={"models": [{"endpoint_id": UNMAPPED, "openapi": spec}]})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+
+    backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
+    try:
+        model = backend.cfg.models[0]
+        assert await backend._safety_params(model) == {}
+        # Retried rather than serving a latched empty cache forever.
+        assert await backend._safety_params(model) == {"enable_safety_checker": False}
+    finally:
+        await backend.aclose()
+
+
+@respx.mock
+async def test_partial_response_retries_only_the_missing_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a response resolves some models but omits others, the resolved ones
+    are cached and only the stragglers are re-fetched after the cooldown."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+    other = "fal-ai/another-unmapped-model"
+    calls: list[list[str]] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        asked = request.url.params.get_list("endpoint_id")
+        calls.append(asked)
+        # Round 1 is the batch plus the client's own straggler retry; `other`
+        # stays unanswered through both so the adapter sees a partial result.
+        served = [m for m in asked if m == UNMAPPED or len(calls) >= 3]
+        return httpx.Response(
+            200, json={"models": [{"endpoint_id": m, "openapi": spec} for m in served]}
+        )
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+
+    backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED, other])
+    try:
+        resolved_model, missing_model = backend.cfg.models
+        # The model that did resolve is cached from the partial round...
+        assert await backend._safety_params(resolved_model) == {"enable_safety_checker": False}
+        # ...and the straggler is retried rather than left on fallback forever.
+        assert await backend._safety_params(missing_model) == {"enable_safety_checker": False}
+    finally:
+        await backend.aclose()
+
+    # That retry asked only for the model still missing, not the whole set.
+    assert calls[-1] == [other]
+
+
+@respx.mock
+async def test_persistently_missing_model_is_throttled_by_the_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model the catalog never returns (a typo'd id, say) must not cost a
+    lookup on every single request — the cooldown throttles the retry."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    spec = _openapi("S", {"enable_safety_checker": {"type": "boolean", "default": True}})
+    other = "fal-ai/never-returned"
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        asked = request.url.params.get_list("endpoint_id")
+        served = [m for m in asked if m == UNMAPPED]
+        return httpx.Response(
+            200, json={"models": [{"endpoint_id": m, "openapi": spec} for m in served]}
+        )
+
+    route = respx.get(MODELS_API).mock(side_effect=responder)
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[UNMAPPED, other])
+    try:
+        missing_model = backend.cfg.models[1]
+        for _ in range(3):
+            assert await backend._safety_params(missing_model) == {}
+    finally:
+        await backend.aclose()
+
+    # One round only — the batch plus the client's own straggler retry — rather
+    # than a fresh lookup for each of the three requests.
+    assert route.call_count == 2
+
+
+@respx.mock
 def test_introspection_failure_falls_back_to_static_map(client_with_fal: TestClient) -> None:
     respx.get(MODELS_API).mock(return_value=httpx.Response(503, json={"error": "down"}))
     gen = _mock_generation(SEEDREAM_T2I)

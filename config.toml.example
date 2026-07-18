@@ -132,8 +132,10 @@ api_token_env = "VENICE_API_TOKEN"
 # over-eager default guardrails that flat OpenAI-shaped brokers don't let you
 # touch — and new model versions are picked up without a code change.
 #
-# fal has no model-catalog endpoint, so — unlike ImageRouter — you declare the
-# models this provider serves explicitly, one [[providers.models]] per model.
+# Unlike ImageRouter, you declare the models this provider serves explicitly,
+# one [[providers.models]] per model. (fal does publish a model search API —
+# it's where the bridge reads schemas from — but it catalogues the whole
+# platform rather than a per-account selection, so it isn't a usable listing.)
 # `id` is the fal model path (also the /v1/models slug, addressed by the client
 # as `fal/<id>`). Set FAL_API_KEY in the environment to enable this provider.
 

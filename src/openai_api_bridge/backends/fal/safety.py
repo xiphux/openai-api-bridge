@@ -167,10 +167,13 @@ def safety_params_from_schema(spec: dict[str, Any]) -> dict[str, Any]:
 
 # --- offline fallback -------------------------------------------------------
 
-# Used only when schema introspection is disabled or the fetch fails. Matched
-# as a substring of the model path, first match wins. Narrower and blunter than
-# the schema path (it can't know a model's enum ceiling), but better than
-# leaving guardrails at their defaults when fal's model API is unreachable.
+# Used for a model whenever schema-derived params aren't available for it:
+# introspection disabled, the lookup failed, or the lookup succeeded but that
+# particular model was absent from the response (its siblings can still get
+# schema-derived params in the same run). Matched as a substring of the model
+# path, first match wins. Narrower and blunter than the schema path — it can't
+# know a model's enum ceiling — but better than leaving guardrails at their
+# defaults.
 _FALLBACK_RULES: tuple[tuple[str, dict[str, Any]], ...] = (
     ("seedream", {"enable_safety_checker": False}),
     ("nano-banana", {"safety_tolerance": "6"}),

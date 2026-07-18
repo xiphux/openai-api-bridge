@@ -10,12 +10,15 @@ the loosest setting is read from the model's own OpenAPI schema and cached; see
 knob we recognise — notably fal's OpenAI GPT-Image wrapper, which has no
 moderation field at all — get nothing injected; there's no universal off-switch.
 Introspection is applied when a model is configured with ``disable_safety =
-true`` (the default), and degrades to a small static map if fal's model API is
-unreachable.
+true`` (the default). It degrades to a small static map per model — when
+introspection is off, the lookup failed, or that model was absent from an
+otherwise successful response.
 
-fal's *inference* host has no catalog endpoint, so ``list_models`` reflects the
-models declared in the provider's TOML block rather than a live listing; the
-separate model API is used only to read schemas.
+``list_models`` reflects the models declared in the provider's TOML block rather
+than a live listing. That's a deliberate choice, not a missing capability: fal
+*does* publish a platform-wide model search API (which is what we read schemas
+from), but it catalogues every model on the platform rather than a per-account
+selection, so the set this provider serves is declared explicitly.
 """
 
 from __future__ import annotations
@@ -86,8 +89,9 @@ class FalBackend(Backend):
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
-        # fal has no catalog endpoint — the models this provider serves are the
-        # ones declared in config.
+        # The models this provider serves are the ones declared in config —
+        # fal's model API catalogues the whole platform, not a per-account
+        # selection, so it isn't a listing we can surface directly.
         return [
             ModelEntry(
                 id=m.id,
@@ -115,50 +119,68 @@ class FalBackend(Backend):
         elapsed = time.monotonic() - self._introspect_failed_at
         return elapsed < self.cfg.introspect_retry_seconds
 
-    async def _ensure_safety_cache(self) -> dict[str, dict[str, Any]] | None:
-        """Populate the schema-derived safety map, once, for all configured models.
+    def _arm_introspect_retry(self, reason: str) -> None:
+        """Record a lookup as unsuccessful so the cooldown — and therefore a
+        later retry — engages."""
+        self._introspect_failed_at = time.monotonic()
+        log.warning(
+            "fal: %s; using built-in moderation defaults for the affected models, "
+            "retrying in %.0fs",
+            reason,
+            self.cfg.introspect_retry_seconds,
+        )
 
-        Returns ``None`` if introspection is off, the lookup failed, or we're
-        still inside the post-failure cooldown — callers then fall back to the
-        static map. The cooldown keeps a fal outage from costing a round trip
-        per request without leaving the process permanently degraded.
+    async def _ensure_safety_cache(self) -> dict[str, dict[str, Any]] | None:
+        """Resolve schema-derived safety params for the configured models.
+
+        Returns the map — which may be **partial** — or ``None`` when
+        introspection is off or nothing has resolved yet. Callers fall back to
+        the static map for any model absent from it.
+
+        Anything short of a complete result arms the retry cooldown: a raised
+        error, a response carrying no usable schemas, or a response that simply
+        omits some models. That matters because a *successful* but empty or
+        partial response would otherwise latch a cache that never retries —
+        the same "degraded until restart" failure the cooldown exists to
+        prevent, just reached without an exception. Only the still-missing
+        models are re-fetched on a retry.
         """
         if not self.cfg.introspect_safety:
             return None
+        model_ids = [m.id for m in self.cfg.models]
+        if not model_ids:
+            return {}
         # Always taken under the lock: it collapses a burst of concurrent first
-        # requests into exactly one batched lookup, and once resolved the body
-        # is a single cache check, so the cost is an uncontended acquire.
+        # requests into exactly one batched lookup, and once fully resolved the
+        # body is a single completeness check — an uncontended acquire.
         async with self._safety_lock:
-            if self._safety_cache is not None:
-                return self._safety_cache
+            cached = self._safety_cache
+            missing = [mid for mid in model_ids if cached is None or mid not in cached]
+            if not missing:
+                return cached
             if self._in_introspect_cooldown():
-                return None
-            model_ids = [m.id for m in self.cfg.models]
-            if not model_ids:
-                self._safety_cache = {}
-                return self._safety_cache
+                return cached
             try:
-                specs = await self.client.fetch_model_schemas(model_ids)
+                specs = await self.client.fetch_model_schemas(missing)
             except Exception as e:  # never fail a generation over an introspection blip
-                self._introspect_failed_at = time.monotonic()
-                log.warning(
-                    "fal: could not introspect model schemas (%s); using built-in "
-                    "moderation defaults, retrying in %.0fs",
-                    e,
-                    self.cfg.introspect_retry_seconds,
-                )
-                return None
+                self._arm_introspect_retry(f"could not introspect model schemas ({e})")
+                return cached
             resolved = {mid: safety_params_from_schema(spec) for mid, spec in specs.items()}
-            for mid in model_ids:
-                if mid not in resolved:
-                    log.warning(
-                        "fal: model %r absent from the model API; using fallback "
-                        "moderation defaults",
-                        mid,
-                    )
-            self._introspect_failed_at = None
-            self._safety_cache = resolved
-            return self._safety_cache
+            if not resolved:
+                # HTTP succeeded but nothing usable came back (empty catalog
+                # response, changed payload shape, auth downgrade). Treat it as
+                # a failure rather than caching the void.
+                self._arm_introspect_retry(f"model API returned no schemas for {missing}")
+                return cached
+            merged = dict(cached or {})
+            merged.update(resolved)
+            self._safety_cache = merged
+            still_missing = [mid for mid in model_ids if mid not in merged]
+            if still_missing:
+                self._arm_introspect_retry(f"no schema returned for {still_missing}")
+            else:
+                self._introspect_failed_at = None
+            return merged
 
     async def _safety_params(self, mcfg: FalModelConfig) -> dict[str, Any]:
         """Loosest moderation settings for a model: schema-derived when we can
