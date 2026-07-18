@@ -116,3 +116,89 @@ def test_images_edits_rejects_multiple_references(
     assert "image" in body.get("param", "")
     # Never reached the upstream.
     assert not edit_route.called
+
+
+# --- edit-model pairing ----------------------------------------------------
+#
+# Venice files text-to-image under type=image and image-to-image under
+# type=inpaint, naming the latter by suffixing the base id (`gpt-image-2` ->
+# `gpt-image-2-edit`). Its edit endpoint only accepts the `-edit` ids, so the
+# bridge lists the base and routes edits to the counterpart.
+
+
+def _stub_venice_catalog(image: list[str], inpaint: list[str]) -> None:
+    def responder(request: httpx.Request) -> httpx.Response:
+        model_type = request.url.params.get("type")
+        ids = image if model_type == "image" else inpaint if model_type == "inpaint" else []
+        return httpx.Response(200, json={"data": [{"id": i, "type": model_type} for i in ids]})
+
+    respx.get(f"{UPSTREAM}/api/v1/models").mock(side_effect=responder)
+
+
+@respx.mock
+def test_models_collapse_edit_pairs_and_expose_capabilities(
+    client_with_venice: TestClient,
+) -> None:
+    _stub_venice_catalog(
+        image=["gpt-image-2", "flux-2-pro"],
+        inpaint=["gpt-image-2-edit", "qwen-edit-uncensored"],
+    )
+    r = client_with_venice.get("/v1/models", headers=HEADERS)
+    assert r.status_code == 200
+    by_id = {m["id"]: m for m in r.json()["data"]}
+
+    # Paired: one entry, advertising both halves.
+    assert "vn/gpt-image-2" in by_id
+    assert "vn/gpt-image-2-edit" not in by_id
+    assert by_id["vn/gpt-image-2"]["capabilities"] == ["text-to-image", "image-to-image"]
+    # Unpaired generate model stays text-only.
+    assert by_id["vn/flux-2-pro"]["capabilities"] == ["text-to-image"]
+    # Edit-only model is still listed — it just can't do text-to-image. It was
+    # previously absent entirely, since only type=image was fetched.
+    assert by_id["vn/qwen-edit-uncensored"]["capabilities"] == ["image-to-image"]
+
+
+@respx.mock
+def test_edit_is_routed_to_the_suffixed_model(client_with_venice: TestClient) -> None:
+    """Venice's edit endpoint rejects the base id, so an edit naming
+    `gpt-image-2` has to go out as `gpt-image-2-edit`."""
+    _stub_venice_catalog(image=["gpt-image-2"], inpaint=["gpt-image-2-edit"])
+    edit_route = respx.post(f"{UPSTREAM}/api/v1/image/edit").mock(
+        return_value=httpx.Response(
+            200, content=b"\x89PNGedited", headers={"content-type": "image/png"}
+        )
+    )
+
+    r = client_with_venice.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        files={"image": ("input.png", b"png", "image/png")},
+        data={"model": "vn/gpt-image-2", "prompt": "make it blue"},
+    )
+    assert r.status_code == 200, r.text
+    sent = edit_route.calls.last.request.content.decode("utf-8", errors="replace")
+    assert "gpt-image-2-edit" in sent
+
+
+@respx.mock
+def test_edit_routing_works_without_a_prior_models_call(
+    client_with_venice: TestClient,
+) -> None:
+    """Routing loads the catalogue itself, so the same request can't behave
+    differently depending on unrelated earlier traffic."""
+    _stub_venice_catalog(image=["gpt-image-2"], inpaint=["gpt-image-2-edit"])
+    edit_route = respx.post(f"{UPSTREAM}/api/v1/image/edit").mock(
+        return_value=httpx.Response(
+            200, content=b"\x89PNGedited", headers={"content-type": "image/png"}
+        )
+    )
+    r = client_with_venice.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        files={"image": ("input.png", b"png", "image/png")},
+        data={"model": "vn/gpt-image-2", "prompt": "x"},
+    )
+    assert r.status_code == 200, r.text
+    assert "gpt-image-2-edit" in edit_route.calls.last.request.content.decode(
+        "utf-8", errors="replace"
+    )

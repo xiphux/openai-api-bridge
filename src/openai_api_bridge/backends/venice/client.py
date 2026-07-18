@@ -1,7 +1,8 @@
 """Async HTTP client for the Venice.ai image API.
 
 Wraps three endpoints:
-  * ``GET  /api/v1/models?type=image`` — list available image models
+  * ``GET  /api/v1/models?type=image`` — text-to-image models
+  * ``GET  /api/v1/models?type=inpaint`` — image-to-image ("-edit") models
   * ``POST /api/v1/image/generate``    — synchronous text-to-image
   * ``POST /api/v1/image/edit``        — synchronous image-to-image (img2img)
 
@@ -40,10 +41,16 @@ class VeniceClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def list_image_models(self) -> list[dict[str, Any]]:
+    async def list_image_models(self, model_type: str = "image") -> list[dict[str, Any]]:
+        """List models of a given Venice type.
+
+        Venice files text-to-image under ``image`` and image-to-image under
+        ``inpaint`` — the edit models are a separate listing, not a flag on the
+        generate ones.
+        """
         try:
             response = await self._client.get(
-                f"{self.base_url}/api/v1/models", params={"type": "image"}
+                f"{self.base_url}/api/v1/models", params={"type": model_type}
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:

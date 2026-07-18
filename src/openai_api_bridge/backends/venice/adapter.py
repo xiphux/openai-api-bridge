@@ -9,15 +9,25 @@ so more than one reference is rejected rather than silently dropped.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from ...config import VeniceProviderConfig
 from ...errors import InvalidRequest, UnsupportedOperation
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry
+from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, make_capabilities
 from .client import VeniceClient
 
 log = logging.getLogger(__name__)
+
+# Venice names a model's image-to-image half by suffixing the base id, and
+# files it under a separate model type: `gpt-image-2` (type=image) pairs with
+# `gpt-image-2-edit` (type=inpaint). Same idea as fal's `/edit` endpoints, so
+# it gets the same treatment — list one model, route by request shape — which
+# also means the edit half is reachable at all. It previously wasn't: only
+# type=image was listed, and an edit sent to `gpt-image-2` was rejected by
+# Venice, whose edit endpoint only accepts the `-edit` ids.
+_EDIT_SUFFIX = "-edit"
 
 # Venice's image-generation endpoint always returns PNG; the API doesn't
 # include a content-type per image so we hard-code it (matches existing pipe).
@@ -31,15 +41,68 @@ class VeniceBackend(Backend):
             base_url=cfg.base_url,
             api_token=cfg.resolve_api_token(),
         )
+        # base id -> its "-edit" counterpart, learned from the catalogue.
+        self._edit_routes: dict[str, str] = {}
+        self._routes_lock = asyncio.Lock()
+        self._routes_loaded = False
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
-        raw = await self.client.list_image_models()
-        return [
-            ModelEntry(id=m["id"], kind="image", display_name=m.get("id")) for m in raw if "id" in m
+        generate = await self.client.list_image_models("image")
+        edit = await self.client.list_image_models("inpaint")
+        gen_ids = [m["id"] for m in generate if isinstance(m, dict) and "id" in m]
+        edit_ids = [m["id"] for m in edit if isinstance(m, dict) and "id" in m]
+
+        routes = {
+            e[: -len(_EDIT_SUFFIX)]: e
+            for e in edit_ids
+            if e.endswith(_EDIT_SUFFIX) and e[: -len(_EDIT_SUFFIX)] in set(gen_ids)
+        }
+        self._edit_routes = routes
+        self._routes_loaded = True
+        collapsed = set(routes.values())
+
+        entries = [
+            ModelEntry(
+                id=model_id,
+                kind="image",
+                display_name=model_id,
+                capabilities=make_capabilities(
+                    ["text", "image"] if model_id in routes else ["text"], "image"
+                ),
+            )
+            for model_id in gen_ids
         ]
+        # Edit models with no generate half — Venice's uncensored//inpaint-only
+        # entries — stay listed in their own right; they just can't do t2i.
+        entries += [
+            ModelEntry(
+                id=model_id,
+                kind="image",
+                display_name=model_id,
+                capabilities=make_capabilities(["image"], "image"),
+            )
+            for model_id in edit_ids
+            if model_id not in collapsed
+        ]
+        return entries
+
+    async def _edit_target(self, model_slug: str) -> str:
+        """The model id Venice's edit endpoint will actually accept.
+
+        Loads the catalogue if it hasn't been read yet, so routing doesn't
+        depend on whether some earlier request happened to populate it.
+        """
+        if not self._routes_loaded:
+            async with self._routes_lock:
+                if not self._routes_loaded:
+                    try:
+                        await self.list_models()
+                    except Exception as e:  # fall through to the id as given
+                        log.warning("Venice: could not load model list for edit routing: %s", e)
+        return self._edit_routes.get(model_slug, model_slug)
 
     async def generate_image(
         self,
@@ -85,11 +148,16 @@ class VeniceBackend(Backend):
         # /image/edit uses aspect_ratio/resolution, not OpenAI's size string;
         # we let Venice infer from the source image rather than guess a mapping.
         del size
+        # Venice's edit endpoint only accepts the "-edit" ids, so a request
+        # naming the base model has to be routed to its counterpart.
+        target = await self._edit_target(model_slug)
+        if target != model_slug:
+            log.debug("Venice: routing edit for %r to %r", model_slug, target)
         image = images[0]
         out: list[GeneratedAsset] = []
         for _ in range(n):
             data, content_type = await self.client.edit_image(
-                model=model_slug,
+                model=target,
                 prompt=prompt,
                 image=image.data,
                 image_content_type=image.content_type,
