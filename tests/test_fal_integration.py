@@ -2171,9 +2171,9 @@ def test_family_named_endpoints_are_disambiguated(discovering_client: TestClient
     r = discovering_client.get("/v1/models", headers=HEADERS)
     assert r.status_code == 200
     names = {m["id"]: m["display_name"] for m in r.json()["data"]}
-    assert names["fal/fal-ai/florence-2-large/object-detection"] == "Florence-2 (object-detection)"
-    assert names["fal/fal-ai/florence-2-large/ocr-with-region"] == "Florence-2 (ocr-with-region)"
-    assert names["fal/fal-ai/florence-2-large/region-proposal"] == "Florence-2 (region-proposal)"
+    assert names["fal/fal-ai/florence-2-large/object-detection"] == "Florence-2 (Object-Detection)"
+    assert names["fal/fal-ai/florence-2-large/ocr-with-region"] == "Florence-2 (OCR-with-Region)"
+    assert names["fal/fal-ai/florence-2-large/region-proposal"] == "Florence-2 (Region-Proposal)"
 
 
 @respx.mock
@@ -2188,8 +2188,8 @@ def test_disambiguation_keeps_only_the_differing_path(discovering_client: TestCl
     )
     r = discovering_client.get("/v1/models", headers=HEADERS)
     names = {m["id"]: m["display_name"] for m in r.json()["data"]}
-    assert names["fal/fal-ai/wan/v2.7/text-to-image"] == "Wan (v2.7/text-to-image)"
-    assert names["fal/fal-ai/wan/v2.2-a14b/text-to-image"] == "Wan (v2.2-a14b/text-to-image)"
+    assert names["fal/fal-ai/wan/v2.7/text-to-image"] == "Wan (V2.7 Text-to-Image)"
+    assert names["fal/fal-ai/wan/v2.2-a14b/text-to-image"] == "Wan (V2.2-A14B Text-to-Image)"
 
 
 @respx.mock
@@ -2222,4 +2222,54 @@ def test_configured_display_name_is_not_disambiguated(discovering_client: TestCl
     assert names[f"fal/{NANO}"] == "Nano (renamed locally)"
     # Its catalogue-named sibling collides with that pin, and is pulled apart
     # from it — honouring the pin must not leave a duplicate standing.
-    assert names[f"fal/{NANO}/lite"] == "Nano (renamed locally) (lite)"
+    assert names[f"fal/{NANO}/lite"] == "Nano (renamed locally) (Lite)"
+
+
+@respx.mock
+def test_base_endpoint_sheds_a_tautological_suffix(discovering_client: TestClient) -> None:
+    """When the fragment only restates the family, the parenthetical is noise —
+    that endpoint is the family's base, and its siblings stay distinguished."""
+    _stub_catalog_entries(
+        [
+            _cat_entry("fal-ai/framepack", "image-to-video", "Framepack"),
+            _cat_entry("fal-ai/framepack/flf2v", "image-to-video", "Framepack"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    assert names["fal/fal-ai/framepack"] == "Framepack"
+    assert names["fal/fal-ai/framepack/flf2v"] == "Framepack (FLF2V)"
+
+
+@respx.mock
+def test_label_casing_follows_token_conventions(discovering_client: TestClient) -> None:
+    """Version designators uppercase, scan-line resolutions keep a lowercase
+    "p", connectors stay lowercase mid-label, known acronyms are spelled."""
+    _stub_catalog_entries(
+        [
+            _cat_entry("fal-ai/longcat/text-to-video/720p", "text-to-video", "LongCat"),
+            _cat_entry("fal-ai/longcat/text-to-video/480p", "text-to-video", "LongCat"),
+            _cat_entry("fal-ai/longcat/v2.2-a14b/lora", "text-to-video", "LongCat"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    # "720p", not "720P"; "to" lowercase inside the label.
+    assert names["fal/fal-ai/longcat/text-to-video/720p"] == "LongCat (Text-to-Video 720p)"
+    assert names["fal/fal-ai/longcat/text-to-video/480p"] == "LongCat (Text-to-Video 480p)"
+    assert names["fal/fal-ai/longcat/v2.2-a14b/lora"] == "LongCat (V2.2-A14B LoRA)"
+
+
+@respx.mock
+def test_leading_connector_is_still_capitalised(discovering_client: TestClient) -> None:
+    """A connector is lowercased *inside* a label, never at its start."""
+    _stub_catalog_entries(
+        [
+            _cat_entry("fal-ai/thing/to-video", "text-to-video", "Thing"),
+            _cat_entry("fal-ai/thing/from-image", "text-to-video", "Thing"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    names = {m["id"]: m["display_name"] for m in r.json()["data"]}
+    assert names["fal/fal-ai/thing/to-video"] == "Thing (To-Video)"
+    assert names["fal/fal-ai/thing/from-image"] == "Thing (From-Image)"

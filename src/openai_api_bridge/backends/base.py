@@ -7,6 +7,7 @@ dispatcher routes incoming requests to the right backend by parsing the
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
@@ -106,6 +107,89 @@ def make_capabilities(inputs: Iterable[str], output: str | None) -> tuple[str, .
     return tuple(f"{m}-to-{output}" for m in ordered) or None
 
 
+# Lowercased inside a label, never at its start. Only "to" and "with" occur in
+# fal's catalogue today; the rest are here so the rule reads as a rule.
+_CONNECTORS: frozenset[str] = frozenset(
+    {"to", "with", "and", "of", "for", "in", "on", "the", "a", "an", "from", "by"}
+)
+
+# Tokens whose conventional casing isn't title case. Purely cosmetic: an
+# acronym missing from this map renders title-cased, which is unremarkable
+# rather than wrong, so the table can lag the catalogue without consequence.
+_ACRONYMS: dict[str, str] = {
+    "ocr": "OCR",
+    "sdxl": "SDXL",
+    "lcm": "LCM",
+    "svd": "SVD",
+    "sam": "SAM",
+    "rle": "RLE",
+    "svg": "SVG",
+    "mlsd": "MLSD",
+    "hed": "HED",
+    "pidi": "PiDi",
+    "teed": "TEED",
+    "bbox": "BBox",
+    "lora": "LoRA",
+    "controlnet": "ControlNet",
+    "flf2v": "FLF2V",
+    "srpo": "SRPO",
+    "rf": "RF",
+    "sd": "SD",
+    "ai": "AI",
+    "hd": "HD",
+    "api": "API",
+    "nsfw": "NSFW",
+    "3d": "3D",
+    "2d": "2D",
+}
+
+# A version-ish token — "v2.2", "a14b", "5b", "q3", "i2v", "o1", "2511".
+# Uppercased whole, because these read as designators rather than words.
+_VERSION_TOKEN = re.compile(r"^[a-z]{0,2}[\d.]+[a-z]{0,3}$")
+
+# A scan-line resolution, where the trailing "p" is conventionally lowercase.
+# Checked before _VERSION_TOKEN, which would otherwise yield "480P".
+_RESOLUTION_TOKEN = re.compile(r"^\d+p$")
+
+
+def _prettify_word(word: str, *, first: bool) -> str:
+    if word in _ACRONYMS:
+        return _ACRONYMS[word]
+    if _RESOLUTION_TOKEN.match(word):
+        return word
+    if _VERSION_TOKEN.match(word):
+        return word.upper()
+    if word in _CONNECTORS and not first:
+        return word
+    return word[:1].upper() + word[1:]
+
+
+def _prettify(suffix: str) -> str:
+    """Render an id fragment as a label: ``v2.2-a14b/text-to-video`` to
+    ``V2.2-A14B Text-to-Video``.
+
+    Path separators become spaces; hyphens are kept, so compound terms stay
+    visibly compound ("Text-to-Video", "Face-to-Full-Portrait") instead of
+    dissolving into loose words.
+    """
+    segments: list[str] = []
+    first = True
+    for segment in suffix.split("/"):
+        words: list[str] = []
+        for word in segment.split("-"):
+            if not word:
+                continue
+            words.append(_prettify_word(word, first=first))
+            first = False
+        segments.append("-".join(words))
+    return " ".join(s for s in segments if s)
+
+
+def _squashed(text: str) -> str:
+    """Casefolded alphanumerics only, for comparing a label against a name."""
+    return "".join(c for c in text.casefold() if c.isalnum())
+
+
 def disambiguate_display_names(
     entries: list[ModelEntry], *, pinned: frozenset[str] = frozenset()
 ) -> list[ModelEntry]:
@@ -120,11 +204,17 @@ def disambiguate_display_names(
     tell which is which. Nearly a third of fal's catalogue collides this way.
 
     Disambiguation appends only the part of the id that actually differs within
-    the colliding group, so ``Wan`` becomes ``Wan (v2.7/text-to-image)`` rather
-    than repeating the family segment every client already sees. The suffix is
-    the id verbatim: it matches what the caller passes as ``model``, and
-    prettifying it would mangle the version strings that carry the distinction
-    (``v2.2-a14b`` is not "V2.2 A14B").
+    the colliding group, so ``Wan`` becomes ``Wan (V2.7 Text-to-Image)`` rather
+    than repeating the family segment every client already sees. The fragment is
+    prettified rather than pasted in raw, since this field is what a picker
+    renders; checked across fal's whole catalogue, prettifying merges no two
+    distinct fragments, so the distinction survives the nicer spelling.
+
+    Where the fragment merely restates the family (``Fooocus (Fooocus)``,
+    ``Veo 3.1 (Veo3.1)``) the entry keeps its bare name: that endpoint is the
+    family's base, and a parenthetical repeating the words to its left is noise.
+    At most one member of a group can do this — fragments are unique within a
+    group — so its siblings stay distinguished from it.
 
     ``pinned`` ids are never renamed — an operator who set ``display_name`` in
     config asked for that exact string, collision or not. They still take part
@@ -152,15 +242,33 @@ def disambiguate_display_names(
         # never rewritten — leaving the sibling labelled with the family name
         # it already collides on.
         segments = [out[i].id.split("/") for i in renaming]
-        # Stop one short of the shortest id so every renamed entry keeps at
-        # least one distinguishing segment.
+        # Whether one member may keep the bare family name. Only when nothing
+        # in the group is pinned: a pinned entry is *precisely* what already
+        # holds that name, so letting a second entry fall back to it would
+        # recreate the collision this function exists to remove.
+        may_shed = len(renaming) == len(idxs)
+        # With shedding allowed the scan may consume the shortest id entirely,
+        # leaving an empty fragment — the base endpoint of a family whose
+        # siblings extend its id (``…/framepack`` beside ``…/framepack/flf2v``).
+        # The point is the siblings: they stop repeating the family segment,
+        # giving "Framepack (FLF2V)" rather than "Framepack (Framepack FLF2V)".
+        # Ids are unique, so the scan stops the moment the shortest runs out and
+        # at most one fragment empties. Otherwise it halts a segment earlier, so
+        # every fragment stays non-empty.
+        floor = 0 if may_shed else 1
         shared = 0
         while (
-            all(len(s) > shared + 1 for s in segments) and len({s[shared] for s in segments}) == 1
+            all(len(s) > shared + floor for s in segments)
+            and len({s[shared] for s in segments}) == 1
         ):
             shared += 1
         for i, segs in zip(renaming, segments, strict=True):
-            out[i] = replace(out[i], display_name=f"{name} ({'/'.join(segs[shared:])})")
+            label = _prettify("/".join(segs[shared:]))
+            # An empty fragment, or one that merely restates the family
+            # ("Fooocus (Fooocus)"), leaves the bare name standing.
+            if may_shed and (not label or _squashed(label) == _squashed(name)):
+                continue
+            out[i] = replace(out[i], display_name=f"{name} ({label})")
     return out
 
 
