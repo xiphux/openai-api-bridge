@@ -17,7 +17,7 @@ import os
 import tomllib
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -148,6 +148,66 @@ class OpenRouterProviderConfig(BaseModel):
         return token
 
 
+class FalModelConfig(BaseModel):
+    """One fal.ai model exposed by a ``fal`` provider.
+
+    fal has no "list my models" catalog endpoint the way ImageRouter does —
+    each model is its own inference endpoint — so the models a ``fal`` provider
+    serves are declared explicitly here. ``id`` is the fal model path used both
+    as the ``/v1/models`` slug and as the URL path against ``fal.run`` (e.g.
+    ``fal-ai/bytedance/seedream/v4/text-to-image``).
+    """
+
+    id: str
+    # fal serves image and video; the bridge's fal backend implements the
+    # image surface (generate + edit). Only "image" is accepted for now.
+    kind: Literal["image"] = "image"
+    display_name: str | None = None
+    prompt_style: str | None = None
+    prompt_hint: str | None = None
+    # Loosen content moderation to the minimum this model's family allows.
+    # The bridge knows the per-family knob (Seedream -> enable_safety_checker=
+    # false, Nano Banana / Gemini image -> safety_tolerance="6"); set false to
+    # leave the upstream's own defaults in place. Families the bridge doesn't
+    # recognise (e.g. fal's gpt-image wrapper, which exposes no moderation
+    # field at all) get nothing injected regardless.
+    disable_safety: bool = True
+    # Arbitrary extra fields merged into the fal request body, applied last so
+    # they override the built-in safety defaults. Escape hatch to pin
+    # aspect_ratio/resolution/quality, or to set a safety knob for a family the
+    # bridge doesn't special-case.
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class FalProviderConfig(BaseModel):
+    """fal.ai (https://fal.ai) — model-hosting broker for tier-1 image models
+    (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …).
+
+    Unlike ImageRouter/OpenRouter, fal exposes each model's *native* input
+    schema, which includes per-model content-moderation knobs. The bridge's fal
+    backend hardcodes the loosest setting per model family (see
+    ``FalModelConfig.disable_safety``) so tier-1 models can be driven past the
+    over-eager default guardrails other brokers don't let you touch.
+
+    Calls hit fal's synchronous endpoint (``POST https://fal.run/{model_id}``)
+    with ``Authorization: Key {token}``; the response carries hosted asset URLs
+    the bridge fetches and stores like any other image provider.
+    """
+
+    backend: Literal["fal"]
+    id: str
+    base_url: str = "https://fal.run"
+    api_token_env: str
+    request_timeout_seconds: float = 600.0
+    models: list[FalModelConfig] = Field(default_factory=list)
+
+    def resolve_api_token(self) -> str:
+        token = os.environ.get(self.api_token_env)
+        if not token:
+            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
+        return token
+
+
 class OpenAIPassthroughProviderConfig(BaseModel):
     """Generic OpenAI-API-compatible upstream (llama-server, vLLM, OpenAI itself,
     Venice's chat endpoint, any vendor that speaks the OpenAI wire protocol).
@@ -183,6 +243,7 @@ ProviderConfig = Annotated[
     | VeniceProviderConfig
     | ImageRouterProviderConfig
     | OpenRouterProviderConfig
+    | FalProviderConfig
     | OpenAIPassthroughProviderConfig,
     Field(discriminator="backend"),
 ]

@@ -120,3 +120,48 @@ api_token_env = "VENICE_API_TOKEN"
 # api_token_env = "OPENROUTER_API_KEY"
 # # base_url defaults to https://openrouter.ai/api and rarely needs override
 # # request_timeout_seconds = 120.0
+
+
+# --- fal.ai -----------------------------------------------------------------
+# Model-hosting broker for tier-1 image models (Seedream, Nano Banana / Gemini
+# image, GPT Image, FLUX, …). Unlike ImageRouter/OpenRouter, fal exposes each
+# model's *native* input schema — which includes the per-model content-
+# moderation knob. The bridge hardcodes the loosest setting per model family
+# (Seedream -> enable_safety_checker=false, Nano Banana -> safety_tolerance=6)
+# so tier-1 models can be driven past the over-eager default guardrails that
+# flat OpenAI-shaped brokers don't let you touch.
+#
+# fal has no model-catalog endpoint, so — unlike ImageRouter — you declare the
+# models this provider serves explicitly, one [[providers.models]] per model.
+# `id` is the fal model path (also the /v1/models slug, addressed by the client
+# as `fal/<id>`). Set FAL_API_KEY in the environment to enable this provider.
+
+# [[providers]]
+# id = "fal"
+# backend = "fal"
+# api_token_env = "FAL_API_KEY"
+# # base_url defaults to https://fal.run (fal's synchronous endpoint)
+# # request_timeout_seconds = 600.0
+#
+#   [[providers.models]]
+#   id = "fal-ai/bytedance/seedream/v4/text-to-image"
+#   display_name = "Seedream 4"
+#   # disable_safety defaults to true -> injects enable_safety_checker=false
+#
+#   [[providers.models]]
+#   id = "fal-ai/bytedance/seedream/v4/edit"      # img2img edit endpoint
+#   display_name = "Seedream 4 (edit)"
+#
+#   [[providers.models]]
+#   id = "fal-ai/nano-banana-2"                   # injects safety_tolerance="6"
+#   display_name = "Nano Banana 2"
+#
+#   [[providers.models]]
+#   id = "fal-ai/gpt-image-2"                     # fal's gpt-image exposes NO
+#   display_name = "GPT Image 2"                  # moderation knob; nothing injected
+#
+# Per-model escape hatches:
+#   disable_safety = false   # leave the model's own moderation default in place
+#   [providers.models.params]  # arbitrary body fields, applied last (override
+#   aspect_ratio = "16:9"      # the safety default); pin size/quality, or set a
+#   resolution = "2K"          # safety knob for a family the bridge doesn't map

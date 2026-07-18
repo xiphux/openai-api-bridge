@@ -23,6 +23,7 @@ client (LibreChat/LobeChat/curl/...)
         ├──► ComfyUI workflow (image or video, via user-defined workflow JSON)
         ├──► Venice.ai native /api/v1/image/{generate,edit} (image gen + img2img)
         ├──► ImageRouter / OpenRouter (cloud image · video · chat across many vendors)
+        ├──► fal.ai (tier-1 image models with per-model moderation control)
         └──► Any OpenAI-compatible upstream (llama-server, vLLM, OpenAI, ...)
               passthrough for /v1/chat/completions and /v1/embeddings
 ```
@@ -35,6 +36,7 @@ client (LibreChat/LobeChat/curl/...)
 | **Venice.ai** | Image generation (`/api/v1/image/generate`) and img2img edits (`/api/v1/image/edit`, single reference image) | Venice's OpenAI-compat surface is **chat-only**; image is proprietary |
 | **ImageRouter** | Image and video generation across many providers | OpenAI-compat *content* but path-divergent — model catalog is at `/v2/models`, inference at `/v1/openai/...`, and the video endpoint is sync (single POST) rather than OpenAI's async `/v1/videos` lifecycle |
 | **OpenRouter** | Chat, embeddings, and image generation across many vendors | Chat/embeddings are spec-compliant; image generation diverges — OpenRouter exposes it via chat completions with a non-standard `message.images` array on the response. The bridge translates so clients see standard `/v1/images/generations` and `/v1/images/edits` |
+| **fal.ai** | Image generation + edits for tier-1 models (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …) | fal exposes each model's *native* input schema, so the bridge can reach the per-model **content-moderation** knob that flat brokers hide — and hardcodes the loosest setting per model family. No catalog endpoint, so models are declared explicitly; calls hit fal's synchronous `fal.run/{model}` with `Authorization: Key …` |
 | **OpenAI passthrough** | Chat completions (sync + streaming) and embeddings against any OpenAI-compatible upstream | No translation needed — bridge forwards bytes; the value is *aggregation* (one bridge endpoint, many upstreams in the model list) |
 
 Configure as many of each as you want. The most common deployment fronts a
@@ -42,10 +44,38 @@ single ComfyUI box (image + video), Venice or ImageRouter (cloud image /
 video), and one or more local llama-server / vLLM instances (chat +
 embedding) — all behind one bridge URL.
 
-Adding a future backend (Replicate, fal.ai, OpenRouter image, a second
-ComfyUI instance, etc.) is a single new `[[providers]]` block in
-`config.toml` plus an adapter module — see `src/openai_api_bridge/backends/`
-for the existing implementations.
+Adding a future backend (Replicate, a second ComfyUI instance, etc.) is a
+single new `[[providers]]` block in `config.toml` plus an adapter module —
+see `src/openai_api_bridge/backends/` for the existing implementations.
+
+### Content moderation on fal.ai
+
+The reason to reach for the `fal` backend over ImageRouter/OpenRouter is
+control over the tier-1 models' safety guardrails. fal surfaces each model's
+own moderation parameter, and the bridge injects the loosest value per model
+family whenever a model is configured with `disable_safety = true` (the
+default):
+
+| Model family | fal knob the bridge sets | Effect |
+|---|---|---|
+| ByteDance **Seedream** (`…/seedream/…`) | `enable_safety_checker = false` | Safety checker off |
+| Google **Nano Banana** / **Gemini** image (`nano-banana…`, `gemini…`) | `safety_tolerance = "6"` | Loosest of the 1–6 scale |
+| Everything else (incl. fal's **GPT Image** wrapper) | *(nothing injected)* | fal's gpt-image exposes no moderation field; unknown families are left untouched so an unrecognized field can't 422 the request |
+
+Two caveats worth knowing:
+
+- **Nano Banana can't be fully unlocked by anyone.** Google runs a second,
+  non-configurable `IMAGE_SAFETY` layer under the `safety_tolerance` knob —
+  no broker (or Google's own API) can disable it. `safety_tolerance = "6"`
+  softens Layer 1 only.
+- **Per-model overrides** live in a `[providers.models.params]` table (merged
+  last, so it beats the safety default) plus a `disable_safety = false` toggle
+  — use these to pin `aspect_ratio`/`resolution`/`quality`, or to set a safety
+  knob for a family the bridge doesn't special-case. `size` (`WxH`) maps to
+  `image_size` for most families but is dropped for Nano Banana / Gemini, which
+  take `aspect_ratio` + `resolution` instead.
+
+See the `fal` block in `config.toml.example` for a full example.
 
 ## What this bridge does *not* do
 
@@ -85,7 +115,7 @@ entry so clients can build a useful picker without per-model hardcoding
 |---|---|---|
 | `owned_by` | the `[[providers]]` block's `id` | always set — lets an aggregating client group models by real provider |
 | `display_name` | human-readable name | ComfyUI: meta.json `display_name`; others: upstream catalog. Falls back to the model id |
-| `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
+| `kind` | `"chat"` \| `"image"` \| `"video"` \| `"embedding"`, omitted when unknown | ComfyUI: workflow output type; Venice/ImageRouter: inherent; OpenRouter: the model's `output_modalities`; fal: the per-model `kind` from config. OpenAI passthrough sets nothing — generic upstreams don't report modality reliably |
 | `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
 | `context_window` | max context size in tokens, omitted when unknown | OpenAI-passthrough upstreams that expose it: llama.cpp's `meta.n_ctx` (a loaded model) or router `--ctx-size`, vLLM's `max_model_len`. The bridge strips the `meta`/`status` blocks otherwise, so this is the only way the size survives the proxy. Clients use it for a "N / max tokens" budget |
 | `prompt_style` / `prompt_hint` | preferred prompt format + a freeform per-model nudge, omitted when unset | ComfyUI: the workflow's `meta.json` (see the meta schema below). Image and video models — a gateway-aware client uses them to rewrite a prompt into the model's preferred format before generation |
