@@ -19,7 +19,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .errors import BridgeError, InvalidRequest
@@ -148,6 +148,13 @@ class OpenRouterProviderConfig(BaseModel):
         return token
 
 
+# Below this, a generated asset would plausibly expire before the bridge could
+# retrieve it — the fetch retries with backoff, and video detects completion by
+# polling first. Not a guarantee, just a floor that rejects values that cannot
+# work; see FalProviderConfig.output_expiration_seconds.
+_MIN_OUTPUT_EXPIRATION_SECONDS = 60
+
+
 class FalModelConfig(BaseModel):
     """One fal.ai model exposed by a ``fal`` provider.
 
@@ -216,6 +223,13 @@ class FalProviderConfig(BaseModel):
     # image-to-video. fal also publishes audio/3d categories; listing those
     # here would advertise models the fal backend has no code path for.
     categories: list[str] | None = None
+    # fal splits a model's text-to-image and image-to-image halves across two
+    # endpoints (`fal-ai/nano-banana-2` and `fal-ai/nano-banana-2/edit`), which
+    # is easy to pick wrong. When true (default) the bridge lists only the
+    # text-to-image id for pairs it can identify confidently, and sends edit
+    # requests to the sibling. Models without an identifiable partner —
+    # including every edit-only endpoint — are listed unchanged.
+    collapse_edit_variants: bool = True
     # fal's model API, used both to list models and to introspect each model's
     # OpenAPI input schema so the moderation knob can be derived, not hardcoded.
     models_api_url: str = "https://api.fal.ai/v1/models"
@@ -224,6 +238,38 @@ class FalProviderConfig(BaseModel):
     queue_base_url: str = "https://queue.fal.run"
     video_poll_interval_seconds: float = 3.0
     video_poll_timeout_seconds: float = 1800.0
+    # --- upstream data retention -------------------------------------------
+    # fal keeps request payloads (your prompts, and any inline input images)
+    # for 30 days by default, and serves generated media from a public CDN.
+    # These two knobs hand that back: the bridge has already downloaded the
+    # asset into its own FileStore by the time a request completes, so the
+    # upstream copies are redundant for a self-hosted setup.
+    #
+    # False sends `X-Fal-Store-IO: 0`, so fal never stores the payload at all.
+    store_payloads: bool = True
+    # Seconds until generated media expires from fal's CDN, via
+    # `X-Fal-Object-Lifecycle-Preference`. None leaves fal's default (no
+    # expiry). Mind the retrieval budget: the clock starts when fal creates the
+    # object, and the bridge still has to notice, fetch, and possibly retry.
+    # An asset fetch alone can span three attempts with backoff, and video adds
+    # poll detection plus a retried result fetch before that — so short values
+    # risk the asset expiring out from under a generation you already paid for.
+    # A few hundred seconds is comfortable; the floor below just rejects values
+    # that could never work.
+    output_expiration_seconds: int | None = None
+
+    @field_validator("output_expiration_seconds")
+    @classmethod
+    def _expiration_must_allow_retrieval(cls, v: int | None) -> int | None:
+        if v is not None and v < _MIN_OUTPUT_EXPIRATION_SECONDS:
+            raise ValueError(
+                f"output_expiration_seconds={v} is below the {_MIN_OUTPUT_EXPIRATION_SECONDS}s "
+                "floor — the bridge would likely lose the generated asset before it "
+                "could download it (fetches retry with backoff, and video polls for "
+                "completion first). Use a few hundred seconds for comfort."
+            )
+        return v
+
     # When true (default), request settings are read from each model's own
     # schema — the loosest moderation value, and the accepted spelling of
     # `duration` for video. That keeps working across new model versions and

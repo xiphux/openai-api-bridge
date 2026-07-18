@@ -62,6 +62,18 @@ on. Nothing stops a client naming such an endpoint by hand, though; fal will
 run the job and return a non-image envelope, which the bridge reports as
 `unsupported_operation` (HTTP 400) rather than a retryable upstream error.
 
+**Edit variants are collapsed.** fal publishes a model's text-to-image and
+image-to-image halves as separate endpoints — `fal-ai/nano-banana-2` and
+`fal-ai/nano-banana-2/edit` — which is easy to pick wrong. Where the bridge can
+pair them *confidently* (both ids present in the catalogue, in the expected
+categories) it lists only the text-to-image id and sends edits to the sibling,
+so `POST /v1/images/edits` against `fal-ai/nano-banana-2` just works. Against
+the live catalogue that pairs **81 of 194** text-to-image models — including
+Nano Banana 2/Pro, both Seedream generations, GPT Image 2 and FLUX 2 Flex —
+shrinking the listing from 574 to 493. Nothing is inferred from a name alone,
+and the ~299 **edit-only** models (inpainting, upscalers, background removal)
+are listed untouched. Set `collapse_edit_variants = false` to list both halves.
+
 `[[providers.models]]` entries are per-model **overrides**, not a whitelist —
 they set `disable_safety`, `params`, `display_name`, or prompt metadata on a
 discovered model without restricting the rest. A configured model the catalogue
@@ -85,6 +97,32 @@ naming the env var to fix, and is never retried, since a token read from the
 environment at startup cannot start working again. Discovery and introspection
 switch off for the process, and generation fails with
 `code: "upstream_auth_error"` (HTTP 502) rather than degrading quietly.
+
+### Upstream data retention on fal.ai
+
+By the time a request completes the bridge has already copied the asset into
+its own FileStore, so fal's copies are redundant for a self-hosted setup. Two
+opt-in knobs hand that back:
+
+| Setting | Effect |
+|---|---|
+| `store_payloads = false` | Sends `X-Fal-Store-IO: 0` — fal never stores the request payload. Otherwise prompts (and inline input images) are kept for **30 days** |
+| `output_expiration_seconds = N` | Sends `X-Fal-Object-Lifecycle-Preference` — generated media expires from fal's CDN after `N` seconds instead of persisting |
+
+These are request headers rather than after-the-fact deletion, deliberately.
+Deletion would need a request id, and **the synchronous image path doesn't have
+one** — only queued video does — so headers are the only mechanism that covers
+both uniformly, with no second round trip and no window where a failed delete
+leaves data behind. Because reference images are sent as inline data URIs
+rather than uploaded to fal's CDN, they ride inside the payload that
+`store_payloads = false` suppresses.
+
+**Mind the retrieval budget** when setting an expiry: the clock starts when fal
+creates the object, and the bridge still has to notice it, fetch it, and
+possibly retry — an asset fetch alone spans three attempts with backoff, and
+video detects completion by polling before that. Values below 60s are rejected
+at config load; a few hundred seconds is comfortable. If a fetch fails while an
+expiry is configured, the error names the setting so the cause is obvious.
 
 ### Content moderation on fal.ai
 

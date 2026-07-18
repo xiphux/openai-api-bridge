@@ -19,6 +19,7 @@ separately, mirroring the URL-then-fetch pattern used elsewhere in the bridge.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -68,11 +69,23 @@ class FalClient:
         request_timeout_seconds: float,
         models_api_url: str = "https://api.fal.ai/v1/models",
         queue_base_url: str = "https://queue.fal.run",
+        store_payloads: bool = True,
+        output_expiration_seconds: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.models_api_url = models_api_url
         self.queue_base_url = queue_base_url.rstrip("/")
         self._auth_headers = {"Authorization": f"Key {api_token}"}
+        # Retention controls ride on the *inference* calls only — they say what
+        # fal should do with this job's payload and output, so they're
+        # meaningless on catalogue/schema reads.
+        self._inference_headers: dict[str, str] = {}
+        if not store_payloads:
+            self._inference_headers["X-Fal-Store-IO"] = "0"
+        if output_expiration_seconds is not None:
+            self._inference_headers["X-Fal-Object-Lifecycle-Preference"] = json.dumps(
+                {"expiration_duration_seconds": output_expiration_seconds}
+            )
         self._client = httpx.AsyncClient(
             headers=self._auth_headers,
             timeout=httpx.Timeout(
@@ -97,7 +110,7 @@ class FalClient:
         """
         url = f"{self.base_url}/{model_id}"
         try:
-            resp = await self._client.post(url, json=body)
+            resp = await self._client.post(url, json=body, headers=self._inference_headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise _status_error(e, model_id) from e
@@ -118,7 +131,7 @@ class FalClient:
         """
         url = f"{self.queue_base_url}/{model_id}"
         try:
-            resp = await self._client.post(url, json=body)
+            resp = await self._client.post(url, json=body, headers=self._inference_headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
             raise _status_error(e, model_id) from e

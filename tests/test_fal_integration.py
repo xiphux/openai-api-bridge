@@ -514,7 +514,7 @@ async def test_concurrent_first_requests_share_one_lookup(
     backend = FalBackend(cfg)
     try:
         results = await asyncio.gather(
-            *(backend._safety_params(cfg.models[i % len(ids)]) for i in range(8))
+            *(_safety(backend, cfg.models[i % len(ids)]) for i in range(8))
         )
     finally:
         await backend.aclose()
@@ -524,6 +524,12 @@ async def test_concurrent_first_requests_share_one_lookup(
     assert route.call_count == len(ids)
     # And none of them slipped through before the cache was populated.
     assert all(r == {"enable_safety_checker": False} for r in results)
+
+
+async def _safety(backend: FalBackend, mcfg: FalModelConfig) -> dict:
+    """Moderation params for a model whose endpoint is its own id (i.e. not a
+    routed edit, which resolves against the sibling's schema instead)."""
+    return await backend._safety_params(mcfg, mcfg.id)
 
 
 def _direct_backend(retry_seconds: float, model_ids: list[str]) -> FalBackend:
@@ -554,7 +560,7 @@ async def test_failed_introspection_is_not_retried_during_cooldown(
     backend = _direct_backend(retry_seconds=300.0, model_ids=[UNMAPPED])
     try:
         for _ in range(3):
-            assert await backend._safety_params(backend.cfg.models[0]) == {}
+            assert await _safety(backend, backend.cfg.models[0]) == {}
     finally:
         await backend.aclose()
     # One attempt, not one per request — the cooldown suppresses the rest.
@@ -581,11 +587,11 @@ async def test_introspection_retries_after_cooldown_and_recovers(
     try:
         model = backend.cfg.models[0]
         # First attempt fails -> fallback (no static rule for this id).
-        assert await backend._safety_params(model) == {}
+        assert await _safety(backend, model) == {}
         # Second attempt retries and succeeds -> schema-derived.
-        assert await backend._safety_params(model) == {"enable_safety_checker": False}
+        assert await _safety(backend, model) == {"enable_safety_checker": False}
         # Now cached: no further lookups.
-        assert await backend._safety_params(model) == {"enable_safety_checker": False}
+        assert await _safety(backend, model) == {"enable_safety_checker": False}
     finally:
         await backend.aclose()
     assert route.call_count == 2
@@ -616,9 +622,9 @@ async def test_empty_but_successful_response_arms_the_cooldown(
     backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
     try:
         model = backend.cfg.models[0]
-        assert await backend._safety_params(model) == {}
+        assert await _safety(backend, model) == {}
         # Retried rather than serving a latched empty cache forever.
-        assert await backend._safety_params(model) == {"enable_safety_checker": False}
+        assert await _safety(backend, model) == {"enable_safety_checker": False}
     finally:
         await backend.aclose()
 
@@ -647,13 +653,13 @@ async def test_models_resolve_independently(monkeypatch: pytest.MonkeyPatch) -> 
     backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED, other])
     try:
         resolved_model, retried_model = backend.cfg.models
-        assert await backend._safety_params(resolved_model) == {"enable_safety_checker": False}
+        assert await _safety(backend, resolved_model) == {"enable_safety_checker": False}
         # Unresolved on the first attempt -> fallback for this request.
-        assert await backend._safety_params(retried_model) == {}
+        assert await _safety(backend, retried_model) == {}
         # Retried independently, and succeeds.
-        assert await backend._safety_params(retried_model) == {"enable_safety_checker": False}
+        assert await _safety(backend, retried_model) == {"enable_safety_checker": False}
         # The one that already resolved is served from cache throughout.
-        assert await backend._safety_params(resolved_model) == {"enable_safety_checker": False}
+        assert await _safety(backend, resolved_model) == {"enable_safety_checker": False}
     finally:
         await backend.aclose()
 
@@ -684,7 +690,7 @@ async def test_persistently_missing_model_is_throttled_by_the_cooldown(
     try:
         missing_model = backend.cfg.models[1]
         for _ in range(3):
-            assert await backend._safety_params(missing_model) == {}
+            assert await _safety(backend, missing_model) == {}
     finally:
         await backend.aclose()
 
@@ -910,7 +916,7 @@ async def test_rejected_key_stops_schema_lookups(monkeypatch: pytest.MonkeyPatch
     backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
     try:
         for _ in range(3):
-            assert await backend._safety_params(backend.cfg.models[0]) == {}
+            assert await _safety(backend, backend.cfg.models[0]) == {}
     finally:
         await backend.aclose()
     assert route.call_count == 1
@@ -925,7 +931,7 @@ async def test_transient_failure_still_retries(monkeypatch: pytest.MonkeyPatch) 
     backend = _direct_backend(retry_seconds=0.0, model_ids=[UNMAPPED])
     try:
         for _ in range(3):
-            assert await backend._safety_params(backend.cfg.models[0]) == {}
+            assert await _safety(backend, backend.cfg.models[0]) == {}
     finally:
         await backend.aclose()
     # Each call re-attempts (batch + the client's own straggler retry per round).
@@ -966,7 +972,7 @@ async def test_unknown_slugs_do_not_grow_state_without_bound(
     backend = _direct_backend(retry_seconds=300.0, model_ids=[])
     try:
         for i in range(_MAX_TRACKED_MODELS + 50):
-            await backend._safety_params(FalModelConfig(id=f"fal-ai/bogus-{i}"))
+            await _safety(backend, FalModelConfig(id=f"fal-ai/bogus-{i}"))
         assert len(backend._schema_locks) <= _MAX_TRACKED_MODELS
         assert len(backend._introspect_failed_at) <= _MAX_TRACKED_MODELS
     finally:
@@ -1371,3 +1377,243 @@ def test_key_revoked_mid_poll_is_reported(
 
     errors = [rec for rec in caplog.records if rec.levelname == "ERROR"]
     assert errors and any("TEST_FAL_TOKEN" in rec.getMessage() for rec in errors)
+
+
+# --- upstream data retention -----------------------------------------------
+
+
+@pytest.fixture
+def private_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClient]:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        textwrap.dedent(f"""
+        [[providers]]
+        id = "fal"
+        backend = "fal"
+        api_token_env = "TEST_FAL_TOKEN"
+        discover_models = false
+        store_payloads = false
+        output_expiration_seconds = 300
+
+        [[providers.models]]
+        id = "{SEEDREAM_T2I}"
+    """)
+    )
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
+    monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
+    reset_caches_for_tests()
+
+
+@respx.mock
+def test_retention_headers_ride_on_inference_requests(private_client: TestClient) -> None:
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(private_client, SEEDREAM_T2I).status_code == 200
+    headers = gen.calls.last.request.headers
+    assert headers["x-fal-store-io"] == "0"
+    assert json.loads(headers["x-fal-object-lifecycle-preference"]) == {
+        "expiration_duration_seconds": 300
+    }
+
+
+@respx.mock
+def test_retention_headers_absent_by_default(client_with_fal: TestClient) -> None:
+    gen = _mock_generation(SEEDREAM_T2I)
+    assert _generate(client_with_fal, SEEDREAM_T2I).status_code == 200
+    headers = gen.calls.last.request.headers
+    assert "x-fal-store-io" not in headers
+    assert "x-fal-object-lifecycle-preference" not in headers
+
+
+@respx.mock
+def test_expired_asset_failure_names_the_setting(private_client: TestClient) -> None:
+    """A too-short expiry looks like an ordinary fetch failure; the error must
+    point at the knob that caused it."""
+    respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(
+            200, json={"images": [{"url": "https://v3.fal.media/gone.png"}]}
+        )
+    )
+    respx.get("https://v3.fal.media/gone.png").mock(
+        return_value=httpx.Response(404, json={"error": "not found"})
+    )
+    r = _generate(private_client, SEEDREAM_T2I)
+    assert r.status_code >= 400
+    assert "output_expiration_seconds" in r.json()["error"]["message"]
+
+
+def test_expiration_below_the_floor_is_rejected() -> None:
+    """A value that could never survive the retrieval budget must fail at
+    config load, not silently lose generated assets at runtime."""
+    with pytest.raises(Exception) as excinfo:
+        FalProviderConfig(
+            backend="fal", id="fal", api_token_env="TEST_FAL_TOKEN", output_expiration_seconds=5
+        )
+    assert "output_expiration_seconds" in str(excinfo.value)
+
+
+# --- collapsing edit variants ----------------------------------------------
+
+
+def _cat_entry(model_id: str, category: str, name: str | None = None) -> dict:
+    return {
+        "endpoint_id": model_id,
+        "metadata": {"display_name": name or model_id, "category": category},
+    }
+
+
+def _stub_catalog_entries(entries: list[dict]) -> respx.Route:
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("expand"):
+            return httpx.Response(200, json={"models": []})
+        category = request.url.params.get("category")
+        return httpx.Response(
+            200,
+            json={
+                "models": [e for e in entries if e["metadata"]["category"] == category],
+                "has_more": False,
+            },
+        )
+
+    return respx.get(MODELS_API).mock(side_effect=responder)
+
+
+@respx.mock
+def test_edit_variant_is_collapsed_into_its_base(discovering_client: TestClient) -> None:
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano Banana 2"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Banana 2 Edit"),
+        ]
+    )
+    r = discovering_client.get("/v1/models", headers=HEADERS)
+    ids = {m["id"] for m in r.json()["data"]}
+    assert f"fal/{NANO}" in ids
+    assert f"fal/{NANO}/edit" not in ids, "the edit half should not be listed separately"
+
+
+@respx.mock
+def test_sibling_suffix_pairs_are_collapsed(discovering_client: TestClient) -> None:
+    """Seedream splits as `.../text-to-image` and `.../edit` — neither is a
+    prefix of the other, so a naive base+suffix rule would miss it."""
+    base = "bytedance/seedream/v5/pro"
+    _stub_catalog_entries(
+        [
+            _cat_entry(f"{base}/text-to-image", "text-to-image", "Seedream 5 Pro"),
+            _cat_entry(f"{base}/edit", "image-to-image", "Seedream 5 Pro Edit"),
+        ]
+    )
+    ids = {m["id"] for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]}
+    assert f"fal/{base}/text-to-image" in ids
+    assert f"fal/{base}/edit" not in ids
+
+
+@respx.mock
+def test_edit_only_models_are_left_alone(discovering_client: TestClient) -> None:
+    """~299 image-to-image models have no text-to-image half — inpainting,
+    upscalers, background removal. Those must stay listed."""
+    _stub_catalog_entries(
+        [
+            _cat_entry("fal-ai/image-editing/object-removal", "image-to-image", "Object Removal"),
+            _cat_entry("fal-ai/some-upscaler", "image-to-image", "Upscaler"),
+        ]
+    )
+    ids = {m["id"] for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]}
+    assert "fal/fal-ai/image-editing/object-removal" in ids
+    assert "fal/fal-ai/some-upscaler" in ids
+
+
+@respx.mock
+def test_no_collapse_when_the_candidate_is_not_an_edit_model(
+    discovering_client: TestClient,
+) -> None:
+    """A name that merely looks like a sibling isn't enough — the categories
+    have to be the two halves we expect."""
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano"),
+            # Same name shape, but it's another text-to-image model.
+            _cat_entry(f"{NANO}/edit", "text-to-image", "Confusingly Named"),
+        ]
+    )
+    ids = {m["id"] for m in discovering_client.get("/v1/models", headers=HEADERS).json()["data"]}
+    assert f"fal/{NANO}" in ids
+    assert f"fal/{NANO}/edit" in ids, "must not collapse on the name alone"
+
+
+@respx.mock
+def test_edit_request_is_routed_to_the_collapsed_sibling(
+    discovering_client: TestClient,
+) -> None:
+    """The point of collapsing: an edit sent to the base model reaches the
+    `/edit` endpoint, which is the mistake users would otherwise make."""
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano Banana 2"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Banana 2 Edit"),
+        ]
+    )
+    edit_route = _mock_generation(f"{NANO}/edit")
+    base_route = respx.post(f"{FAL}/{NANO}")
+
+    r = discovering_client.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        files={"image": ("in.png", b"PNG", "image/png")},
+        data={"model": f"fal/{NANO}", "prompt": "make it blue"},
+    )
+    assert r.status_code == 200, r.text
+    assert edit_route.called, "the edit should have gone to the /edit endpoint"
+    assert not base_route.called, "the text-to-image endpoint must not receive edits"
+
+
+@respx.mock
+def test_generation_still_uses_the_base_endpoint(discovering_client: TestClient) -> None:
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano Banana 2"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Banana 2 Edit"),
+        ]
+    )
+    base_route = _mock_generation(NANO)
+    edit_route = respx.post(f"{FAL}/{NANO}/edit")
+
+    assert _generate(discovering_client, NANO).status_code == 200
+    assert base_route.called
+    assert not edit_route.called
+
+
+@respx.mock
+def test_edit_routing_does_not_depend_on_prior_traffic(
+    discovering_client: TestClient,
+) -> None:
+    """Routing comes from the catalogue, so an edit issued before anything has
+    called /v1/models must still route — otherwise the same request would
+    behave differently depending on unrelated earlier traffic."""
+    _stub_catalog_entries(
+        [
+            _cat_entry(NANO, "text-to-image", "Nano Banana 2"),
+            _cat_entry(f"{NANO}/edit", "image-to-image", "Nano Banana 2 Edit"),
+        ]
+    )
+    edit_route = _mock_generation(f"{NANO}/edit")
+
+    # No GET /v1/models first — this is the very first request.
+    r = discovering_client.post(
+        "/v1/images/edits",
+        headers=HEADERS,
+        files={"image": ("in.png", b"PNG", "image/png")},
+        data={"model": f"fal/{NANO}", "prompt": "x"},
+    )
+    assert r.status_code == 200, r.text
+    assert edit_route.called

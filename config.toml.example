@@ -174,6 +174,13 @@ api_token_env = "VENICE_API_TOKEN"
 #   discover_models = false     # serve only the [[providers.models]] above;
 #                               # a model outside that list becomes a 404
 #   categories = ["text-to-image", "image-to-image"]   # override the filter
+#   collapse_edit_variants = false  # list a model's /edit half separately
+#                               # instead of routing edits to it automatically
+#   store_payloads = false      # send X-Fal-Store-IO: 0 so fal never stores
+#                               # your prompts (otherwise kept for 30 days)
+#   output_expiration_seconds = 600   # expire generated media from fal's CDN.
+#                               # Must leave time to download it first — values
+#                               # under 60s are rejected; a few hundred is safe
 #   video_poll_interval_seconds = 3.0     # queue polling cadence for video
 #   video_poll_timeout_seconds = 1800.0   # give up on a video job after this
 #   queue_base_url = "https://queue.fal.run"          # rarely needs override
