@@ -58,26 +58,18 @@ permanent cache so a model added upstream appears without restarting the
 bridge. (ComfyUI is separate — it scans workflow files from disk, governed by
 `cache_workflows`.)
 
-A fetch runs under a lock, so a burst of concurrent requests waits on the one
-already in flight rather than each starting its own — one round trip on
-ImageRouter and OpenRouter, and one pair of them on Venice, whose catalogue is
-split across two listings.
-
-Venice's listing has a third state: the `type=inpaint` half can fail while the
-text-to-image half succeeds. That result is still served — dropping the
-provider over its narrower query would be worse — but it's held only for
-`catalog_retry_seconds` (or `catalog_ttl_seconds`, whichever is shorter)
-rather than the full TTL, so the missing half is re-attempted soon while a
-burst still can't queue up behind the lock. Edit
-routing stays unresolved until a complete listing arrives.
-
-That lock is also why a **failure** is remembered for `catalog_retry_seconds`
+Concurrent requests collapse into the fetch already in flight rather than each
+starting their own. A **failed** fetch is remembered for `catalog_retry_seconds`
 (default 30; `0` retries immediately) and re-raised to callers arriving inside
-the window. Without it, a burst during an upstream hang would queue up, each
-waiter starting a fresh fetch after the previous one timed out — so the Nth
-caller would wait N × the timeout. With it, the first caller pays the timeout
-and the rest fail fast. The failure is remembered, not latched: once the window
-closes the provider is retried and returns on its own.
+that window, so an upstream hang costs one timeout rather than one per caller.
+It's remembered, not latched — once the window closes the provider is retried
+and recovers on its own.
+
+Venice can also return a **partial** listing, its `type=inpaint` half failing
+while text-to-image succeeds. That's served rather than dropped, but held for
+`catalog_retry_seconds` instead of the full TTL so the missing half is
+re-attempted soon; edit routing stays unresolved until a complete listing
+arrives.
 
 ### Edit models on Venice
 
