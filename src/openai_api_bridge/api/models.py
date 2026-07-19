@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
 from fastapi import APIRouter, Depends, Request
 
 from ..auth import require_api_key
+from ..backends.base import Backend, ModelEntry
 from ..dispatcher import BackendDispatcher
 from ..errors import BridgeError
 
@@ -16,18 +18,31 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _entries_for(provider_id: str, backend: Backend) -> list[ModelEntry]:
+    """One provider's catalogue, or an empty list if it failed."""
+    try:
+        return await backend.list_models()
+    except BridgeError as e:
+        # One flaky provider shouldn't break the whole listing.
+        log.warning("Provider %r list_models failed: %s", provider_id, e.message)
+        return []
+
+
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(request: Request) -> dict:
     dispatcher: BackendDispatcher = request.app.state.dispatcher
     now = int(time.time())
     out: list[dict] = []
-    for provider_id, backend in dispatcher.all_providers():
-        try:
-            entries = await backend.list_models()
-        except BridgeError as e:
-            # One flaky provider shouldn't break the whole listing.
-            log.warning("Provider %r list_models failed: %s", provider_id, e.message)
-            continue
+    # Fan out concurrently: awaiting each provider in turn made this endpoint
+    # cost the *sum* of every upstream catalogue fetch, and it's on the path a
+    # client's model-picker refresh hits. Providers parallelise internally
+    # already (Venice's two listings, fal's asset fetches) — this is the one
+    # level that didn't. Order is preserved, so the listing stays stable.
+    providers = list(dispatcher.all_providers())
+    per_provider = await asyncio.gather(
+        *(_entries_for(provider_id, backend) for provider_id, backend in providers)
+    )
+    for (provider_id, _backend), entries in zip(providers, per_provider, strict=True):
         for entry in entries:
             # `display_name`, `kind`, and `supports_tools` are non-standard
             # extensions — strict OpenAI SDKs ignore unknown fields, while
