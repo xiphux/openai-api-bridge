@@ -4,15 +4,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 
-from ..errors import UpstreamError
+from ..errors import InvalidRequest, UnsupportedOperation, UpstreamError
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_FETCH_TIMEOUT_S = 120.0
+
+
+def raise_for_upstream_status(*, status: int, body: str, provider: str, endpoint: str) -> NoReturn:
+    """Map an upstream error status onto the bridge's typed errors.
+
+    Every adapter has to answer "what does this upstream status mean to our
+    client", and each one answering separately is how the bridge ended up
+    telling clients that the *same* rejection was a 400 on one provider and a
+    502 on another: a malformed prompt refused by an OpenAI-compatible
+    upstream surfaced as ``invalid_request_error``, while Venice and
+    ImageRouter routed every status — 4xx included — to ``UpstreamError``.
+    Clients with retry-on-5xx logic then retried requests that could never
+    succeed, against providers that may bill for them.
+
+    One mapping, used by every client, so the answer can't drift again.
+    """
+    if status in (401, 403):
+        # Deliberately without the body. This is the upstream's complaint about
+        # the credential *we* sent, and it goes straight to a client that has
+        # no business seeing it — some providers quote the offending token back.
+        raise UpstreamError(f"{provider} rejected our credentials ({status}) on {endpoint}")
+    if status == 404:
+        # Most likely the model slug doesn't exist on this upstream (typo, or
+        # withdrawn from its catalogue).
+        raise InvalidRequest(f"{provider} {endpoint} returned 404 — model not found upstream")
+    if status == 405:
+        raise UnsupportedOperation(f"{provider} does not implement {endpoint}")
+    if 400 <= status < 500:
+        raise InvalidRequest(f"{provider} {endpoint} returned {status}: {body}")
+    raise UpstreamError(f"{provider} {endpoint} returned {status}: {body}")
 
 
 def parse_json(resp: httpx.Response, what: str) -> Any:

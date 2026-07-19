@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from ...errors import UpstreamError
-from ...util.http import fetch_asset_with_retry, parse_json
+from ...util.http import fetch_asset_with_retry, parse_json, raise_for_upstream_status
 from ..base import InputImage
 
 log = logging.getLogger(__name__)
@@ -76,9 +76,12 @@ class ImageRouterClient:
             resp = await self._client.get(f"{self.base_url}/v2/models", timeout=30.0)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"ImageRouter /v2/models returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="ImageRouter",
+                endpoint="/v2/models",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /v2/models failed: {e}") from e
         body = parse_json(resp, "ImageRouter /v2/models")
@@ -108,10 +111,12 @@ class ImageRouterClient:
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"ImageRouter /images/generations returned "
-                f"{e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="ImageRouter",
+                endpoint="/images/generations",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /images/generations failed: {e}") from e
         return _extract_first_url(
@@ -157,10 +162,12 @@ class ImageRouterClient:
             )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"ImageRouter /images/edits returned "
-                f"{e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="ImageRouter",
+                endpoint="/images/edits",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /images/edits failed: {e}") from e
         return _extract_first_url(parse_json(resp, "ImageRouter /images/edits"), "/images/edits")
@@ -216,10 +223,12 @@ class ImageRouterClient:
                 )
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"ImageRouter /videos/generations returned "
-                f"{e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="ImageRouter",
+                endpoint="/videos/generations",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"ImageRouter /videos/generations failed: {e}") from e
         return _extract_first_url(

@@ -20,8 +20,8 @@ from typing import Any
 
 import httpx
 
-from ...errors import InvalidRequest, UnsupportedOperation, UpstreamError
-from ...util.http import parse_json
+from ...errors import UpstreamError
+from ...util.http import parse_json, raise_for_upstream_status
 
 log = logging.getLogger(__name__)
 
@@ -63,9 +63,12 @@ class OpenAIClient:
             response = await self._client.get(f"{self.base_url}/v1/models")
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"Upstream /v1/models returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="Upstream",
+                endpoint="/v1/models",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/models failed: {e}") from e
         body = parse_json(response, "Upstream /v1/models")
@@ -138,17 +141,6 @@ class OpenAIClient:
 
     @staticmethod
     def _raise_for_status(status: int, text: str, endpoint: str) -> None:
-        if status == 401:
-            # Re-frame as a bridge config error rather than passing the
-            # upstream's auth complaint to the chat client.
-            raise UpstreamError(f"Upstream {endpoint} rejected our credentials (401)")
-        if status == 404:
-            # Most likely the model id slug doesn't exist on this upstream
-            # (e.g. user typed it wrong, or it was removed from the upstream's
-            # catalog). Surface as a 404-equivalent for the client.
-            raise InvalidRequest(f"Upstream {endpoint} returned 404 — model not found upstream")
-        if status == 405:
-            raise UnsupportedOperation(f"Upstream does not implement {endpoint}")
-        if 400 <= status < 500:
-            raise InvalidRequest(f"Upstream {endpoint} returned {status}: {text}")
-        raise UpstreamError(f"Upstream {endpoint} returned {status}: {text}")
+        # The mapping this class used to own now lives in util.http so every
+        # adapter answers an upstream status the same way.
+        raise_for_upstream_status(status=status, body=text, provider="Upstream", endpoint=endpoint)

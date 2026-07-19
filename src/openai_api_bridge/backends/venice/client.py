@@ -25,7 +25,7 @@ from typing import Any
 import httpx
 
 from ...errors import UpstreamError
-from ...util.http import parse_json
+from ...util.http import parse_json, raise_for_upstream_status
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +55,12 @@ class VeniceClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"Venice /models returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="Venice",
+                endpoint="/models",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /models failed: {e}") from e
         body = parse_json(response, "Venice /models")
@@ -91,9 +94,12 @@ class VeniceClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"Venice /image/generate returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="Venice",
+                endpoint="/image/generate",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /image/generate failed: {e}") from e
 
@@ -130,9 +136,12 @@ class VeniceClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(
-                f"Venice /image/edit returned {e.response.status_code}: {e.response.text[:300]}"
-            ) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="Venice",
+                endpoint="/image/edit",
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"Venice /image/edit failed: {e}") from e
 
