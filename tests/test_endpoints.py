@@ -15,6 +15,23 @@ def test_auth_required(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "invalid_api_key"
 
 
+def test_auth_rejects_non_ascii_key_as_401(client: TestClient) -> None:
+    """A non-ASCII bearer token is a bad key, not a server fault.
+
+    hmac.compare_digest raises TypeError on a str carrying non-ASCII, so
+    comparing without encoding turned this into a 500 (and a logged
+    traceback) on a path any unauthenticated caller can reach.
+    """
+    r = client.get("/v1/models", headers={b"Authorization": "Bearer é".encode()})
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_auth_rejects_wrong_key(client: TestClient) -> None:
+    r = client.get("/v1/models", headers={"Authorization": "Bearer nope"})
+    assert r.status_code == 401
+
+
 def test_models_lists_empty(client: TestClient, auth_headers: dict[str, str]) -> None:
     r = client.get("/v1/models", headers=auth_headers)
     assert r.status_code == 200

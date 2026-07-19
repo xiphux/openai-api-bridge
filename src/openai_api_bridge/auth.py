@@ -24,5 +24,9 @@ async def require_api_key(
     if not authorization or not authorization.startswith(_BEARER):
         raise Unauthorized("Missing or malformed Authorization header")
     presented = authorization[len(_BEARER) :]
-    if not hmac.compare_digest(presented, settings.api_key):
+    # Compare as bytes: hmac.compare_digest raises TypeError on a str holding
+    # non-ASCII, which would surface a bad key as a 500 (plus a traceback in
+    # the log) instead of a 401 — and that path is reachable pre-auth by
+    # anyone who can reach the port.
+    if not hmac.compare_digest(presented.encode("utf-8"), settings.api_key.encode("utf-8")):
         raise Unauthorized("Invalid API key")
