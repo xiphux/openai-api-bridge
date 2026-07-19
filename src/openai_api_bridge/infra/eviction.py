@@ -37,9 +37,9 @@ async def run_eviction_pass(
         "SELECT id FROM generated_files WHERE pinned = 0 AND created_at < ?",
         (cutoff,),
     )
-    for row in ttl_rows:
-        await filestore.delete(row["id"])
-    ttl_deleted = len(ttl_rows)
+    # Batched: a sweep retiring a few thousand files used to issue a SELECT,
+    # a DELETE, a commit and a blocking unlink apiece, all on the event loop.
+    ttl_deleted = await filestore.delete_many([row["id"] for row in ttl_rows])
 
     lru_deleted = 0
     total = await filestore.total_byte_size()
@@ -48,12 +48,15 @@ async def run_eviction_pass(
             "SELECT id, byte_size FROM generated_files WHERE pinned = 0"
             " ORDER BY last_accessed_at ASC"
         )
+        # Pick the victims first, then delete them in one batch, so the cap
+        # arithmetic stays identical to the row-at-a-time version.
+        victims: list[str] = []
         for row in candidates:
             if total <= max_cache_bytes:
                 break
-            await filestore.delete(row["id"])
+            victims.append(row["id"])
             total -= int(row["byte_size"])
-            lru_deleted += 1
+        lru_deleted = await filestore.delete_many(victims)
 
     return ttl_deleted, lru_deleted
 

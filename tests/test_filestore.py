@@ -198,3 +198,53 @@ async def test_open_for_read_reaps_the_orphan_row(filestore: FileStore) -> None:
 
     assert await filestore.get_metadata(fid) is None
     assert await filestore.total_byte_size() == 0
+
+
+async def test_delete_many_removes_rows_and_files(filestore: FileStore) -> None:
+    ids = [
+        await filestore.put(
+            b"x" * 10,
+            content_type="image/png",
+            kind="image",
+            source_backend="p",
+            source_model="m",
+        )
+        for _ in range(5)
+    ]
+    paths = []
+    for fid in ids:
+        found = await filestore.open_for_read(fid)
+        assert found is not None
+        paths.append(found[0])
+
+    removed = await filestore.delete_many(ids)
+
+    assert removed == 5
+    assert await filestore.total_byte_size() == 0
+    assert not any(p.exists() for p in paths)
+
+
+async def test_delete_many_chunks_past_the_sqlite_parameter_limit(
+    filestore: FileStore,
+) -> None:
+    """SQLite caps bound parameters (999 by default); a big sweep must not blow it."""
+    ids = [
+        await filestore.put(
+            b"x",
+            content_type="image/png",
+            kind="image",
+            source_backend="p",
+            source_model="m",
+        )
+        for _ in range(450)
+    ]
+
+    removed = await filestore.delete_many(ids)
+
+    assert removed == 450
+    assert await filestore.total_byte_size() == 0
+
+
+async def test_delete_many_tolerates_unknown_and_empty_input(filestore: FileStore) -> None:
+    assert await filestore.delete_many([]) == 0
+    assert await filestore.delete_many(["deadbeef"]) == 0

@@ -20,6 +20,7 @@ import contextlib
 import logging
 import secrets
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,18 @@ def _write_atomic(tmp_path: Path, final_path: Path, data: bytes) -> None:
     final_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path.write_bytes(data)
     tmp_path.replace(final_path)  # atomic on same FS
+
+
+def _unlink_all(paths: list[Path]) -> None:
+    """Unlink every path, ignoring ones already gone. Runs in a worker thread."""
+    for path in paths:
+        with contextlib.suppress(FileNotFoundError, OSError):
+            path.unlink()
+
+
+# SQLite's default parameter ceiling is 999; stay well under it so a large
+# sweep can't blow the limit on the IN (...) clauses below.
+_DELETE_CHUNK = 400
 
 
 _EXT_BY_TYPE: dict[str, str] = {
@@ -199,6 +212,35 @@ class FileStore:
         await self.db.execute("DELETE FROM generated_files WHERE id = ?", (file_id,))
         with contextlib.suppress(FileNotFoundError):
             self._absolute(meta.storage_path).unlink()
+
+    async def delete_many(self, file_ids: Sequence[str]) -> int:
+        """Delete many files at once. Returns how many rows were removed.
+
+        The eviction sweeper retires files in bulk, and doing that one at a
+        time cost a SELECT, a DELETE, a commit and a blocking unlink each —
+        a few thousand round trips and commits per pass, all on the single
+        event loop. Batch the SQL and push the unlinks to a worker thread.
+        """
+        removed = 0
+        for start in range(0, len(file_ids), _DELETE_CHUNK):
+            chunk = list(file_ids[start : start + _DELETE_CHUNK])
+            if not chunk:
+                continue
+            placeholders = ",".join("?" * len(chunk))
+            rows = await self.db.fetchall(
+                f"SELECT storage_path FROM generated_files WHERE id IN ({placeholders})",
+                tuple(chunk),
+            )
+            if not rows:
+                continue
+            await self.db.execute(
+                f"DELETE FROM generated_files WHERE id IN ({placeholders})",
+                tuple(chunk),
+            )
+            paths = [self._absolute(row["storage_path"]) for row in rows]
+            await asyncio.to_thread(_unlink_all, paths)
+            removed += len(rows)
+        return removed
 
     async def total_byte_size(self) -> int:
         row = await self.db.fetchone(
