@@ -15,6 +15,7 @@ Atomicity guarantees:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import secrets
@@ -25,6 +26,14 @@ from pathlib import Path
 from .db import Database
 
 log = logging.getLogger(__name__)
+
+
+def _write_atomic(tmp_path: Path, final_path: Path, data: bytes) -> None:
+    """Write ``data`` to ``final_path`` via a temp file. Runs in a worker thread."""
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path.write_bytes(data)
+    tmp_path.replace(final_path)  # atomic on same FS
+
 
 _EXT_BY_TYPE: dict[str, str] = {
     "image/png": ".png",
@@ -105,11 +114,13 @@ class FileStore:
         file_id = secrets.token_hex(16)
         ext = self._ext_for(content_type)
         abs_path = self._disk_path(file_id, ext)
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-
         tmp_path = abs_path.with_suffix(abs_path.suffix + ".tmp")
-        tmp_path.write_bytes(data)
-        tmp_path.replace(abs_path)  # atomic on same FS
+
+        # Off the event loop: a generated video is routinely hundreds of MB,
+        # and the bridge runs a single uvicorn worker, so a synchronous write
+        # stalls every other client for its duration (measured ~58ms for
+        # 200MB on local SSD, and it degrades badly on network-backed storage).
+        await asyncio.to_thread(_write_atomic, tmp_path, abs_path, data)
 
         relative = str(abs_path.relative_to(self.files_dir))
         now = int(time.time())
