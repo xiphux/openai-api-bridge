@@ -156,3 +156,45 @@ async def test_invalid_kind_rejected(filestore: FileStore) -> None:
             source_backend="x",
             source_model="m",
         )
+
+
+async def test_open_for_read_returns_none_when_bytes_are_gone(filestore: FileStore) -> None:
+    """A row whose file vanished must read as absent, not hand out a dead path.
+
+    The caller opens the path after we return it (FileResponse stats it at
+    send time), so returning a path to a missing file surfaced as a 500
+    instead of a 404.
+    """
+    fid = await filestore.put(
+        b"payload",
+        content_type="image/png",
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    found = await filestore.open_for_read(fid)
+    assert found is not None
+    abs_path, _ = found
+
+    abs_path.unlink()
+
+    assert await filestore.open_for_read(fid) is None
+
+
+async def test_open_for_read_reaps_the_orphan_row(filestore: FileStore) -> None:
+    """The stale row is dropped, so its byte_size stops counting toward the cap."""
+    fid = await filestore.put(
+        b"payload",
+        content_type="image/png",
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    found = await filestore.open_for_read(fid)
+    assert found is not None
+    found[0].unlink()
+
+    await filestore.open_for_read(fid)
+
+    assert await filestore.get_metadata(fid) is None
+    assert await filestore.total_byte_size() == 0

@@ -7,21 +7,24 @@ Atomicity guarantees:
   * Writes go to ``<path>.tmp`` and are renamed with ``Path.replace`` (atomic on
     the same filesystem). The DB row is inserted *after* the rename completes,
     so a row never points at a partial file.
-  * Reads update ``last_accessed_at`` and return an absolute path. The eviction
-    sweeper only deletes files whose row was already removed via DELETE...
-    in-flight readers that opened the FD before the unlink keep streaming
-    fine on Linux.
+  * Reads update ``last_accessed_at`` and return an absolute path. Because the
+    caller (``FileResponse``) opens the path *later*, a row whose bytes are
+    gone must be reported as absent rather than handed out: see
+    :meth:`FileStore.open_for_read`.
 """
 
 from __future__ import annotations
 
 import contextlib
+import logging
 import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .db import Database
+
+log = logging.getLogger(__name__)
 
 _EXT_BY_TYPE: dict[str, str] = {
     "image/png": ".png",
@@ -141,17 +144,36 @@ class FileStore:
     async def open_for_read(self, file_id: str) -> tuple[Path, FileMetadata] | None:
         """Return (absolute_path, metadata) and bump ``last_accessed_at``.
 
-        The caller is expected to immediately open the file (e.g. via FileResponse)
-        so an evictor unlinking concurrently doesn't break the in-flight read.
+        Returns ``None`` when the row exists but its bytes don't. The caller
+        opens the path *after* we return it (``FileResponse`` stats it at send
+        time), so handing back a path to a missing file surfaces as a
+        ``RuntimeError`` and a 500 rather than the 404 the caller expects.
+        Three ways a row outlives its file: ``FILES_DIR`` wiped while the DB
+        persists (tmpfs, a recreated volume), a crash between the row DELETE
+        and the unlink in :meth:`delete`, and an eviction pass landing between
+        our metadata read and the caller's open.
+
+        The orphan row is dropped on the way out — it describes bytes that no
+        longer exist, and leaving it would keep its ``byte_size`` in the
+        eviction sweeper's total.
         """
         meta = await self.get_metadata(file_id)
         if meta is None:
+            return None
+        abs_path = self._absolute(meta.storage_path)
+        if not abs_path.is_file():
+            log.warning(
+                "File %s has a metadata row but no bytes at %s; reaping the row",
+                file_id,
+                abs_path,
+            )
+            await self.db.execute("DELETE FROM generated_files WHERE id = ?", (file_id,))
             return None
         await self.db.execute(
             "UPDATE generated_files SET last_accessed_at = ? WHERE id = ?",
             (int(time.time()), file_id),
         )
-        return self._absolute(meta.storage_path), meta
+        return abs_path, meta
 
     async def set_pinned(self, file_id: str, pinned: bool) -> None:
         await self.db.execute(
