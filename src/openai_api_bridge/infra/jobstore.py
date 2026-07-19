@@ -110,6 +110,28 @@ class JobStore:
             tuple(params),
         )
 
+    async def fail_if_active(self, job_id: str, message: str) -> bool:
+        """Mark a job failed only while it is still queued or in_progress.
+
+        Returns whether the row was actually transitioned. Cancellation races
+        the runner: an unconditional write can flip a job the runner *just*
+        completed to failed (leaving its file orphaned and the client told a
+        finished render failed), and the runner's own CancelledError handler
+        can overwrite the more specific message the canceller recorded.
+        Guarding on the current status makes the first writer win, which is
+        the intended semantics for a terminal state.
+        """
+        now = int(time.time())
+        async with self.db.transaction() as conn:
+            cur = await conn.execute(
+                "UPDATE video_jobs SET status = 'failed', error_message = ?, updated_at = ?"
+                " WHERE id = ? AND status IN ('queued', 'in_progress')",
+                (message, now, job_id),
+            )
+            changed = bool(cur.rowcount > 0)
+            await cur.close()
+        return changed
+
     async def mark_stale_failed(self, message: str) -> int:
         """Mark all queued/in_progress jobs as failed. Called on startup to
         reap jobs whose runner died with the previous process."""

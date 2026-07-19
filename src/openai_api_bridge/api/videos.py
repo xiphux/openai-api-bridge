@@ -144,11 +144,11 @@ async def videos_cancel(video_id: str, request: Request) -> dict:
     if job.status in ("completed", "failed"):
         return _video_to_dict(job)
 
-    # Always mark the row failed synchronously so the caller's poll sees a
-    # terminal state immediately. Then ask the scheduler to cancel any live
-    # task — its CancelledError handler in _videos_runner will try to update
-    # the row again, but that's idempotent (the row is already terminal).
-    await jobstore.update(video_id, status="failed", error_message="Cancelled by user")
+    # Mark the row failed synchronously so the caller's poll sees a terminal
+    # state immediately, but only while it's still active: the runner can
+    # complete between the read above and this write, and an unconditional
+    # update would flip a finished render to failed and orphan its file.
+    await jobstore.fail_if_active(video_id, "Cancelled by user")
     scheduler.cancel(f"video-job-{video_id}")
 
     refreshed = await jobstore.get(video_id)

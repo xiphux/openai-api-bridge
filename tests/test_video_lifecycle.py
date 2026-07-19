@@ -23,6 +23,7 @@ from openai_api_bridge.backends.comfyui import client as comfy_client_module
 from openai_api_bridge.backends.comfyui.client import ComfyUIClient
 from openai_api_bridge.config import reset_caches_for_tests
 from openai_api_bridge.errors import UpstreamError
+from openai_api_bridge.infra.jobstore import JobStore
 from openai_api_bridge.infra.tasks import TaskScheduler
 
 # --- 1. poll_completion detects dropped prompts -------------------------
@@ -307,3 +308,48 @@ def test_delete_video_unknown_returns_404(client_with_video: TestClient) -> None
     r = client_with_video.delete("/v1/videos/does-not-exist", headers=headers)
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
+
+
+async def test_fail_if_active_does_not_clobber_a_completed_job(jobstore: JobStore) -> None:
+    """Cancellation races the runner; a finished render must not become failed.
+
+    DELETE reads the row, then writes. If the runner completes in between,
+    an unconditional write flipped a completed job to failed and orphaned
+    its file while telling the client the render had failed.
+    """
+    await jobstore.create(job_id="j1", model="p/m", prompt="x", size=None, seconds=None)
+    await jobstore.update("j1", status="completed", file_id="f1", progress_pct=100)
+
+    changed = await jobstore.fail_if_active("j1", "Cancelled by user")
+
+    assert changed is False
+    job = await jobstore.get("j1")
+    assert job is not None
+    assert job.status == "completed"
+    assert job.file_id == "f1"
+
+
+async def test_fail_if_active_transitions_an_active_job(jobstore: JobStore) -> None:
+    await jobstore.create(job_id="j2", model="p/m", prompt="x", size=None, seconds=None)
+    await jobstore.update("j2", status="in_progress")
+
+    changed = await jobstore.fail_if_active("j2", "Cancelled by user")
+
+    assert changed is True
+    job = await jobstore.get("j2")
+    assert job is not None
+    assert job.status == "failed"
+    assert job.error_message == "Cancelled by user"
+
+
+async def test_first_writer_wins_on_the_error_message(jobstore: JobStore) -> None:
+    """The runner's CancelledError handler must not overwrite the canceller."""
+    await jobstore.create(job_id="j3", model="p/m", prompt="x", size=None, seconds=None)
+    await jobstore.update("j3", status="in_progress")
+
+    assert await jobstore.fail_if_active("j3", "Cancelled by user") is True
+    assert await jobstore.fail_if_active("j3", "Job cancelled") is False
+
+    job = await jobstore.get("j3")
+    assert job is not None
+    assert job.error_message == "Cancelled by user"

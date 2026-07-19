@@ -72,8 +72,11 @@ async def run_video_job(
         # Best-effort: mark the row failed so it doesn't sit in_progress
         # forever. We swallow errors here so the cancellation propagates
         # cleanly even if the DB write itself races with shutdown.
+        # Conditional so we don't overwrite the more specific message a
+        # DELETE /v1/videos/{id} caller already recorded — that caller marks
+        # the row terminal before cancelling us.
         try:
-            await jobstore.update(job_id, status="failed", error_message="Job cancelled")
+            await jobstore.fail_if_active(job_id, "Job cancelled")
         except Exception:
             log.exception("Failed to mark cancelled job %s as failed", job_id)
         raise
