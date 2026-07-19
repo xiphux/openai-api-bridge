@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-import time
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
@@ -176,8 +175,3 @@ async def videos_get_content(video_id: str, request: Request) -> FileResponse:
         raise JobNotFound("Video file no longer available (evicted from cache)")
     abs_path, meta = result
     return FileResponse(abs_path, media_type=meta.content_type)
-
-
-# unused import suppressor (time is referenced indirectly via VideoJob.updated_at;
-# kept here so future code edits that timestamp jobs don't have to re-import).
-_ = time
