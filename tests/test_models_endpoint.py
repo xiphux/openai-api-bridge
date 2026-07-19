@@ -11,6 +11,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 
 from openai_api_bridge.api.models import list_models
@@ -72,10 +73,26 @@ async def test_listing_order_follows_provider_order() -> None:
     assert [row["id"] for row in body["data"]] == ["alpha/one", "beta/two"]
 
 
-async def test_one_failing_provider_does_not_break_the_listing() -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        UpstreamError("catalogue is down"),
+        httpx.ConnectError("connection refused"),
+        KeyError("architecture"),
+        ValueError("unexpected catalogue shape"),
+    ],
+    ids=["bridge-error", "raw-httpx", "key-error", "value-error"],
+)
+async def test_any_provider_failure_is_contained(error: Exception) -> None:
+    """Containment can't depend on adapters remembering to wrap their errors.
+
+    A bare httpx error or an unexpected catalogue shape previously escaped
+    the BridgeError-only handler and 500'd the whole endpoint, taking every
+    healthy provider's models with it.
+    """
     providers: list[tuple[str, Backend]] = [
         ("good", _StaticBackend([ModelEntry(id="m", kind="image")])),
-        ("bad", _FailingBackend(UpstreamError("catalogue is down"))),
+        ("bad", _FailingBackend(error)),
     ]
 
     body = await list_models(_request_with(providers))

@@ -26,6 +26,13 @@ async def _entries_for(provider_id: str, backend: Backend) -> list[ModelEntry]:
         # One flaky provider shouldn't break the whole listing.
         log.warning("Provider %r list_models failed: %s", provider_id, e.message)
         return []
+    except Exception:
+        # Same intent, but the guarantee can't rest on every adapter
+        # remembering to wrap its upstream errors: a bare httpx error or an
+        # unexpected catalogue shape would otherwise 500 the whole endpoint
+        # and take every healthy provider's models with it.
+        log.exception("Provider %r list_models raised an unexpected error", provider_id)
+        return []
 
 
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
