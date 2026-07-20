@@ -22,7 +22,7 @@ from ...errors import UpstreamError
 log = logging.getLogger(__name__)
 
 
-# Modest ceiling; ImageRouter's data URLs are typically <2MB even for
+# Modest ceiling; OpenRouter's data URLs are typically <2MB even for
 # high-quality outputs. If an OpenRouter image model ever exceeds this, the
 # bound trims a runaway payload without affecting normal use.
 _MAX_IMAGE_BYTES = 50 * 1024 * 1024
