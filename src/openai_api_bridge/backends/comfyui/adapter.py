@@ -162,13 +162,22 @@ class ComfyUIBackend(Backend):
             await on_upstream_id(prompt_id)
         return prompt_id
 
-    async def _collect_one(self, record: WorkflowRecord, prompt_id: str) -> GeneratedAsset:
-        """Wait for a queued run to finish and download its output."""
-        timeout = (
+    def _poll_timeout_for(self, record: WorkflowRecord) -> float:
+        return (
             self.cfg.poll_timeout_video_seconds
             if record.output_type == "video"
             else self.cfg.poll_timeout_image_seconds
         )
+
+    async def _collect_one(
+        self,
+        record: WorkflowRecord,
+        prompt_id: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> GeneratedAsset:
+        """Wait for a queued run to finish and download its output."""
+        timeout = self._poll_timeout_for(record) if timeout_seconds is None else timeout_seconds
         history = await self.client.poll_completion(prompt_id, timeout_seconds=timeout)
         data, content_type = await self.client.retrieve_media(
             history, output_type=record.output_type
@@ -219,17 +228,50 @@ class ComfyUIBackend(Backend):
         what it's built to do. Each submit re-randomises seeds via
         prepare_workflow, so the outputs still differ.
         """
-        prompt_ids = [
-            await self._submit_one(
-                record,
-                prompt=prompt,
-                size=size,
-                image_filenames=image_filenames,
-                rng=rng,
-            )
-            for _ in range(n)
-        ]
-        return list(await asyncio.gather(*(self._collect_one(record, pid) for pid in prompt_ids)))
+        prompt_ids: list[str] = []
+        try:
+            for _ in range(n):
+                prompt_ids.append(
+                    await self._submit_one(
+                        record,
+                        prompt=prompt,
+                        size=size,
+                        image_filenames=image_filenames,
+                        rng=rng,
+                    )
+                )
+        except Exception:
+            # Whatever we already queued will render and go uncollected. That
+            # costs GPU time on a self-hosted box rather than money, but it's
+            # invisible unless we say so.
+            if prompt_ids:
+                log.warning(
+                    "ComfyUI batch submit failed after queueing %d/%d prompt(s) (%s); "
+                    "they will render uncollected",
+                    len(prompt_ids),
+                    n,
+                    ", ".join(prompt_ids),
+                )
+            raise
+
+        # Every collector starts its clock now, but the runs execute one after
+        # another — the last one waits out all the others before it even
+        # starts. Budget for the whole queue rather than a single run, or a
+        # healthy n=4 batch of slow workflows times out on position alone.
+        budget = self._poll_timeout_for(record) * n
+
+        # return_exceptions so one failure doesn't leave the sibling pollers
+        # running detached: gather propagates the first error but does not
+        # cancel the rest, and those coroutines would keep polling ComfyUI
+        # long after the request they belong to has failed.
+        results = await asyncio.gather(
+            *(self._collect_one(record, pid, timeout_seconds=budget) for pid in prompt_ids),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return [r for r in results if isinstance(r, GeneratedAsset)]
 
     async def generate_image(
         self,

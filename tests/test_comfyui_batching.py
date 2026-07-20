@@ -12,7 +12,9 @@ Two properties that only show up under repetition:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,7 @@ import pytest
 
 from openai_api_bridge.backends.comfyui.adapter import ComfyUIBackend
 from openai_api_bridge.config import ComfyUIProviderConfig
+from openai_api_bridge.errors import UpstreamError
 
 
 @pytest.fixture
@@ -199,3 +202,104 @@ async def test_cache_workflows_true_does_not_rescan(workflows_dir: Path) -> None
     after = await backend.list_models()
 
     assert [m.display_name for m in after] == ["wf"]
+
+
+async def test_batch_budgets_the_whole_queue_not_a_single_run(workflows_dir: Path) -> None:
+    """Collectors all start their clock at submit time, but runs execute serially.
+
+    Giving each collector a single run's budget times out a healthy batch on
+    queue position alone: at n=4 the last run waits out three others first.
+    """
+    cfg = ComfyUIProviderConfig(
+        backend="comfyui",
+        id="c",
+        workflows_dir=workflows_dir,
+        poll_timeout_image_seconds=300.0,
+    )
+    backend = ComfyUIBackend(cfg)
+    recorder = _RecordingClient()
+    seen: list[float] = []
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        seen.append(timeout_seconds)
+        return {"outputs": {}}
+
+    recorder.poll_completion = poll  # type: ignore[assignment]
+    backend.client = recorder  # type: ignore[assignment]
+
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=4)
+
+    assert seen == [1200.0] * 4, "each collector should budget for the full queue"
+
+
+async def test_single_run_keeps_the_plain_per_run_budget(workflows_dir: Path) -> None:
+    cfg = ComfyUIProviderConfig(
+        backend="comfyui",
+        id="c",
+        workflows_dir=workflows_dir,
+        poll_timeout_image_seconds=300.0,
+    )
+    backend = ComfyUIBackend(cfg)
+    recorder = _RecordingClient()
+    seen: list[float] = []
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        seen.append(timeout_seconds)
+        return {"outputs": {}}
+
+    recorder.poll_completion = poll  # type: ignore[assignment]
+    backend.client = recorder  # type: ignore[assignment]
+
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=1)
+
+    assert seen == [300.0]
+
+
+async def test_one_failing_collector_does_not_leave_siblings_running(
+    workflows_dir: Path,
+) -> None:
+    """gather propagates the first error but doesn't cancel the rest.
+
+    Without return_exceptions the surviving pollers keep hammering ComfyUI
+    long after the request they belong to has failed.
+    """
+    backend, recorder = _backend(workflows_dir)
+    finished: list[str] = []
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        if prompt_id == "p2":
+            raise UpstreamError("ComfyUI dropped the prompt")
+        await asyncio.sleep(0.01)
+        finished.append(prompt_id)
+        return {"outputs": {}}
+
+    recorder.poll_completion = poll  # type: ignore[assignment]
+
+    with pytest.raises(UpstreamError):
+        await backend.generate_image(model_slug="wf", prompt="a cat", n=3)
+
+    # Siblings ran to completion rather than being abandoned mid-poll.
+    assert sorted(finished) == ["p1", "p3"]
+
+
+async def test_failed_submit_reports_the_orphaned_prompts(
+    workflows_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A mid-batch submit failure leaves queued prompts rendering uncollected."""
+    backend, recorder = _backend(workflows_dir)
+    calls = 0
+
+    async def submit(workflow: dict[str, Any]) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise UpstreamError("ComfyUI rejected the prompt")
+        return f"p{calls}"
+
+    recorder.submit_prompt = submit  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING), pytest.raises(UpstreamError):
+        await backend.generate_image(model_slug="wf", prompt="a cat", n=4)
+
+    assert "render uncollected" in caplog.text
+    assert "p1, p2" in caplog.text
