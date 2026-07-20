@@ -74,6 +74,7 @@ async def fetch_asset_with_retry(
     timeout: float = _DEFAULT_FETCH_TIMEOUT_S,
     max_attempts: int = 3,
     base_delay: float = 1.0,
+    max_bytes: int | None = None,
 ) -> tuple[bytes, str]:
     """Download a generated asset by URL, returning ``(bytes, content_type)``.
 
@@ -90,6 +91,10 @@ async def fetch_asset_with_retry(
       Retries with exponential backoff smooth these over.
 
     ``provider_label`` appears only in log/error text (e.g. "fal", "ImageRouter").
+
+    ``max_bytes`` bounds the downloaded payload. Left unset for video-bearing
+    providers, whose outputs are legitimately hundreds of MB and have no
+    natural ceiling to pick without a config knob.
     """
     last_error: httpx.HTTPError | None = None
     resp: httpx.Response | None = None
@@ -150,4 +155,9 @@ async def fetch_asset_with_retry(
     content_type = resp.headers.get("content-type", "application/octet-stream")
     # Strip charset / boundary suffixes for clean storage.
     content_type = content_type.split(";", 1)[0].strip()
-    return resp.content, content_type
+    data = resp.content
+    if max_bytes is not None and len(data) > max_bytes:
+        raise UpstreamError(
+            f"{provider_label} asset exceeded size cap ({len(data)} > {max_bytes} bytes)"
+        )
+    return data, content_type

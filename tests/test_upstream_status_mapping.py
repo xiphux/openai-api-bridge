@@ -172,3 +172,40 @@ def test_fal_non_auth_error_still_carries_the_body() -> None:
 
     assert not isinstance(err, UpstreamAuthError)
     assert "internal explosion" in err.message
+
+
+async def test_asset_fetch_enforces_the_size_cap() -> None:
+    """The memory bound is a parameter of the shared helper, not one adapter's."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/big.png").mock(
+            return_value=httpx.Response(
+                200, content=b"x" * 5000, headers={"content-type": "image/png"}
+            )
+        )
+        with pytest.raises(UpstreamError, match="exceeded size cap"):
+            await fetch_asset_with_retry(
+                "https://cdn.example/big.png", provider_label="Test", max_bytes=1000
+            )
+
+
+async def test_asset_fetch_without_a_cap_allows_large_payloads() -> None:
+    """Video providers stay uncapped — their outputs are legitimately huge."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/big.mp4").mock(
+            return_value=httpx.Response(
+                200, content=b"x" * 5000, headers={"content-type": "video/mp4"}
+            )
+        )
+        data, content_type = await fetch_asset_with_retry(
+            "https://cdn.example/big.mp4", provider_label="Test"
+        )
+    assert len(data) == 5000
+    assert content_type == "video/mp4"

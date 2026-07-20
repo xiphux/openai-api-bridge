@@ -21,8 +21,6 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
-
 from ...config import OpenRouterProviderConfig
 from ...util.cache import AsyncTTLCache
 from ..base import (
@@ -51,18 +49,12 @@ class OpenRouterBackend(Backend):
             api_token=cfg.resolve_api_token(),
             request_timeout_seconds=cfg.request_timeout_seconds,
         )
-        # Separate plain client for fetching CDN-hosted images. Most
-        # OpenRouter outputs are inline data URLs (no fetch needed) but a
-        # few models return hosted URLs that we'd want to GET without our
-        # bridge-side Authorization header attached.
-        self._download_client = httpx.AsyncClient(timeout=120.0)
         self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
             cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
         )
 
     async def aclose(self) -> None:
         await self._client.aclose()
-        await self._download_client.aclose()
 
     # --- model catalog ---------------------------------------------------
 
@@ -206,5 +198,5 @@ class OpenRouterBackend(Backend):
         # models do n>1 internally). We pick the first one — n>1 is handled
         # by the caller invoking _generate_one multiple times. The extras
         # are dropped on the floor; in practice OpenRouter returns one.
-        data, content_type = await fetch_image_bytes(urls[0], self._download_client)
+        data, content_type = await fetch_image_bytes(urls[0])
         return GeneratedAsset(data=data, content_type=content_type, kind="image")

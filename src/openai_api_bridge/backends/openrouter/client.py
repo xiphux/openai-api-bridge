@@ -15,9 +15,8 @@ import binascii
 import logging
 from typing import Any
 
-import httpx
-
 from ...errors import UpstreamError
+from ...util.http import fetch_asset_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +71,7 @@ def extract_image_data_urls(response: dict[str, Any]) -> list[str]:
     return urls
 
 
-async def fetch_image_bytes(url: str, http_client: httpx.AsyncClient) -> tuple[bytes, str]:
+async def fetch_image_bytes(url: str) -> tuple[bytes, str]:
     """Resolve a URL from extract_image_data_urls into raw bytes.
 
     Data URLs are decoded inline; HTTP(S) URLs are fetched. Returns
@@ -100,24 +99,13 @@ async def fetch_image_bytes(url: str, http_client: httpx.AsyncClient) -> tuple[b
         return data, media_type
 
     # HTTP fetch path — OpenRouter occasionally hosts large outputs on a CDN
-    # rather than inlining them.
-    try:
-        resp = await http_client.get(url, timeout=120.0, follow_redirects=True)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        raise UpstreamError(
-            f"OpenRouter image fetch returned {e.response.status_code} for {url}"
-        ) from e
-    except httpx.HTTPError as e:
-        raise UpstreamError(f"OpenRouter image fetch failed for {url}: {e}") from e
-    content_type = resp.headers.get("content-type", "application/octet-stream")
-    content_type = content_type.split(";", 1)[0].strip()
-    data = resp.content
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise UpstreamError(
-            f"OpenRouter image exceeded size cap ({len(data)} > {_MAX_IMAGE_BYTES} bytes)"
-        )
-    return data, content_type
+    # rather than inlining them. Same shared helper fal and ImageRouter use:
+    # this path had no retry of its own, so a just-minted asset URL that
+    # briefly 401/404s while storage catches up — the exact race the helper
+    # exists for — failed the whole request here but was shrugged off there.
+    return await fetch_asset_with_retry(
+        url, provider_label="OpenRouter", max_bytes=_MAX_IMAGE_BYTES
+    )
 
 
 def classify_kind(model: dict[str, Any]) -> str | None:
