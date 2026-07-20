@@ -79,7 +79,7 @@ class ComfyUIBackend(Backend):
 
     # --- generation --------------------------------------------------------
 
-    async def _run_one(
+    async def _submit_one(
         self,
         record: WorkflowRecord,
         *,
@@ -89,7 +89,8 @@ class ComfyUIBackend(Backend):
         length: int | None = None,
         on_upstream_id: UpstreamIdCallback | None = None,
         rng: random.Random | None = None,
-    ) -> GeneratedAsset:
+    ) -> str:
+        """Queue one run and return ComfyUI's prompt_id."""
         width, height = parse_size(size)
         workflow = prepare_workflow(
             record,
@@ -103,7 +104,10 @@ class ComfyUIBackend(Backend):
         prompt_id = await self.client.submit_prompt(workflow)
         if on_upstream_id is not None:
             await on_upstream_id(prompt_id)
+        return prompt_id
 
+    async def _collect_one(self, record: WorkflowRecord, prompt_id: str) -> GeneratedAsset:
+        """Wait for a queued run to finish and download its output."""
         timeout = (
             self.cfg.poll_timeout_video_seconds
             if record.output_type == "video"
@@ -114,6 +118,62 @@ class ComfyUIBackend(Backend):
             history, output_type=record.output_type
         )
         return GeneratedAsset(data=data, content_type=content_type, kind=record.output_type)
+
+    async def _run_one(
+        self,
+        record: WorkflowRecord,
+        *,
+        prompt: str,
+        size: str | None,
+        image_filenames: list[str] | None = None,
+        length: int | None = None,
+        on_upstream_id: UpstreamIdCallback | None = None,
+        rng: random.Random | None = None,
+    ) -> GeneratedAsset:
+        prompt_id = await self._submit_one(
+            record,
+            prompt=prompt,
+            size=size,
+            image_filenames=image_filenames,
+            length=length,
+            on_upstream_id=on_upstream_id,
+            rng=rng,
+        )
+        return await self._collect_one(record, prompt_id)
+
+    async def _run_batch(
+        self,
+        record: WorkflowRecord,
+        *,
+        n: int,
+        prompt: str,
+        size: str | None,
+        image_filenames: list[str] | None = None,
+        rng: random.Random | None = None,
+    ) -> list[GeneratedAsset]:
+        """Queue ``n`` runs up front, then collect them.
+
+        Running these end-to-end one at a time meant the caller waited for
+        the sum of n full generations inside a single synchronous
+        POST /v1/images/generations — at the permitted n=4 with a 60s
+        workflow that's four minutes, well past most clients' timeouts, and
+        the abandoned work keeps running upstream unread.
+
+        Submitting first lets ComfyUI queue and pipeline the runs, which is
+        what it's built to do. Each submit re-randomises seeds via
+        prepare_workflow, so the outputs still differ.
+        """
+        prompt_ids = [
+            await self._submit_one(
+                record,
+                prompt=prompt,
+                size=size,
+                image_filenames=image_filenames,
+                rng=rng,
+            )
+            for _ in range(n)
+        ]
+        return list(await asyncio.gather(*(self._collect_one(record, pid) for pid in prompt_ids)))
 
     async def generate_image(
         self,
@@ -133,7 +193,7 @@ class ComfyUIBackend(Backend):
                 f"Model {model_slug!r} requires an input image; use /v1/images/edits",
                 param="image",
             )
-        return [await self._run_one(record, prompt=prompt, size=size) for _ in range(n)]
+        return await self._run_batch(record, n=n, prompt=prompt, size=size)
 
     async def edit_image(
         self,
@@ -158,15 +218,13 @@ class ComfyUIBackend(Backend):
         comfy_filenames = await asyncio.gather(
             *(self.client.upload_image(img.data, img.content_type) for img in images)
         )
-        return [
-            await self._run_one(
-                record,
-                prompt=prompt,
-                size=size,
-                image_filenames=comfy_filenames,
-            )
-            for _ in range(n)
-        ]
+        return await self._run_batch(
+            record,
+            n=n,
+            prompt=prompt,
+            size=size,
+            image_filenames=list(comfy_filenames),
+        )
 
     async def generate_video(
         self,
