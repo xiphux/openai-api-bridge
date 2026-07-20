@@ -28,6 +28,10 @@ from .workflows import (
 
 log = logging.getLogger(__name__)
 
+# Bounded because it runs while unwinding, often from a cancellation the
+# caller is waiting on.
+_QUEUE_DISCARD_TIMEOUT_S = 10.0
+
 
 def _dir_stamp(workflows_dir: Path) -> tuple[tuple[str, int, int], ...]:
     """A stat-only fingerprint of the workflow directory.
@@ -162,6 +166,30 @@ class ComfyUIBackend(Backend):
             await on_upstream_id(prompt_id)
         return prompt_id
 
+    async def _discard_queued(self, prompt_ids: list[str]) -> None:
+        """Give back prompts we queued but will never collect. Never raises.
+
+        Logs *before* attempting the call: this runs while unwinding, often
+        from a cancellation, so the request to ComfyUI may itself be
+        interrupted. The operator should still learn which prompt ids were
+        abandoned even when the recall doesn't get to happen.
+        """
+        log.warning(
+            "ComfyUI batch abandoned after queueing %d prompt(s) (%s); "
+            "asking ComfyUI to drop any still pending",
+            len(prompt_ids),
+            ", ".join(prompt_ids),
+        )
+        try:
+            await asyncio.wait_for(
+                self.client.delete_queued(prompt_ids),
+                timeout=_QUEUE_DISCARD_TIMEOUT_S,
+            )
+        except Exception as e:
+            # Best-effort: they render uncollected, which costs GPU time on a
+            # self-hosted box rather than money.
+            log.warning("ComfyUI would not drop the abandoned prompts: %s", e)
+
     def _poll_timeout_for(self, record: WorkflowRecord) -> float:
         return (
             self.cfg.poll_timeout_video_seconds
@@ -240,18 +268,13 @@ class ComfyUIBackend(Backend):
                         rng=rng,
                     )
                 )
-        except Exception:
-            # Whatever we already queued will render and go uncollected. That
-            # costs GPU time on a self-hosted box rather than money, but it's
-            # invisible unless we say so.
+        except BaseException:
+            # BaseException, not Exception: a client disconnecting cancels this
+            # coroutine, and that is probably the most common way a batch gets
+            # abandoned part-way through submitting. Catching only Exception
+            # let exactly that case orphan prompts with no trace at all.
             if prompt_ids:
-                log.warning(
-                    "ComfyUI batch submit failed after queueing %d/%d prompt(s) (%s); "
-                    "they will render uncollected",
-                    len(prompt_ids),
-                    n,
-                    ", ".join(prompt_ids),
-                )
+                await self._discard_queued(prompt_ids)
             raise
 
         # Every collector starts its clock now, but the runs execute one after
@@ -260,18 +283,26 @@ class ComfyUIBackend(Backend):
         # healthy n=4 batch of slow workflows times out on position alone.
         budget = self._poll_timeout_for(record) * n
 
-        # return_exceptions so one failure doesn't leave the sibling pollers
-        # running detached: gather propagates the first error but does not
-        # cancel the rest, and those coroutines would keep polling ComfyUI
-        # long after the request they belong to has failed.
-        results = await asyncio.gather(
-            *(self._collect_one(record, pid, timeout_seconds=budget) for pid in prompt_ids),
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-        return [r for r in results if isinstance(r, GeneratedAsset)]
+        tasks = [
+            asyncio.create_task(self._collect_one(record, pid, timeout_seconds=budget))
+            for pid in prompt_ids
+        ]
+        try:
+            return list(await asyncio.gather(*tasks))
+        except BaseException:
+            # gather surfaces the first error immediately but leaves the other
+            # tasks running, so without this they keep polling ComfyUI and
+            # buffering media into memory long after the request that owns
+            # them has failed. Cancel explicitly, then wait for the
+            # cancellations to land before propagating.
+            #
+            # return_exceptions=True is *not* the fix here: it cancels nothing
+            # and merely makes gather wait for every sibling, turning a prompt
+            # failure into one the client waits out for the whole batch budget.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def generate_image(
         self,

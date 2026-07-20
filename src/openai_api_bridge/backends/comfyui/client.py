@@ -127,6 +127,22 @@ class ComfyUIClient:
             raise WorkflowInvalid(f"ComfyUI returned {response.status_code}: {response.text[:500]}")
         raise UpstreamError(f"ComfyUI returned {response.status_code}: {response.text[:500]}")
 
+    async def delete_queued(self, prompt_ids: list[str]) -> None:
+        """Drop *pending* prompts from ComfyUI's queue. Raises on failure.
+
+        Only helps prompts that haven't started executing. ComfyUI's only
+        control for one already running is ``POST /interrupt``, which is
+        global — it would kill whatever the box is currently rendering,
+        including another client's job — so this deliberately doesn't touch
+        it. A running prompt finishes and is discarded by the caller.
+        """
+        response = await self._client.post(
+            f"{self.base_url}/queue",
+            json={"delete": list(prompt_ids)},
+            timeout=self.request_timeout,
+        )
+        response.raise_for_status()
+
     async def poll_completion(self, prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
         """Poll ``/history/{prompt_id}`` until the entry appears or we time out.
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +60,9 @@ class _RecordingClient:
         self, history_entry: dict[str, Any], *, output_type: str
     ) -> tuple[bytes, str]:
         return b"bytes", "image/png"
+
+    async def delete_queued(self, prompt_ids: list[str]) -> None:
+        self.calls.append(f"discard:{','.join(prompt_ids)}")
 
     async def aclose(self) -> None:
         pass
@@ -255,13 +259,14 @@ async def test_single_run_keeps_the_plain_per_run_budget(workflows_dir: Path) ->
     assert seen == [300.0]
 
 
-async def test_one_failing_collector_does_not_leave_siblings_running(
-    workflows_dir: Path,
-) -> None:
-    """gather propagates the first error but doesn't cancel the rest.
+async def test_one_failing_collector_cancels_its_siblings(workflows_dir: Path) -> None:
+    """A failed prompt must cancel the rest, not wait them out.
 
-    Without return_exceptions the surviving pollers keep hammering ComfyUI
-    long after the request they belong to has failed.
+    gather surfaces the first error immediately but leaves the other tasks
+    running, so they keep polling ComfyUI and buffering media for a request
+    that has already failed. return_exceptions=True does not fix this — it
+    cancels nothing and merely makes the client wait out the whole batch
+    budget for an error it could have had at once.
     """
     backend, recorder = _backend(workflows_dir)
     finished: list[str] = []
@@ -269,17 +274,19 @@ async def test_one_failing_collector_does_not_leave_siblings_running(
     async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
         if prompt_id == "p2":
             raise UpstreamError("ComfyUI dropped the prompt")
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(5.0)  # a sibling still mid-poll
         finished.append(prompt_id)
         return {"outputs": {}}
 
     recorder.poll_completion = poll  # type: ignore[assignment]
 
+    start = time.perf_counter()
     with pytest.raises(UpstreamError):
         await backend.generate_image(model_slug="wf", prompt="a cat", n=3)
+    elapsed = time.perf_counter() - start
 
-    # Siblings ran to completion rather than being abandoned mid-poll.
-    assert sorted(finished) == ["p1", "p3"]
+    assert finished == [], "siblings should have been cancelled, not awaited"
+    assert elapsed < 1.0, f"failed fast? took {elapsed:.2f}s waiting on siblings"
 
 
 async def test_failed_submit_reports_the_orphaned_prompts(
@@ -301,5 +308,7 @@ async def test_failed_submit_reports_the_orphaned_prompts(
     with caplog.at_level(logging.WARNING), pytest.raises(UpstreamError):
         await backend.generate_image(model_slug="wf", prompt="a cat", n=4)
 
-    assert "render uncollected" in caplog.text
+    assert "abandoned after queueing" in caplog.text
     assert "p1, p2" in caplog.text
+    # and they're handed back rather than left to render for nobody
+    assert "discard:p1,p2" in recorder.calls
