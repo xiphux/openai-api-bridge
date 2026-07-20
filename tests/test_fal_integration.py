@@ -292,18 +292,35 @@ def test_upstream_error_surfaces(client_with_fal: TestClient) -> None:
 # retry-on-5xx failure the shared mapping exists to prevent.
 
 
+@pytest.mark.parametrize(
+    ("upstream", "expected", "expected_type"),
+    [
+        (400, 400, "invalid_request_error"),
+        (402, 400, "invalid_request_error"),
+        (404, 400, "invalid_request_error"),
+        (405, 400, "invalid_request_error"),
+        (409, 400, "invalid_request_error"),
+        (422, 400, "invalid_request_error"),
+    ],
+)
 @respx.mock
-def test_upstream_422_reaches_the_client_as_a_client_error(
-    client_with_fal: TestClient,
+def test_upstream_4xx_reaches_the_client_as_a_client_error(
+    client_with_fal: TestClient, upstream: int, expected: int, expected_type: str
 ) -> None:
-    """422 is fal's standard input-validation rejection — a bad prompt."""
+    """Every status that drifted, pinned at the boundary.
+
+    422 is fal's standard input-validation rejection — a bad prompt — but
+    all six returned 502 before inference was routed through the shared
+    mapping. Pinning only the headline case would let a future re-fork of
+    _status_error back into the inference path go unnoticed for the rest.
+    """
     respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
-        return_value=httpx.Response(422, json={"detail": "prompt is too long"})
+        return_value=httpx.Response(upstream, json={"detail": "nope"})
     )
     r = _generate(client_with_fal, SEEDREAM_T2I)
 
-    assert r.status_code == 400
-    assert r.json()["error"]["type"] == "invalid_request_error"
+    assert r.status_code == expected
+    assert r.json()["error"]["type"] == expected_type
 
 
 @respx.mock

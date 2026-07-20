@@ -29,8 +29,12 @@ from .workflows import (
 log = logging.getLogger(__name__)
 
 # Bounded because it runs while unwinding, often from a cancellation the
-# caller is waiting on.
-_QUEUE_DISCARD_TIMEOUT_S = 10.0
+# caller is waiting on: DELETE /v1/videos/{id} doesn't return until this
+# does. Kept short because the recall is a courtesy — losing it wastes GPU
+# time on a self-hosted box, while a slow one stalls a user-visible cancel.
+# The prompt ids are logged before the attempt, so a lapsed recall is still
+# diagnosable.
+_QUEUE_DISCARD_TIMEOUT_S = 2.0
 
 
 def _dir_stamp(workflows_dir: Path) -> tuple[tuple[str, int, int], ...]:
