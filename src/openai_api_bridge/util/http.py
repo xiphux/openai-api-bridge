@@ -8,7 +8,7 @@ from typing import Any, NoReturn
 
 import httpx
 
-from ..errors import InvalidRequest, UnsupportedOperation, UpstreamError
+from ..errors import InvalidRequest, UnsupportedOperation, UpstreamAuthError, UpstreamError
 
 log = logging.getLogger(__name__)
 
@@ -30,10 +30,17 @@ def raise_for_upstream_status(*, status: int, body: str, provider: str, endpoint
     One mapping, used by every client, so the answer can't drift again.
     """
     if status in (401, 403):
-        # Deliberately without the body. This is the upstream's complaint about
-        # the credential *we* sent, and it goes straight to a client that has
-        # no business seeing it — some providers quote the offending token back.
-        raise UpstreamError(f"{provider} rejected our credentials ({status}) on {endpoint}")
+        # UpstreamAuthError, not a generic UpstreamError: provider tokens are
+        # read from the environment at startup, so a rejected credential
+        # cannot start working again without a restart. Callers that retry or
+        # re-attempt on a cooldown are meant to treat this as permanent and
+        # stop. Until this lived here, only the fal adapter raised it, so a
+        # bad key on any other provider was retried like a transient blip.
+        #
+        # Deliberately without the body. This is the upstream's complaint
+        # about the credential *we* sent, and it goes straight to a client
+        # that has no business seeing it — some providers quote the token back.
+        raise UpstreamAuthError(f"{provider} rejected our credentials ({status}) on {endpoint}")
     if status == 404:
         # Most likely the model slug doesn't exist on this upstream (typo, or
         # withdrawn from its catalogue).

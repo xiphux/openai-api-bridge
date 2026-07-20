@@ -34,6 +34,8 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 
+from ..errors import UpstreamAuthError
+
 
 class AsyncTTLCache[T]:
     def __init__(self, ttl_seconds: float, failure_cooldown_seconds: float = 0.0) -> None:
@@ -83,9 +85,20 @@ class AsyncTTLCache[T]:
         self._failed_at = time.monotonic()
 
     def pending_failure(self) -> BaseException | None:
-        """The remembered error while its cooldown is open, else ``None``."""
+        """The remembered error while its cooldown is open, else ``None``.
+
+        A rejected credential is remembered permanently rather than for the
+        cooldown. Provider tokens are read from the environment at startup, so
+        an ``UpstreamAuthError`` cannot start working again without a restart —
+        expiring it just means re-asking an upstream the same question forever,
+        which is exactly what the error type exists to prevent. This overrides
+        the cooldown setting because permanence is a property of the error, not
+        a caching policy.
+        """
         if self._failure is None or self._failed_at is None:
             return None
+        if isinstance(self._failure, UpstreamAuthError):
+            return self._failure
         if self.failure_cooldown_seconds <= 0:
             return None
         if time.monotonic() - self._failed_at >= self.failure_cooldown_seconds:

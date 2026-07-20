@@ -6,13 +6,17 @@ the mapping so it can't drift back to being re-decided per adapter.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from openai_api_bridge.errors import (
     InvalidRequest,
     UnsupportedOperation,
+    UpstreamAuthError,
     UpstreamError,
 )
+from openai_api_bridge.util.cache import AsyncTTLCache
 from openai_api_bridge.util.http import raise_for_upstream_status
 
 
@@ -71,3 +75,67 @@ def test_non_auth_errors_do_surface_the_body(status: int) -> None:
     with pytest.raises((InvalidRequest, UpstreamError)) as exc:
         _raise(status, body="prompt was rejected by the safety filter")
     assert "safety filter" in exc.value.message  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_auth_failures_are_marked_permanent(status: int) -> None:
+    """Every adapter, not just fal, must report a rejected key as permanent.
+
+    Provider tokens are read from the environment at startup, so a rejected
+    credential cannot start working again without a restart. Callers that
+    retry or re-attempt on a cooldown are meant to stop on this type.
+    """
+    with pytest.raises(UpstreamAuthError) as exc:
+        _raise(status)
+    # Still a 502 to the client — only the type changed, not the status.
+    assert exc.value.status_code == 502
+    assert isinstance(exc.value, UpstreamError)
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500])
+def test_non_auth_failures_are_not_marked_permanent(status: int) -> None:
+    with pytest.raises(Exception) as exc:
+        _raise(status)
+    assert not isinstance(exc.value, UpstreamAuthError)
+
+
+async def test_cache_remembers_a_rejected_credential_past_its_cooldown() -> None:
+    """A bad key must not be re-asked once the failure cooldown lapses."""
+    cache: AsyncTTLCache[str] = AsyncTTLCache(ttl_seconds=60.0, failure_cooldown_seconds=0.01)
+    calls = 0
+
+    async def fetch() -> str:
+        nonlocal calls
+        calls += 1
+        raise UpstreamAuthError("provider rejected our credentials (401)")
+
+    with pytest.raises(UpstreamAuthError):
+        await cache.get(fetch)
+    assert calls == 1
+
+    await asyncio.sleep(0.05)  # well past the cooldown
+
+    with pytest.raises(UpstreamAuthError):
+        await cache.get(fetch)
+    assert calls == 1, "a permanently-bad key was re-attempted after the cooldown"
+
+
+async def test_cache_does_retry_a_transient_failure_after_its_cooldown() -> None:
+    """The permanence is specific to auth — ordinary blips still recover."""
+    cache: AsyncTTLCache[str] = AsyncTTLCache(ttl_seconds=60.0, failure_cooldown_seconds=0.01)
+    calls = 0
+
+    async def fetch() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise UpstreamError("upstream hiccup")
+        return "recovered"
+
+    with pytest.raises(UpstreamError):
+        await cache.get(fetch)
+
+    await asyncio.sleep(0.05)
+
+    assert await cache.get(fetch) == "recovered"
+    assert calls == 2
