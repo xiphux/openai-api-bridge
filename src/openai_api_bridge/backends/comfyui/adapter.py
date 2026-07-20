@@ -175,8 +175,7 @@ class ComfyUIBackend(Backend):
         abandoned even when the recall doesn't get to happen.
         """
         log.warning(
-            "ComfyUI batch abandoned after queueing %d prompt(s) (%s); "
-            "asking ComfyUI to drop any still pending",
+            "Abandoning %d queued ComfyUI prompt(s) (%s); asking ComfyUI to drop any still pending",
             len(prompt_ids),
             ", ".join(prompt_ids),
         )
@@ -232,7 +231,14 @@ class ComfyUIBackend(Backend):
             on_upstream_id=on_upstream_id,
             rng=rng,
         )
-        return await self._collect_one(record, prompt_id)
+        try:
+            return await self._collect_one(record, prompt_id)
+        except BaseException:
+            # Queued but never collected — most often because the client
+            # disconnected or a video job was cancelled, which cancels us
+            # here. Without this the prompt keeps rendering for nobody.
+            await self._discard_queued([prompt_id])
+            raise
 
     async def _run_batch(
         self,
@@ -302,6 +308,17 @@ class ComfyUIBackend(Backend):
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            # Cancelling promptly is right for the client, but it leaves the
+            # cancelled collectors' prompts queued upstream — the same orphan
+            # the submit path recalls, moved to what is now the likelier
+            # route. Hand back everything that never produced a result.
+            abandoned = [
+                prompt_id
+                for prompt_id, task in zip(prompt_ids, tasks, strict=True)
+                if task.cancelled() or task.exception() is not None
+            ]
+            if abandoned:
+                await self._discard_queued(abandoned)
             raise
 
     async def generate_image(

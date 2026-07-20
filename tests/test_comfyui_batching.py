@@ -308,7 +308,78 @@ async def test_failed_submit_reports_the_orphaned_prompts(
     with caplog.at_level(logging.WARNING), pytest.raises(UpstreamError):
         await backend.generate_image(model_slug="wf", prompt="a cat", n=4)
 
-    assert "abandoned after queueing" in caplog.text
+    assert "Abandoning 2 queued ComfyUI prompt(s)" in caplog.text
     assert "p1, p2" in caplog.text
     # and they're handed back rather than left to render for nobody
     assert "discard:p1,p2" in recorder.calls
+
+
+async def test_cancelled_siblings_have_their_prompts_recalled(workflows_dir: Path) -> None:
+    """Cancelling siblings promptly must not silently strand their prompts.
+
+    The submit path already recalled orphans; cancellation moved the same
+    orphan class into the collect path, which is the likelier route.
+    """
+    backend, recorder = _backend(workflows_dir)
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        if prompt_id == "p2":
+            raise UpstreamError("ComfyUI dropped the prompt")
+        await asyncio.sleep(5.0)
+        return {"outputs": {}}
+
+    recorder.poll_completion = poll  # type: ignore[assignment]
+
+    with pytest.raises(UpstreamError):
+        await backend.generate_image(model_slug="wf", prompt="a cat", n=3)
+
+    discards = [c for c in recorder.calls if c.startswith("discard:")]
+    assert discards, "cancelled collectors left their prompts queued upstream"
+    recalled = discards[0].removeprefix("discard:").split(",")
+    # p2 failed and p1/p3 were cancelled — none produced a result.
+    assert sorted(recalled) == ["p1", "p2", "p3"]
+
+
+async def test_successfully_collected_prompts_are_not_recalled(workflows_dir: Path) -> None:
+    """Only prompts that never produced a result should be handed back."""
+    backend, recorder = _backend(workflows_dir)
+    done = asyncio.Event()
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        if prompt_id == "p1":
+            done.set()
+            return {"outputs": {}}
+        await done.wait()
+        raise UpstreamError("ComfyUI dropped the prompt")
+
+    recorder.poll_completion = poll  # type: ignore[assignment]
+
+    with pytest.raises(UpstreamError):
+        await backend.generate_image(model_slug="wf", prompt="a cat", n=2)
+
+    discards = [c for c in recorder.calls if c.startswith("discard:")]
+    assert discards == ["discard:p2"], f"p1 completed and shouldn't be recalled: {discards}"
+
+
+async def test_cancelling_a_single_run_recalls_its_prompt(workflows_dir: Path) -> None:
+    """A cancelled video job shouldn't leave ComfyUI rendering for nobody.
+
+    DELETE /v1/videos/{id} cancels the runner task, which cancels us here.
+    """
+    backend, recorder = _backend(workflows_dir)
+    polling = asyncio.Event()
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        polling.set()
+        await asyncio.sleep(30.0)
+        return {"outputs": {}}
+
+    recorder.poll_completion = poll  # type: ignore[assignment]
+
+    task = asyncio.create_task(backend.generate_image(model_slug="wf", prompt="a cat", n=1))
+    await polling.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert "discard:p1" in recorder.calls
