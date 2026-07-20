@@ -58,7 +58,12 @@ class OpenAIClient:
         await self._client.aclose()
         await self._streaming_client.aclose()
 
-    async def list_models(self) -> list[dict[str, Any]]:
+    async def list_models(self) -> list[Any]:
+        """The upstream's raw ``/v1/models`` data array.
+
+        Unvalidated upstream JSON: entries are Any, not a dict shape we
+        have actually checked. Callers validate before indexing.
+        """
         try:
             response = await self._client.get(f"{self.base_url}/v1/models")
             response.raise_for_status()

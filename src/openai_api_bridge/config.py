@@ -450,7 +450,8 @@ def parse_model_id(model_id: str) -> tuple[str, str]:
 
 @lru_cache(maxsize=1)
 def get_settings() -> BridgeSettings:
-    return BridgeSettings()  # type: ignore[call-arg]  # required field comes from env
+    # api_key is required but supplied by the environment, not the caller.
+    return BridgeSettings()
 
 
 _providers_cache: ProvidersFile | None = None

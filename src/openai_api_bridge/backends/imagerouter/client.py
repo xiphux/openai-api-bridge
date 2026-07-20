@@ -64,12 +64,14 @@ class ImageRouterClient:
 
     # --- model catalog ---------------------------------------------------
 
-    async def list_models(self) -> list[dict[str, Any]]:
+    async def list_models(self) -> list[Any]:
         """Returns ImageRouter's raw model catalog: an array of model objects.
 
-        Each entry has at minimum an ``id`` field and an ``output`` array
-        listing the modalities the model produces (e.g. ``["image"]`` or
-        ``["video"]``). The adapter filters and translates this into the
+        Each entry is *expected* to carry an ``id`` field and an ``output``
+        array listing the modalities the model produces (e.g. ``["image"]``
+        or ``["video"]``), but this is unvalidated upstream JSON, so the
+        element type is Any rather than a dict we haven't checked. The
+        adapter does that checking and translates the result into the
         bridge's flat ModelEntry list.
         """
         try:

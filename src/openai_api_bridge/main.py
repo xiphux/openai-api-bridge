@@ -152,8 +152,15 @@ def create_app() -> FastAPI:
         # Disable the default OpenAPI/docs auth-free routes? For v1 we leave
         # them enabled since they don't hit any backend.
     )
-    app.add_exception_handler(BridgeError, bridge_error_handler)
-    app.add_exception_handler(RequestValidationError, _validation_handler)
+    # Starlette types the handler argument as taking a bare ``Exception``,
+    # but it dispatches by the class registered alongside it, so a handler is
+    # only ever called with the type it was registered for. Annotating these
+    # to match the declared signature would mean widening each handler to
+    # ``Exception`` and narrowing again at runtime, which loses the precision
+    # where it's actually useful. Ignore the two narrow registrations instead;
+    # the ``Exception`` one below already matches.
+    app.add_exception_handler(BridgeError, bridge_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, _validation_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, _unhandled_handler)
 
     app.include_router(models_api.router)

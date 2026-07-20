@@ -137,7 +137,7 @@ def prepare_workflow(
 
     ``rng`` is injectable for deterministic tests.
     """
-    workflow = json.loads(record.json_path.read_text(encoding="utf-8"))
+    workflow: dict[str, Any] = json.loads(record.json_path.read_text(encoding="utf-8"))
     meta = record.meta
     rng = rng or random.Random()
 
