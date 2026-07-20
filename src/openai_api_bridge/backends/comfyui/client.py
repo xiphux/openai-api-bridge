@@ -51,7 +51,15 @@ class ComfyUIClient:
         self.base_url = base_url.rstrip("/")
         self.poll_interval = poll_interval_seconds
         self.request_timeout = request_timeout_seconds
-        self._client = httpx.AsyncClient()
+        # Every other adapter configures its client explicitly; this one
+        # inherited httpx's 5s default for anything not passing a per-call
+        # timeout. That's a tight *connect* budget for a self-hosted box that
+        # can be slow to accept while loading a model, and it left any future
+        # call site that forgets an explicit timeout on a different budget
+        # from the rest of the bridge.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(request_timeout_seconds, connect=10.0),
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
