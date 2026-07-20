@@ -88,22 +88,6 @@ class JobNotReady(BridgeError):
     code = "job_not_ready"
 
 
-class RateLimited(BridgeError):
-    """The upstream rate-limited us (429).
-
-    Kept apart from the generic 4xx handling because it is the one client
-    error that *is* retriable, and OpenAI-shaped clients act on that: the
-    SDKs retry ``rate_limit_error`` with backoff and give up immediately on
-    ``invalid_request_error``. Folding 429 into the latter would tell a
-    client its request was malformed and shouldn't be retried, which is the
-    opposite of what a rate limit means.
-    """
-
-    status_code = 429
-    error_type = "rate_limit_error"
-    code = "rate_limit_exceeded"
-
-
 # 5xx — upstream / infra errors
 
 
@@ -116,15 +100,43 @@ class UpstreamError(BridgeError):
 class UpstreamAuthError(UpstreamError):
     """The upstream rejected our credentials (401/403).
 
-    Split from the generic UpstreamError because it is **not** transient:
-    provider tokens are read from the environment once at startup, so a
-    rejected credential cannot start working again without a restart. Backends
-    that retry failed calls should treat this as permanent and stop, rather
-    than re-attempting on a cooldown forever against a key that will never
-    work.
+    Split from the generic UpstreamError because it is **unlikely to be
+    transient**: provider tokens are read from the environment once at
+    startup, so a genuinely rejected credential cannot start working again
+    without a restart. Backends that retry should back off much harder on
+    this than on an ordinary blip.
+
+    Back off, though, rather than give up for good. 403 lands here too and is
+    routinely about something other than the credential — a WAF interstitial,
+    a geo block, an org quota — so treating it as terminal would strand a
+    provider until someone restarted the bridge. See
+    ``AsyncTTLCache._cooldown_for``.
     """
 
     code = "upstream_auth_error"
+
+
+class RateLimited(UpstreamError):
+    """The upstream rate-limited us (429).
+
+    Kept apart from the generic 4xx handling because it is the one client
+    error that *is* retriable, and OpenAI-shaped clients act on that: the
+    SDKs retry ``rate_limit_error`` with backoff and give up immediately on
+    ``invalid_request_error``. Folding 429 into the latter would tell a
+    client its request was malformed and shouldn't be retried, which is the
+    opposite of what a rate limit means.
+
+    A subclass of ``UpstreamError`` rather than a sibling, because that is
+    what it is — an upstream-originated failure that happens to be worth
+    retrying. It also means the adapters' internal ``except UpstreamError``
+    retry loops (fal's queue poller, its result fetch) treat a rate limit as
+    the transient blip it is, instead of aborting a running video job. A
+    sibling type would have silently skipped those handlers.
+    """
+
+    status_code = 429
+    error_type = "rate_limit_error"
+    code = "rate_limit_exceeded"
 
 
 class GenerationTimeout(BridgeError):

@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from ...errors import UnsupportedOperation, UpstreamAuthError, UpstreamError
+from ...errors import RateLimited, UnsupportedOperation, UpstreamAuthError, UpstreamError
 from ...util.http import fetch_asset_with_retry, parse_json
 
 log = logging.getLogger(__name__)
@@ -42,11 +42,21 @@ _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
 def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
     """Map an upstream HTTP status to the right error class.
 
-    401/403 become UpstreamAuthError so callers can tell "bad key" (permanent,
-    stop retrying) from "fal is having a moment" (retry on a cooldown).
+    Returns rather than raises, because the queue paths inspect the error
+    before deciding whether to keep polling — which is why this doesn't just
+    delegate to ``util.http.raise_for_upstream_status``. The status semantics
+    are kept in step with it deliberately.
+
+    401/403 become UpstreamAuthError so callers can tell "bad key" (back off
+    hard) from "fal is having a moment" (retry on a cooldown). 429 becomes
+    RateLimited so the client is told to retry rather than that it sent a bad
+    request; since RateLimited subclasses UpstreamError, the queue poller
+    still treats it as the transient condition it is.
     """
     status = e.response.status_code
     body = e.response.text[:300]
+    if status == 429:
+        return RateLimited(f"fal {what} rate-limited the bridge: {body}")
     if status in (401, 403):
         # Deliberately without the body: this is fal's complaint about the
         # credential *we* sent, and the message goes straight to a client that

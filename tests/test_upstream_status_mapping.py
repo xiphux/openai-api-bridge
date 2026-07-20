@@ -273,3 +273,29 @@ def test_rate_limit_is_retriable_not_a_client_mistake() -> None:
     assert exc.value.status_code == 429
     assert exc.value.error_type == "rate_limit_error"
     assert not isinstance(exc.value, InvalidRequest)
+
+
+def test_fal_maps_429_to_a_rate_limit_too() -> None:
+    """fal keeps its own return-style mapper; its status semantics must not drift."""
+    from openai_api_bridge.backends.fal.client import _status_error
+
+    response = httpx.Response(
+        429, text="too many requests", request=httpx.Request("GET", "https://fal.run/x")
+    )
+    err = _status_error(
+        httpx.HTTPStatusError("boom", request=response.request, response=response), "/x"
+    )
+
+    assert isinstance(err, RateLimited)
+    assert err.status_code == 429
+
+
+def test_rate_limited_is_transient_for_adapter_retry_loops() -> None:
+    """fal's queue poller retries on UpstreamError; a rate limit must qualify.
+
+    If RateLimited were a sibling of UpstreamError rather than a subclass, a
+    429 during status polling would skip those handlers and abort a video job
+    that was merely being throttled.
+    """
+    assert issubclass(RateLimited, UpstreamError)
+    assert isinstance(RateLimited("throttled"), UpstreamError)

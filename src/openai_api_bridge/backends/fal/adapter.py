@@ -33,7 +33,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...config import FalModelConfig, FalProviderConfig
-from ...errors import GenerationTimeout, ModelNotFound, UpstreamAuthError, UpstreamError
+from ...errors import (
+    GenerationTimeout,
+    ModelNotFound,
+    RateLimited,
+    UpstreamAuthError,
+    UpstreamError,
+)
 from ...util.sizes import parse_size
 from ..base import (
     Backend,
@@ -770,7 +776,9 @@ class FalBackend(Backend):
         """
         try:
             return await self.client.fetch_asset(url)
-        except UpstreamAuthError:
+        except (UpstreamAuthError, RateLimited):
+            # Neither is an expiry problem, and re-wrapping would flatten them
+            # into a generic 502, losing the retry signal a rate limit carries.
             raise
         except UpstreamError as e:
             if self.cfg.output_expiration_seconds is None:
