@@ -133,18 +133,14 @@ async def fetch_asset_with_retry(
                 resp.raise_for_status()
             break
         except httpx.HTTPStatusError as e:
-            last_error = e
-            if attempt < max_attempts - 1:
-                delay = base_delay * (2**attempt)
-                log.warning(
-                    f"{provider_label} asset fetch failed for {url}, "
-                    f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
-                )
-                await asyncio.sleep(delay)
-                continue
+            # No retry here. The statuses worth re-attempting — the 401/404
+            # storage race and 5xx — are handled by the branch above, so
+            # reaching this point means either a status that can never succeed
+            # (400, 403, 410, …) or the last attempt for one that could.
+            # Retrying regardless, as this used to, spent three upstream calls
+            # and two backoff sleeps on a guaranteed failure.
             raise UpstreamError(
-                f"{provider_label} asset fetch returned {e.response.status_code} for {url} "
-                f"after {max_attempts} attempts"
+                f"{provider_label} asset fetch returned {e.response.status_code} for {url}"
             ) from e
         except httpx.HTTPError as e:
             last_error = e

@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 
 from ...errors import RateLimited, UnsupportedOperation, UpstreamAuthError, UpstreamError
-from ...util.http import fetch_asset_with_retry, parse_json
+from ...util.http import fetch_asset_with_retry, parse_json, raise_for_upstream_status
 
 log = logging.getLogger(__name__)
 
@@ -40,12 +40,20 @@ _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
 
 
 def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
-    """Map an upstream HTTP status to the right error class.
+    """Map a status from the *queue lifecycle* calls onto an error.
 
-    Returns rather than raises, because the queue paths inspect the error
-    before deciding whether to keep polling — which is why this doesn't just
-    delegate to ``util.http.raise_for_upstream_status``. The status semantics
-    are kept in step with it deliberately.
+    The inference entry points (``run_image``, ``submit_queued``) don't use
+    this — they go through ``util.http.raise_for_upstream_status`` like every
+    other adapter, so a request fal rejects as malformed reaches the client
+    as a 400 rather than a 502.
+
+    Status polling, result fetch and cancel keep this deliberately blunter
+    mapping, which returns ``UpstreamError`` for every 4xx that isn't auth or
+    a rate limit. Those callers retry a bounded run of ``UpstreamError`` as
+    "not ready yet", and a just-submitted job's status URL can genuinely 404
+    for a moment before fal's queue has it — the same propagation race the
+    shared asset fetcher retries. Sharpening these to InvalidRequest would
+    turn that race into an immediately failed render.
 
     401/403 become UpstreamAuthError so callers can tell "bad key" (back off
     hard) from "fal is having a moment" (retry on a cooldown). 429 becomes
@@ -130,7 +138,12 @@ class FalClient:
             resp = await self._client.post(url, json=body, headers=self._inference_headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise _status_error(e, model_id) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="fal",
+                endpoint=model_id,
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
         return _extract_image_urls(parse_json(resp, f"fal {model_id}"), model_id)
@@ -151,7 +164,12 @@ class FalClient:
             resp = await self._client.post(url, json=body, headers=self._inference_headers)
             resp.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise _status_error(e, model_id) from e
+            raise_for_upstream_status(
+                status=e.response.status_code,
+                body=e.response.text[:300],
+                provider="fal",
+                endpoint=model_id,
+            )
         except httpx.HTTPError as e:
             raise UpstreamError(f"fal {model_id} queue submit failed: {e}") from e
         body_json = parse_json(resp, f"fal {model_id} queue submit")

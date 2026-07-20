@@ -286,6 +286,63 @@ def test_upstream_error_surfaces(client_with_fal: TestClient) -> None:
     assert "500" not in r.text or "safety_tolerance" in r.text.lower()
 
 
+# These pin the mapping at the HTTP boundary rather than on the exception
+# type. Asserting `>= 400` above would pass just as happily with the old
+# behaviour, where every fal 4xx reached the client as a 502 — which is the
+# retry-on-5xx failure the shared mapping exists to prevent.
+
+
+@respx.mock
+def test_upstream_422_reaches_the_client_as_a_client_error(
+    client_with_fal: TestClient,
+) -> None:
+    """422 is fal's standard input-validation rejection — a bad prompt."""
+    respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(422, json={"detail": "prompt is too long"})
+    )
+    r = _generate(client_with_fal, SEEDREAM_T2I)
+
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+@respx.mock
+def test_upstream_429_reaches_the_client_as_a_rate_limit(
+    client_with_fal: TestClient,
+) -> None:
+    respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(429, json={"detail": "too many requests"})
+    )
+    r = _generate(client_with_fal, SEEDREAM_T2I)
+
+    assert r.status_code == 429
+    body = r.json()["error"]
+    assert body["type"] == "rate_limit_error"
+    assert body["code"] == "rate_limit_exceeded"
+
+
+@respx.mock
+def test_upstream_401_does_not_leak_the_body(client_with_fal: TestClient) -> None:
+    respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(401, json={"detail": "key fal-SECRET123 is invalid"})
+    )
+    r = _generate(client_with_fal, SEEDREAM_T2I)
+
+    assert r.status_code == 502
+    assert "fal-SECRET123" not in r.text
+
+
+@respx.mock
+def test_upstream_5xx_stays_a_bad_gateway(client_with_fal: TestClient) -> None:
+    respx.post(f"{FAL}/{SEEDREAM_T2I}").mock(
+        return_value=httpx.Response(503, json={"detail": "capacity"})
+    )
+    r = _generate(client_with_fal, SEEDREAM_T2I)
+
+    assert r.status_code == 502
+    assert r.json()["error"]["type"] == "api_error"
+
+
 def test_unconfigured_model_is_model_not_found(client_with_fal: TestClient) -> None:
     r = _generate(client_with_fal, "fal-ai/not-configured")
     assert r.status_code == 404

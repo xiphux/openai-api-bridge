@@ -299,3 +299,62 @@ def test_rate_limited_is_transient_for_adapter_retry_loops() -> None:
     """
     assert issubclass(RateLimited, UpstreamError)
     assert isinstance(RateLimited("throttled"), UpstreamError)
+
+
+async def test_asset_fetch_does_not_retry_a_hopeless_status() -> None:
+    """400 can never succeed; retrying spent 3 calls and 2 sleeps to learn that."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://cdn.example/nope.png").mock(
+            return_value=httpx.Response(400, text="bad request")
+        )
+        with pytest.raises(UpstreamError):
+            await fetch_asset_with_retry(
+                "https://cdn.example/nope.png", provider_label="Test", base_delay=0.01
+            )
+
+    assert route.call_count == 1, f"retried a hopeless 400 {route.call_count} times"
+
+
+async def test_asset_fetch_still_retries_the_storage_race() -> None:
+    """A just-minted asset URL can 404 briefly before storage catches up."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://cdn.example/soon.png").mock(
+            side_effect=[
+                httpx.Response(404, text="not yet"),
+                httpx.Response(200, content=b"ok", headers={"content-type": "image/png"}),
+            ]
+        )
+        data, _ = await fetch_asset_with_retry(
+            "https://cdn.example/soon.png", provider_label="Test", base_delay=0.01
+        )
+
+    assert data == b"ok"
+    assert route.call_count == 2
+
+
+async def test_asset_fetch_still_retries_5xx() -> None:
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://cdn.example/flaky.png").mock(
+            side_effect=[
+                httpx.Response(503, text="busy"),
+                httpx.Response(200, content=b"ok", headers={"content-type": "image/png"}),
+            ]
+        )
+        data, _ = await fetch_asset_with_retry(
+            "https://cdn.example/flaky.png", provider_label="Test", base_delay=0.01
+        )
+
+    assert data == b"ok"
+    assert route.call_count == 2
