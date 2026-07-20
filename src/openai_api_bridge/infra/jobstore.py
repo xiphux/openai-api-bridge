@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
+import aiosqlite
+
 from .db import Database
 
 JobStatus = Literal["queued", "in_progress", "completed", "failed"]
@@ -33,7 +35,7 @@ class JobStore:
         self.db = db
 
     @staticmethod
-    def _row_to_job(row) -> VideoJob:
+    def _row_to_job(row: aiosqlite.Row) -> VideoJob:
         return VideoJob(
             id=row["id"],
             status=row["status"],

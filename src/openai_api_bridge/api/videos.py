@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _video_to_dict(job: VideoJob) -> dict:
+def _video_to_dict(job: VideoJob) -> dict[str, Any]:
     """Render a VideoJob row in the OpenAI-compatible Sora video object shape."""
     completed_at = job.updated_at if job.status in ("completed", "failed") else None
     error = None
@@ -59,7 +59,7 @@ async def videos_create(
         UploadFile | None,
         File(description="Optional input image for image-to-video"),
     ] = None,
-) -> dict:
+) -> dict[str, Any]:
     provider_id, model_slug = parse_model_id(model)
     dispatcher: BackendDispatcher = request.app.state.dispatcher
     # Eagerly fail with 404 if the provider is unknown — friendlier than
@@ -114,7 +114,7 @@ async def videos_create(
 
 
 @router.get("/v1/videos/{video_id}", dependencies=[Depends(require_api_key)])
-async def videos_get(video_id: str, request: Request) -> dict:
+async def videos_get(video_id: str, request: Request) -> dict[str, Any]:
     jobstore: JobStore = request.app.state.jobstore
     job = await jobstore.get(video_id)
     if job is None:
@@ -123,7 +123,7 @@ async def videos_get(video_id: str, request: Request) -> dict:
 
 
 @router.delete("/v1/videos/{video_id}", dependencies=[Depends(require_api_key)])
-async def videos_cancel(video_id: str, request: Request) -> dict:
+async def videos_cancel(video_id: str, request: Request) -> dict[str, Any]:
     """Cancel a queued or in-progress video job.
 
     Returns the job's current state (200) regardless of whether cancellation

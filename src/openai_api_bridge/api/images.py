@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import time
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
@@ -41,8 +41,8 @@ async def _render_assets(
     provider_id: str,
     model_slug: str,
     prompt: str,
-) -> list[dict]:
-    out: list[dict] = []
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for asset in assets:
         if response_format == "b64_json":
             out.append({"b64_json": base64.b64encode(asset.data).decode("ascii")})
@@ -60,7 +60,7 @@ async def _render_assets(
 
 
 @router.post("/v1/images/generations", dependencies=[Depends(require_api_key)])
-async def images_generations(req: ImagesGenerationRequest, request: Request) -> dict:
+async def images_generations(req: ImagesGenerationRequest, request: Request) -> dict[str, Any]:
     provider_id, model_slug = parse_model_id(req.model)
     dispatcher: BackendDispatcher = request.app.state.dispatcher
     backend = dispatcher.for_provider(provider_id)
@@ -102,7 +102,7 @@ async def images_edits(
     n: Annotated[int, Form()] = 1,
     size: Annotated[str | None, Form()] = None,
     response_format: Annotated[str, Form()] = "url",
-) -> dict:
+) -> dict[str, Any]:
     if not 1 <= n <= _MAX_N:
         raise InvalidRequest(f"n must be between 1 and {_MAX_N} (got {n})", param="n")
     if response_format not in ("url", "b64_json"):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
@@ -36,10 +37,10 @@ async def _entries_for(provider_id: str, backend: Backend) -> list[ModelEntry]:
 
 
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
-async def list_models(request: Request) -> dict:
+async def list_models(request: Request) -> dict[str, Any]:
     dispatcher: BackendDispatcher = request.app.state.dispatcher
     now = int(time.time())
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     # Fan out concurrently: awaiting each provider in turn made this endpoint
     # cost the *sum* of every upstream catalogue fetch, and it's on the path a
     # client's model-picker refresh hits. Providers parallelise internally
@@ -58,7 +59,7 @@ async def list_models(request: Request) -> dict:
             # `kind` to pick the right endpoint (/v1/images/* vs /v1/videos),
             # and `supports_tools` to know whether to send the OpenAI
             # `tools` array on chat completions.
-            row: dict = {
+            row: dict[str, Any] = {
                 "id": f"{provider_id}/{entry.id}",
                 "object": "model",
                 "created": now,

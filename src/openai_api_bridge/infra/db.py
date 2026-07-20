@@ -11,7 +11,7 @@ as a wheel, a Docker image, or a checked-out source tree.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -79,7 +79,7 @@ class Database:
             return list(await cur.fetchall())
 
     @asynccontextmanager
-    async def transaction(self):
+    async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
         """Group multiple statements into a single commit. Rolls back on error."""
         try:
             yield self.conn

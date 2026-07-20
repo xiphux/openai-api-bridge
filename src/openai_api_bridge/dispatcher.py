@@ -23,6 +23,7 @@ from .config import (
     ImageRouterProviderConfig,
     OpenAIPassthroughProviderConfig,
     OpenRouterProviderConfig,
+    ProviderConfig,
     ProvidersFile,
     VeniceProviderConfig,
 )
@@ -31,7 +32,7 @@ from .errors import ProviderNotFound
 log = logging.getLogger(__name__)
 
 
-def _build_backend(cfg) -> Backend:
+def _build_backend(cfg: ProviderConfig) -> Backend:
     if isinstance(cfg, ComfyUIProviderConfig):
         return ComfyUIBackend(cfg)
     if isinstance(cfg, VeniceProviderConfig):

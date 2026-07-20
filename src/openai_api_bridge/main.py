@@ -10,9 +10,10 @@ The lifespan context manages the bridge's resource graph in well-defined order:
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -47,7 +48,7 @@ def _configure_logging(level: str) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: BridgeSettings = get_settings()
     _configure_logging(settings.log_level)
     log.info("Starting openai-api-bridge")
@@ -107,7 +108,7 @@ async def lifespan(app: FastAPI):
         log.info("Shutdown complete")
 
 
-def _validation_handler(_request, exc: RequestValidationError) -> JSONResponse:
+def _validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
     """Map FastAPI's pydantic validation errors to the OpenAI error envelope."""
     # Surface the first error concisely; fuller details would leak schema internals.
     errs = exc.errors()
@@ -131,7 +132,7 @@ def _validation_handler(_request, exc: RequestValidationError) -> JSONResponse:
     )
 
 
-def _unhandled_handler(_request, exc: Exception) -> JSONResponse:
+def _unhandled_handler(_request: Request, exc: Exception) -> JSONResponse:
     log.exception("Unhandled exception", exc_info=exc)
     return JSONResponse(
         status_code=500,

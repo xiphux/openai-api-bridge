@@ -24,6 +24,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import aiosqlite
+
 from .db import Database
 
 log = logging.getLogger(__name__)
@@ -92,7 +94,7 @@ class FileStore:
         return self.files_dir / storage_path
 
     @staticmethod
-    def _row_to_metadata(row) -> FileMetadata:
+    def _row_to_metadata(row: aiosqlite.Row) -> FileMetadata:
         return FileMetadata(
             id=row["id"],
             storage_path=row["storage_path"],

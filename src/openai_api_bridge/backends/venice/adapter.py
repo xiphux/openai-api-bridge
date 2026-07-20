@@ -19,7 +19,14 @@ from ...config import VeniceProviderConfig
 from ...errors import InvalidRequest, UnsupportedOperation
 from ...util.cache import AsyncTTLCache
 from ...util.sizes import parse_size
-from ..base import Backend, GeneratedAsset, InputImage, ModelEntry, make_capabilities
+from ..base import (
+    Backend,
+    GeneratedAsset,
+    InputImage,
+    ModelEntry,
+    UpstreamIdCallback,
+    make_capabilities,
+)
 from .client import VeniceClient
 
 log = logging.getLogger(__name__)
@@ -258,7 +265,7 @@ class VeniceBackend(Backend):
         seconds: float | None = None,
         input_reference: bytes | None = None,
         input_reference_content_type: str | None = None,
-        on_upstream_id=None,
+        on_upstream_id: UpstreamIdCallback | None = None,
     ) -> GeneratedAsset:
         raise UnsupportedOperation(
             "Venice does not support video generation. "
