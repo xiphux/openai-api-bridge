@@ -8,7 +8,13 @@ from typing import Any, NoReturn
 
 import httpx
 
-from ..errors import InvalidRequest, UnsupportedOperation, UpstreamAuthError, UpstreamError
+from ..errors import (
+    InvalidRequest,
+    RateLimited,
+    UnsupportedOperation,
+    UpstreamAuthError,
+    UpstreamError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +37,13 @@ def raise_for_upstream_status(*, status: int, body: str, provider: str, endpoint
     """
     if status in (401, 403):
         # UpstreamAuthError, not a generic UpstreamError: provider tokens are
-        # read from the environment at startup, so a rejected credential
-        # cannot start working again without a restart. Callers that retry or
-        # re-attempt on a cooldown are meant to treat this as permanent and
-        # stop. Until this lived here, only the fal adapter raised it, so a
-        # bad key on any other provider was retried like a transient blip.
+        # read from the environment at startup, so a rejected credential is
+        # unlikely to fix itself, and callers back off harder on this type
+        # than on a transient blip. Until this lived here, only the fal
+        # adapter raised it, so a bad key on any other provider was retried
+        # as if it were a hiccup. Note 403 lands here too and isn't always
+        # about the credential, which is why the backoff is a long window
+        # rather than a permanent latch — see AsyncTTLCache._cooldown_for.
         #
         # Deliberately without the body. This is the upstream's complaint
         # about the credential *we* sent, and it goes straight to a client
@@ -47,6 +55,11 @@ def raise_for_upstream_status(*, status: int, body: str, provider: str, endpoint
         raise InvalidRequest(f"{provider} {endpoint} returned 404 — model not found upstream")
     if status == 405:
         raise UnsupportedOperation(f"{provider} does not implement {endpoint}")
+    if status == 429:
+        # The one retriable 4xx. Sweeping it into the catch-all below would
+        # report a rate limit as a malformed request, telling OpenAI-shaped
+        # clients not to retry precisely when they should.
+        raise RateLimited(f"{provider} {endpoint} rate-limited the bridge: {body}")
     if 400 <= status < 500:
         raise InvalidRequest(f"{provider} {endpoint} returned {status}: {body}")
     raise UpstreamError(f"{provider} {endpoint} returned {status}: {body}")

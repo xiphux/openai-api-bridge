@@ -88,6 +88,22 @@ class JobNotReady(BridgeError):
     code = "job_not_ready"
 
 
+class RateLimited(BridgeError):
+    """The upstream rate-limited us (429).
+
+    Kept apart from the generic 4xx handling because it is the one client
+    error that *is* retriable, and OpenAI-shaped clients act on that: the
+    SDKs retry ``rate_limit_error`` with backoff and give up immediately on
+    ``invalid_request_error``. Folding 429 into the latter would tell a
+    client its request was malformed and shouldn't be retried, which is the
+    opposite of what a rate limit means.
+    """
+
+    status_code = 429
+    error_type = "rate_limit_error"
+    code = "rate_limit_exceeded"
+
+
 # 5xx — upstream / infra errors
 
 

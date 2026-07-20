@@ -13,6 +13,7 @@ import pytest
 
 from openai_api_bridge.errors import (
     InvalidRequest,
+    RateLimited,
     UnsupportedOperation,
     UpstreamAuthError,
     UpstreamError,
@@ -33,7 +34,7 @@ def _raise(status: int, body: str = "upstream said no"):
         (404, InvalidRequest, 400),
         (405, UnsupportedOperation, 400),
         (422, InvalidRequest, 400),
-        (429, InvalidRequest, 400),
+        (429, RateLimited, 429),
         (500, UpstreamError, 502),
         (503, UpstreamError, 502),
     ],
@@ -46,7 +47,7 @@ def test_status_maps_to_expected_error(
     assert exc.value.status_code == http_status  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("status", [400, 422, 429])
+@pytest.mark.parametrize("status", [400, 422])
 def test_client_errors_do_not_become_5xx(status: int) -> None:
     """A rejection the client caused must not look retriable.
 
@@ -257,3 +258,18 @@ async def test_asset_fetch_without_a_cap_allows_large_payloads() -> None:
         )
     assert len(data) == 5000
     assert content_type == "video/mp4"
+
+
+def test_rate_limit_is_retriable_not_a_client_mistake() -> None:
+    """429 is the one retriable 4xx; OpenAI SDKs branch on this.
+
+    Sweeping it into the generic 4xx handling reported a rate limit as
+    invalid_request_error, telling clients not to retry precisely when
+    backing off and retrying is the correct response.
+    """
+    with pytest.raises(RateLimited) as exc:
+        _raise(429, body="slow down")
+
+    assert exc.value.status_code == 429
+    assert exc.value.error_type == "rate_limit_error"
+    assert not isinstance(exc.value, InvalidRequest)
