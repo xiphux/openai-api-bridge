@@ -17,6 +17,7 @@ from openai_api_bridge.errors import (
     UpstreamAuthError,
     UpstreamError,
 )
+from openai_api_bridge.util import cache as cache_module
 from openai_api_bridge.util.cache import AsyncTTLCache
 from openai_api_bridge.util.http import raise_for_upstream_status
 
@@ -79,12 +80,12 @@ def test_non_auth_errors_do_surface_the_body(status: int) -> None:
 
 
 @pytest.mark.parametrize("status", [401, 403])
-def test_auth_failures_are_marked_permanent(status: int) -> None:
-    """Every adapter, not just fal, must report a rejected key as permanent.
+def test_auth_failures_get_their_own_error_type(status: int) -> None:
+    """Every adapter, not just fal, must distinguish a rejected key.
 
     Provider tokens are read from the environment at startup, so a rejected
-    credential cannot start working again without a restart. Callers that
-    retry or re-attempt on a cooldown are meant to stop on this type.
+    credential is unlikely to fix itself; callers back off harder on this
+    type than on a generic upstream blip.
     """
     with pytest.raises(UpstreamAuthError) as exc:
         _raise(status)
@@ -94,14 +95,14 @@ def test_auth_failures_are_marked_permanent(status: int) -> None:
 
 
 @pytest.mark.parametrize("status", [400, 404, 429, 500])
-def test_non_auth_failures_are_not_marked_permanent(status: int) -> None:
+def test_non_auth_failures_do_not_get_the_auth_type(status: int) -> None:
     with pytest.raises(Exception) as exc:
         _raise(status)
     assert not isinstance(exc.value, UpstreamAuthError)
 
 
-async def test_cache_remembers_a_rejected_credential_past_its_cooldown() -> None:
-    """A bad key must not be re-asked once the failure cooldown lapses."""
+async def test_cache_backs_off_harder_on_a_rejected_credential() -> None:
+    """A bad key gets a longer window than an ordinary blip — but not forever."""
     cache: AsyncTTLCache[str] = AsyncTTLCache(ttl_seconds=60.0, failure_cooldown_seconds=0.01)
     calls = 0
 
@@ -114,11 +115,58 @@ async def test_cache_remembers_a_rejected_credential_past_its_cooldown() -> None
         await cache.get(fetch)
     assert calls == 1
 
-    await asyncio.sleep(0.05)  # well past the cooldown
+    await asyncio.sleep(0.05)  # past the ordinary cooldown, inside the auth one
 
     with pytest.raises(UpstreamAuthError):
         await cache.get(fetch)
-    assert calls == 1, "a permanently-bad key was re-attempted after the cooldown"
+    assert calls == 1, "auth failure should still be remembered here"
+
+
+async def test_a_rejected_credential_is_not_latched_forever(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider must recover on its own, as README 'catalogue caching' promises.
+
+    403 is routinely not about our credential at all — a WAF interstitial, a
+    geo block, an org quota. Latching on one of those would drop the provider
+    from /v1/models for the life of the process, silently, since the models
+    endpoint omits failing providers rather than erroring.
+    """
+    monkeypatch.setattr(cache_module, "AUTH_FAILURE_COOLDOWN_SECONDS", 0.02)
+    cache: AsyncTTLCache[str] = AsyncTTLCache(ttl_seconds=60.0, failure_cooldown_seconds=0.01)
+    calls = 0
+
+    async def fetch() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise UpstreamAuthError("provider returned 403 behind a WAF")
+        return "recovered"
+
+    with pytest.raises(UpstreamAuthError):
+        await cache.get(fetch)
+
+    await asyncio.sleep(0.05)  # past the auth cooldown too
+
+    assert await cache.get(fetch) == "recovered"
+    assert calls == 2
+
+
+async def test_zero_cooldown_disables_failure_memory_even_for_auth() -> None:
+    """catalog_retry_seconds = 0 is documented as "retries immediately"."""
+    cache: AsyncTTLCache[str] = AsyncTTLCache(ttl_seconds=60.0, failure_cooldown_seconds=0.0)
+    calls = 0
+
+    async def fetch() -> str:
+        nonlocal calls
+        calls += 1
+        raise UpstreamAuthError("provider rejected our credentials (401)")
+
+    for _ in range(3):
+        with pytest.raises(UpstreamAuthError):
+            await cache.get(fetch)
+
+    assert calls == 3, "an explicit no-cache setting must not be overridden"
 
 
 async def test_cache_does_retry_a_transient_failure_after_its_cooldown() -> None:

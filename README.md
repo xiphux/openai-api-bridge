@@ -65,6 +65,14 @@ that window, so an upstream hang costs one timeout rather than one per caller.
 It's remembered, not latched — once the window closes the provider is retried
 and recovers on its own.
 
+A fetch rejected for **credentials** (upstream 401/403) is held for at least
+300s instead, since provider tokens are read from the environment at startup
+and a genuinely bad key won't fix itself before a restart. It's still a longer
+window rather than a permanent one: 403 is often not about the credential at
+all (a WAF interstitial, a geo block, an org quota), so the provider still
+recovers on its own. Setting `catalog_retry_seconds = 0` disables failure
+caching entirely, credentials included.
+
 Venice can also return a **partial** listing, its `type=inpaint` half failing
 while text-to-image succeeds. That's served rather than dropped, but held for
 `catalog_retry_seconds` instead of the full TTL so the missing half is

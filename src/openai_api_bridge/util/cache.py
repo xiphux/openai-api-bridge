@@ -36,6 +36,12 @@ from collections.abc import Awaitable, Callable
 
 from ..errors import UpstreamAuthError
 
+# How long a rejected credential is remembered, when that's longer than the
+# provider's configured failure cooldown. Long enough that a genuinely bad key
+# stops generating traffic; short enough that a 403 which wasn't really about
+# our credential heals without a restart.
+AUTH_FAILURE_COOLDOWN_SECONDS = 300.0
+
 
 class AsyncTTLCache[T]:
     def __init__(self, ttl_seconds: float, failure_cooldown_seconds: float = 0.0) -> None:
@@ -84,24 +90,40 @@ class AsyncTTLCache[T]:
         self._failure = error
         self._failed_at = time.monotonic()
 
-    def pending_failure(self) -> BaseException | None:
-        """The remembered error while its cooldown is open, else ``None``.
+    def _cooldown_for(self, error: BaseException) -> float:
+        """How long this particular failure is worth remembering.
 
-        A rejected credential is remembered permanently rather than for the
-        cooldown. Provider tokens are read from the environment at startup, so
-        an ``UpstreamAuthError`` cannot start working again without a restart —
-        expiring it just means re-asking an upstream the same question forever,
-        which is exactly what the error type exists to prevent. This overrides
-        the cooldown setting because permanence is a property of the error, not
-        a caching policy.
+        A rejected credential gets a longer window than an ordinary blip:
+        provider tokens are read from the environment at startup, so a genuine
+        ``UpstreamAuthError`` won't start working again without a restart, and
+        re-asking every 30s is pure noise against a key that cannot change.
+
+        It is a longer window and not a permanent latch, deliberately. The
+        error is only as reliable as the status that produced it, and 403 in
+        particular is routinely *not* about our credential — a WAF or
+        Cloudflare interstitial, a geo/IP block, an org-level quota. Latching
+        on one of those would remove the provider from ``/v1/models`` for the
+        life of the process, and because the models endpoint drops failing
+        providers silently, it would vanish with no client-visible error. The
+        asymmetry is stark: recovering costs one extra fetch per window, while
+        latching wrongly costs a restart to notice. README.md ("Model
+        catalogue caching") promises the provider "recovers on its own", and
+        that stays true.
         """
+        if isinstance(error, UpstreamAuthError):
+            return max(self.failure_cooldown_seconds, AUTH_FAILURE_COOLDOWN_SECONDS)
+        return self.failure_cooldown_seconds
+
+    def pending_failure(self) -> BaseException | None:
+        """The remembered error while its cooldown is open, else ``None``."""
         if self._failure is None or self._failed_at is None:
             return None
-        if isinstance(self._failure, UpstreamAuthError):
-            return self._failure
+        # A cooldown of zero disables failure memory outright, as documented
+        # for catalog_retry_seconds ("0 retries immediately"). An auth failure
+        # doesn't get to override an operator's explicit "don't cache".
         if self.failure_cooldown_seconds <= 0:
             return None
-        if time.monotonic() - self._failed_at >= self.failure_cooldown_seconds:
+        if time.monotonic() - self._failed_at >= self._cooldown_for(self._failure):
             return None
         return self._failure
 
