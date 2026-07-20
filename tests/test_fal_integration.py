@@ -293,19 +293,25 @@ def test_upstream_error_surfaces(client_with_fal: TestClient) -> None:
 
 
 @pytest.mark.parametrize(
-    ("upstream", "expected", "expected_type"),
+    ("upstream", "expected", "expected_type", "expected_code"),
     [
-        (400, 400, "invalid_request_error"),
-        (402, 400, "invalid_request_error"),
-        (404, 400, "invalid_request_error"),
-        (405, 400, "invalid_request_error"),
-        (409, 400, "invalid_request_error"),
-        (422, 400, "invalid_request_error"),
+        (400, 400, "invalid_request_error", "invalid_request"),
+        (402, 400, "invalid_request_error", "invalid_request"),
+        (404, 400, "invalid_request_error", "invalid_request"),
+        # 405 maps to its own code; collapsing it into the generic client
+        # error would otherwise pass unnoticed.
+        (405, 400, "invalid_request_error", "unsupported_operation"),
+        (409, 400, "invalid_request_error", "invalid_request"),
+        (422, 400, "invalid_request_error", "invalid_request"),
     ],
 )
 @respx.mock
 def test_upstream_4xx_reaches_the_client_as_a_client_error(
-    client_with_fal: TestClient, upstream: int, expected: int, expected_type: str
+    client_with_fal: TestClient,
+    upstream: int,
+    expected: int,
+    expected_type: str,
+    expected_code: str,
 ) -> None:
     """Every status that drifted, pinned at the boundary.
 
@@ -321,6 +327,7 @@ def test_upstream_4xx_reaches_the_client_as_a_client_error(
 
     assert r.status_code == expected
     assert r.json()["error"]["type"] == expected_type
+    assert r.json()["error"]["code"] == expected_code
 
 
 @respx.mock

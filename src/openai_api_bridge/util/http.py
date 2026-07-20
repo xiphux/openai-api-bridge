@@ -93,9 +93,10 @@ def _is_retriable_fetch_status(status: int) -> bool:
     * 429 — throttled, which is by definition worth waiting out. Notably the
       one that a "don't retry 4xx" rule sweeps up by mistake, and the costliest
       to lose: fal fetches a video *after* the render completes and is billed.
-    * 5xx — a transient CDN or origin fault.
+    * 5xx — a transient CDN or origin fault, except 501, which says the origin
+      does not implement the request at all and will keep saying so.
     """
-    return status in (401, 404, 408, 425, 429) or status >= 500
+    return status in (401, 404, 408, 425, 429) or (status >= 500 and status != 501)
 
 
 async def fetch_asset_with_retry(
@@ -158,10 +159,19 @@ async def fetch_asset_with_retry(
             # 410, …) or the last attempt for one that could. Retrying
             # regardless, as this once did, spent three upstream calls and two
             # backoff sleeps to confirm a guaranteed failure.
-            raise UpstreamError(
-                f"{provider_label} asset fetch returned {e.response.status_code} for {url} "
+            status = e.response.status_code
+            message = (
+                f"{provider_label} asset fetch returned {status} for {url} "
                 f"after {attempt + 1} attempt(s)"
-            ) from e
+            )
+            # Keep the type: a throttled fetch that outlasts our attempts is
+            # still a rate limit, and callers branch on that — fal's
+            # _fetch_asset skips its "did the asset expire?" hint for it,
+            # which would otherwise be appended to a message plainly saying
+            # 429. Untyped, that guard could never fire.
+            if status == 429:
+                raise RateLimited(message) from e
+            raise UpstreamError(message) from e
         except httpx.HTTPError as e:
             last_error = e
             if attempt < max_attempts - 1:

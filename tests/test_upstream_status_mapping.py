@@ -313,6 +313,7 @@ def test_rate_limited_is_transient_for_adapter_retry_loops() -> None:
         (500, 3),
         (502, 3),
         (503, 3),
+        (504, 3),
         # Hopeless: re-requesting cannot change the answer.
         (400, 1),
         (402, 1),
@@ -321,6 +322,7 @@ def test_rate_limited_is_transient_for_adapter_retry_loops() -> None:
         (409, 1),
         (410, 1),
         (422, 1),
+        (501, 1),  # the origin doesn't implement it and won't start
     ],
 )
 async def test_asset_fetch_retries_exactly_the_recoverable_statuses(
@@ -428,3 +430,55 @@ async def test_asset_fetch_still_retries_5xx() -> None:
 
     assert data == b"ok"
     assert route.call_count == 2
+
+
+async def test_throttled_asset_fetch_keeps_its_type_after_exhausting_retries() -> None:
+    """A 429 that outlasts our attempts is still a rate limit, not a generic fault.
+
+    fal's _fetch_asset branches on this to skip its "did the asset expire?"
+    hint. Untyped, that guard could never fire, and a message plainly saying
+    429 got expiry advice appended — the exact misattribution the guard
+    exists to prevent.
+    """
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/throttled.png").mock(
+            return_value=httpx.Response(429, text="slow down")
+        )
+        with pytest.raises(RateLimited):
+            await fetch_asset_with_retry(
+                "https://cdn.example/throttled.png", provider_label="Test", base_delay=0.001
+            )
+
+
+async def test_fal_does_not_blame_expiry_for_a_throttled_fetch() -> None:
+    """The guard at fal's _fetch_asset is live now, not decorative."""
+    import os
+
+    import respx
+
+    from openai_api_bridge.backends.fal.adapter import FalBackend
+    from openai_api_bridge.config import FalProviderConfig
+
+    os.environ["FAL_KEY_FOR_TEST"] = "k"
+    cfg = FalProviderConfig(
+        backend="fal",
+        id="f",
+        api_token_env="FAL_KEY_FOR_TEST",
+        output_expiration_seconds=60,
+    )
+    backend = FalBackend(cfg)
+    try:
+        async with respx.mock(assert_all_called=False) as mock:
+            mock.get("https://cdn.example/throttled.png").mock(
+                return_value=httpx.Response(429, text="slow down")
+            )
+            with pytest.raises(RateLimited) as exc:
+                await backend._fetch_asset("https://cdn.example/throttled.png")
+    finally:
+        await backend.aclose()
+
+    assert "output_expiration_seconds" not in exc.value.message

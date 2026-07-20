@@ -383,3 +383,44 @@ async def test_cancelling_a_single_run_recalls_its_prompt(workflows_dir: Path) -
         await task
 
     assert "discard:p1" in recorder.calls
+
+
+async def test_discard_is_bounded_when_comfyui_hangs(workflows_dir: Path) -> None:
+    """A cancel must not wait on an unresponsive ComfyUI.
+
+    The recall runs while unwinding, and DELETE /v1/videos/{id} doesn't
+    return until it finishes.
+    """
+    backend, recorder = _backend(workflows_dir)
+
+    async def hanging_delete(prompt_ids: list[str]) -> None:
+        await asyncio.sleep(30.0)
+
+    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+        raise UpstreamError("ComfyUI dropped the prompt")
+
+    recorder.delete_queued = hanging_delete  # type: ignore[assignment]
+    recorder.poll_completion = poll  # type: ignore[assignment]
+
+    monkeypatched = 0.05
+    from openai_api_bridge.backends.comfyui import adapter as adapter_module
+
+    original = adapter_module._QUEUE_DISCARD_TIMEOUT_S
+    adapter_module._QUEUE_DISCARD_TIMEOUT_S = monkeypatched
+    try:
+        start = time.perf_counter()
+        with pytest.raises(UpstreamError):
+            await backend.generate_image(model_slug="wf", prompt="a cat", n=1)
+        elapsed = time.perf_counter() - start
+    finally:
+        adapter_module._QUEUE_DISCARD_TIMEOUT_S = original
+
+    assert elapsed < 1.0, f"a hanging discard blocked the caller for {elapsed:.2f}s"
+
+
+def test_discard_timeout_stays_short() -> None:
+    """Pins the value, not just the mechanism — a silent revert to 10s is the
+    regression this guards, and it's invisible in behaviour tests."""
+    from openai_api_bridge.backends.comfyui import adapter as adapter_module
+
+    assert adapter_module._QUEUE_DISCARD_TIMEOUT_S <= 2.0
