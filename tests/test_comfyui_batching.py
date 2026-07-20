@@ -1,8 +1,13 @@
-"""ComfyUI ``n>1`` queues every run before waiting on any of them.
+"""ComfyUI batching and workflow-discovery caching.
 
-Running them end-to-end one at a time meant the caller waited for the sum
-of n full generations inside a single synchronous request, and gave up the
-pipelining ComfyUI's queue exists to provide.
+Two properties that only show up under repetition:
+
+* ``n>1`` queues every run before waiting on any of them. Running them
+  end-to-end one at a time meant the caller waited for the sum of n full
+  generations inside a single synchronous request, and gave up the
+  pipelining ComfyUI's queue exists to provide.
+* ``cache_workflows = false`` re-reads the directory only when it has
+  actually changed, rather than reparsing every meta file per request.
 """
 
 from __future__ import annotations
@@ -128,3 +133,69 @@ async def test_single_run_still_works(workflows_dir: Path) -> None:
 
     assert len(assets) == 1
     assert recorder.calls == ["submit:p1", "poll:p1"]
+
+
+async def test_workflows_are_not_rescanned_when_nothing_changed(
+    workflows_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cache_workflows=false rescanned on every request; now it stats instead."""
+    from openai_api_bridge.backends.comfyui import adapter as adapter_module
+
+    scans = 0
+    real_scan = adapter_module.scan_workflows
+
+    def counting_scan(d: Path):
+        nonlocal scans
+        scans += 1
+        return real_scan(d)
+
+    monkeypatch.setattr(adapter_module, "scan_workflows", counting_scan)
+
+    cfg = ComfyUIProviderConfig(
+        backend="comfyui", id="c", workflows_dir=workflows_dir, cache_workflows=False
+    )
+    backend = ComfyUIBackend(cfg)
+    backend.client = _RecordingClient()  # type: ignore[assignment]
+
+    await backend.list_models()
+    await backend.list_models()
+    await backend.list_models()
+
+    assert scans == 1, f"directory was rescanned {scans} times with no changes"
+
+
+async def test_workflows_are_rescanned_when_a_meta_file_changes(
+    workflows_dir: Path,
+) -> None:
+    """The point of cache_workflows=false is picking up edits without a restart."""
+    cfg = ComfyUIProviderConfig(
+        backend="comfyui", id="c", workflows_dir=workflows_dir, cache_workflows=False
+    )
+    backend = ComfyUIBackend(cfg)
+    backend.client = _RecordingClient()  # type: ignore[assignment]
+
+    before = await backend.list_models()
+    assert [m.display_name for m in before] == ["wf"]
+
+    (workflows_dir / "wf.meta.json").write_text(
+        json.dumps({"positive_prompt_node": "3", "output_type": "image", "display_name": "Renamed"})
+    )
+
+    after = await backend.list_models()
+    assert [m.display_name for m in after] == ["Renamed"]
+
+
+async def test_cache_workflows_true_does_not_rescan(workflows_dir: Path) -> None:
+    cfg = ComfyUIProviderConfig(
+        backend="comfyui", id="c", workflows_dir=workflows_dir, cache_workflows=True
+    )
+    backend = ComfyUIBackend(cfg)
+    backend.client = _RecordingClient()  # type: ignore[assignment]
+
+    await backend.list_models()
+    (workflows_dir / "wf.meta.json").write_text(
+        json.dumps({"positive_prompt_node": "3", "output_type": "image", "display_name": "Renamed"})
+    )
+    after = await backend.list_models()
+
+    assert [m.display_name for m in after] == ["wf"]

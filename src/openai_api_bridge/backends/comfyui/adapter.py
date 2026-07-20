@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+from pathlib import Path
 
 from ...config import ComfyUIProviderConfig
 from ...errors import ImageRequired, ModelNotFound, UnsupportedOperation
@@ -28,6 +29,36 @@ from .workflows import (
 log = logging.getLogger(__name__)
 
 
+def _dir_stamp(workflows_dir: Path) -> tuple[tuple[str, int, int], ...]:
+    """A stat-only fingerprint of the workflow directory.
+
+    Cheap enough to check per request, unlike a full scan: stat each JSON
+    rather than reading and parsing it.
+    """
+    if not workflows_dir.is_dir():
+        return ()
+    entries: list[tuple[str, int, int]] = []
+    for path in sorted(workflows_dir.glob("*.json")):
+        try:
+            st = path.stat()
+        except OSError:  # vanished mid-scan; the next pass will settle it
+            continue
+        entries.append((path.name, st.st_mtime_ns, st.st_size))
+    return tuple(entries)
+
+
+def _scan_with_stamp(
+    workflows_dir: Path,
+) -> tuple[dict[str, WorkflowRecord], tuple[tuple[str, int, int], ...]]:
+    """Scan the directory and fingerprint it, in one trip off the event loop.
+
+    Stamped before the scan so a write landing mid-scan invalidates the
+    result rather than being missed until the *next* change.
+    """
+    stamp = _dir_stamp(workflows_dir)
+    return scan_workflows(workflows_dir), stamp
+
+
 class ComfyUIBackend(Backend):
     def __init__(self, cfg: ComfyUIProviderConfig) -> None:
         self.cfg = cfg
@@ -36,19 +67,44 @@ class ComfyUIBackend(Backend):
             poll_interval_seconds=cfg.poll_interval_seconds,
         )
         self._workflows: dict[str, WorkflowRecord] | None = None
+        self._stamp: tuple[tuple[str, int, int], ...] | None = None
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     # --- discovery ---------------------------------------------------------
 
-    def _ensure_workflows(self) -> dict[str, WorkflowRecord]:
-        if self._workflows is None or not self.cfg.cache_workflows:
-            self._workflows = scan_workflows(self.cfg.workflows_dir)
-        return self._workflows
+    async def _ensure_workflows(self) -> dict[str, WorkflowRecord]:
+        """The workflow map, rescanned when the directory has actually changed.
 
-    def _record_for(self, model_slug: str) -> WorkflowRecord:
-        records = self._ensure_workflows()
+        With ``cache_workflows = false`` this rescanned on every request —
+        every /v1/models and every generation — and a scan reads and parses
+        each ``.meta.json`` (plus the graph itself for any workflow needing
+        output-type autodetection). With fifty workflows that's ~50-100 file
+        reads and JSON parses per request, synchronously, on the event loop
+        the whole bridge shares.
+
+        A stat-only fingerprint tells us whether anything moved, which is the
+        cheap version of the same guarantee, and the scan itself runs off the
+        loop. Note ``prepare_workflow`` already re-reads the graph from disk
+        per generation, so an edited *workflow* takes effect regardless of
+        this cache; what the rescan buys is picking up edited or added
+        *meta* files.
+        """
+        if self._workflows is not None:
+            if self.cfg.cache_workflows:
+                return self._workflows
+            stamp = await asyncio.to_thread(_dir_stamp, self.cfg.workflows_dir)
+            if stamp == self._stamp:
+                return self._workflows
+
+        records, stamp = await asyncio.to_thread(_scan_with_stamp, self.cfg.workflows_dir)
+        self._workflows = records
+        self._stamp = stamp
+        return records
+
+    async def _record_for(self, model_slug: str) -> WorkflowRecord:
+        records = await self._ensure_workflows()
         record = records.get(model_slug)
         if record is None:
             raise ModelNotFound(
@@ -58,7 +114,7 @@ class ComfyUIBackend(Backend):
         return record
 
     async def list_models(self) -> list[ModelEntry]:
-        records = self._ensure_workflows()
+        records = await self._ensure_workflows()
         return [
             ModelEntry(
                 id=r.slug,
@@ -183,7 +239,7 @@ class ComfyUIBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        record = self._record_for(model_slug)
+        record = await self._record_for(model_slug)
         if record.output_type != "image":
             raise UnsupportedOperation(
                 f"Model {model_slug!r} produces {record.output_type}, not image"
@@ -204,7 +260,7 @@ class ComfyUIBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        record = self._record_for(model_slug)
+        record = await self._record_for(model_slug)
         if record.output_type != "image":
             raise UnsupportedOperation(
                 f"Model {model_slug!r} produces {record.output_type}, not image"
@@ -237,7 +293,7 @@ class ComfyUIBackend(Backend):
         input_reference_content_type: str | None = None,
         on_upstream_id: UpstreamIdCallback | None = None,
     ) -> GeneratedAsset:
-        record = self._record_for(model_slug)
+        record = await self._record_for(model_slug)
         if record.output_type != "video":
             raise UnsupportedOperation(
                 f"Model {model_slug!r} produces {record.output_type}, not video"
