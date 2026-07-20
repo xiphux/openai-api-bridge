@@ -48,7 +48,12 @@ def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
     status = e.response.status_code
     body = e.response.text[:300]
     if status in (401, 403):
-        return UpstreamAuthError(f"fal rejected our credentials ({status}) on {what}: {body}")
+        # Deliberately without the body: this is fal's complaint about the
+        # credential *we* sent, and the message goes straight to a client that
+        # has no business seeing it. Providers have been known to quote the
+        # offending token back. The body is still available at DEBUG.
+        log.debug("fal auth failure on %s: %s", what, body)
+        return UpstreamAuthError(f"fal rejected our credentials ({status}) on {what}")
     return UpstreamError(f"fal {what} returned {status}: {body}")
 
 

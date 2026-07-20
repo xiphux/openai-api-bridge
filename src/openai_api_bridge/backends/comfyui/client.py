@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from ...errors import GenerationTimeout, UpstreamError, WorkflowInvalid
+from ...errors import GenerationTimeout, UpstreamAuthError, UpstreamError, WorkflowInvalid
 from ...util.http import parse_json
 
 log = logging.getLogger(__name__)
@@ -106,6 +106,15 @@ class ComfyUIClient:
             if not prompt_id:
                 raise UpstreamError(f"ComfyUI /prompt response missing prompt_id: {result!r}")
             return str(prompt_id)
+        if response.status_code in (401, 403):
+            # ComfyUI is unauthenticated itself, but it's commonly fronted by a
+            # reverse proxy that isn't. Same rule as every other provider: the
+            # rejection concerns our credential, so the body doesn't go to the
+            # client, and it's permanent rather than a retriable blip.
+            log.debug("ComfyUI auth failure on /prompt: %s", response.text[:300])
+            raise UpstreamAuthError(
+                f"ComfyUI rejected our credentials ({response.status_code}) on /prompt"
+            )
         if 400 <= response.status_code < 500:
             raise WorkflowInvalid(f"ComfyUI returned {response.status_code}: {response.text[:500]}")
         raise UpstreamError(f"ComfyUI returned {response.status_code}: {response.text[:500]}")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 
 from openai_api_bridge.errors import (
@@ -139,3 +140,35 @@ async def test_cache_does_retry_a_transient_failure_after_its_cooldown() -> None
 
     assert await cache.get(fetch) == "recovered"
     assert calls == 2
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_fal_auth_error_does_not_echo_the_upstream_body(status: int) -> None:
+    """fal's own mapper had the same leak the shared one was fixed for."""
+    from openai_api_bridge.backends.fal.client import _status_error
+
+    response = httpx.Response(
+        status,
+        text="invalid credentials for key fal-key-SECRET123",
+        request=httpx.Request("GET", "https://fal.run/x"),
+    )
+    err = _status_error(
+        httpx.HTTPStatusError("boom", request=response.request, response=response), "/x"
+    )
+
+    assert isinstance(err, UpstreamAuthError)
+    assert "fal-key-SECRET123" not in err.message
+
+
+def test_fal_non_auth_error_still_carries_the_body() -> None:
+    from openai_api_bridge.backends.fal.client import _status_error
+
+    response = httpx.Response(
+        500, text="internal explosion", request=httpx.Request("GET", "https://fal.run/x")
+    )
+    err = _status_error(
+        httpx.HTTPStatusError("boom", request=response.request, response=response), "/x"
+    )
+
+    assert not isinstance(err, UpstreamAuthError)
+    assert "internal explosion" in err.message
