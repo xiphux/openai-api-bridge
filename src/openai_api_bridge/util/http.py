@@ -80,6 +80,24 @@ def parse_json(resp: httpx.Response, what: str) -> Any:
         raise UpstreamError(f"{what} returned a non-JSON body ({e}): {resp.text[:200]}") from e
 
 
+def _is_retriable_fetch_status(status: int) -> bool:
+    """Whether re-requesting a generated asset could plausibly succeed.
+
+    Named rather than inlined because getting this set wrong is silent and
+    expensive in both directions: too broad and a hopeless 400 costs three
+    upstream calls and two sleeps, too narrow and a finished, already-billed
+    render is discarded over a momentary throttle.
+
+    * 401/404 — a just-minted asset URL before storage catches up.
+    * 408/425 — the request timed out, or arrived "too early" behind a CDN.
+    * 429 — throttled, which is by definition worth waiting out. Notably the
+      one that a "don't retry 4xx" rule sweeps up by mistake, and the costliest
+      to lose: fal fetches a video *after* the render completes and is billed.
+    * 5xx — a transient CDN or origin fault.
+    """
+    return status in (401, 404, 408, 425, 429) or status >= 500
+
+
 async def fetch_asset_with_retry(
     url: str,
     *,
@@ -99,9 +117,11 @@ async def fetch_asset_with_retry(
       the bridge's upstream ``Authorization`` header is never attached to a CDN
       request, and so httpx's cross-origin header-stripping on redirects can't
       surprise us.
-    * **Transient races.** A just-minted asset URL can briefly 401/404 before
-      storage catches up, and CDNs occasionally 5xx or drop the connection.
-      Retries with exponential backoff smooth these over.
+    * **Transient conditions.** A just-minted asset URL can briefly 401/404
+      before storage catches up, CDNs occasionally 5xx or drop the connection,
+      and a throttled fetch answers 429. Retries with exponential backoff
+      smooth these over; see :func:`_is_retriable_fetch_status` for the set.
+      Statuses that can never succeed are raised on the first response.
 
     ``provider_label`` appears only in log/error text (e.g. "fal", "ImageRouter").
 
@@ -116,10 +136,9 @@ async def fetch_asset_with_retry(
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.get(url, timeout=timeout, follow_redirects=True)
-            # Retry on 401/404 (storage race) or 5xx (transient CDN error).
             if (
                 resp is not None
-                and (resp.status_code in (401, 404) or resp.status_code >= 500)
+                and _is_retriable_fetch_status(resp.status_code)
                 and attempt < max_attempts - 1
             ):
                 delay = base_delay * (2**attempt)
@@ -133,14 +152,15 @@ async def fetch_asset_with_retry(
                 resp.raise_for_status()
             break
         except httpx.HTTPStatusError as e:
-            # No retry here. The statuses worth re-attempting — the 401/404
-            # storage race and 5xx — are handled by the branch above, so
-            # reaching this point means either a status that can never succeed
-            # (400, 403, 410, …) or the last attempt for one that could.
-            # Retrying regardless, as this used to, spent three upstream calls
-            # and two backoff sleeps on a guaranteed failure.
+            # No retry here. Everything worth re-attempting is handled by the
+            # branch above (see _is_retriable_fetch_status), so reaching this
+            # point means either a status that can never succeed (400, 403,
+            # 410, …) or the last attempt for one that could. Retrying
+            # regardless, as this once did, spent three upstream calls and two
+            # backoff sleeps to confirm a guaranteed failure.
             raise UpstreamError(
-                f"{provider_label} asset fetch returned {e.response.status_code} for {url}"
+                f"{provider_label} asset fetch returned {e.response.status_code} for {url} "
+                f"after {attempt + 1} attempt(s)"
             ) from e
         except httpx.HTTPError as e:
             last_error = e

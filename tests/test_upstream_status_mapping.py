@@ -301,6 +301,76 @@ def test_rate_limited_is_transient_for_adapter_retry_loops() -> None:
     assert isinstance(RateLimited("throttled"), UpstreamError)
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_attempts"),
+    [
+        # Worth waiting out.
+        (401, 3),  # storage race on a just-minted URL
+        (404, 3),  # same
+        (408, 3),  # request timeout
+        (425, 3),  # "too early" behind a CDN
+        (429, 3),  # throttled — the expensive one to get wrong
+        (500, 3),
+        (502, 3),
+        (503, 3),
+        # Hopeless: re-requesting cannot change the answer.
+        (400, 1),
+        (402, 1),
+        (403, 1),
+        (405, 1),
+        (409, 1),
+        (410, 1),
+        (422, 1),
+    ],
+)
+async def test_asset_fetch_retries_exactly_the_recoverable_statuses(
+    status: int, expected_attempts: int
+) -> None:
+    """The whole status space, not just the cases that came to mind.
+
+    Getting this set wrong is silent in both directions. Too broad and a
+    hopeless 400 costs three calls and two sleeps; too narrow and a finished,
+    already-billed render is thrown away over a momentary throttle — 429 was
+    swept in with the hopeless statuses exactly that way, and the tests
+    written alongside that change guarded only 404 and 503, so they passed.
+    """
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://cdn.example/a.png").mock(
+            return_value=httpx.Response(status, text="nope")
+        )
+        with pytest.raises(UpstreamError):
+            await fetch_asset_with_retry(
+                "https://cdn.example/a.png", provider_label="Test", base_delay=0.001
+            )
+
+    assert route.call_count == expected_attempts
+
+
+async def test_asset_fetch_reports_how_many_attempts_it_made() -> None:
+    """Logs and errors should distinguish "hopeless once" from "retried out"."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/a.png").mock(return_value=httpx.Response(400, text="no"))
+        with pytest.raises(UpstreamError, match="after 1 attempt"):
+            await fetch_asset_with_retry(
+                "https://cdn.example/a.png", provider_label="Test", base_delay=0.001
+            )
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/b.png").mock(return_value=httpx.Response(503, text="busy"))
+        with pytest.raises(UpstreamError, match="after 3 attempt"):
+            await fetch_asset_with_retry(
+                "https://cdn.example/b.png", provider_label="Test", base_delay=0.001
+            )
+
+
 async def test_asset_fetch_does_not_retry_a_hopeless_status() -> None:
     """400 can never succeed; retrying spent 3 calls and 2 sleeps to learn that."""
     import respx
