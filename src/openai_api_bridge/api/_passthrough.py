@@ -16,8 +16,8 @@ from fastapi import Request
 
 from ..backends.base import Backend
 from ..config import parse_model_id
-from ..dispatcher import BackendDispatcher
 from ..errors import InvalidRequest, UnsupportedOperation
+from ..resources import resources
 
 
 def _overrides(backend: Backend, base_method: Callable[..., Any]) -> bool:
@@ -72,8 +72,7 @@ async def prepare(
         raise InvalidRequest("Missing or invalid 'model' field", param="model")
 
     provider_id, model_slug = parse_model_id(model)
-    dispatcher: BackendDispatcher = request.app.state.dispatcher
-    backend = dispatcher.for_provider(provider_id)
+    backend = resources(request).dispatcher.for_provider(provider_id)
 
     if not _overrides(backend, base_method):
         raise UnsupportedOperation(f"Provider {provider_id!r} does not support {operation}")

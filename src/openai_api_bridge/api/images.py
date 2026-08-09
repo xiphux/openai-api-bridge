@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from ..auth import require_api_key
 from ..backends.base import GeneratedAsset, InputImage
 from ..config import BridgeSettings, parse_model_id
-from ..dispatcher import BackendDispatcher
 from ..errors import InvalidRequest
 from ..infra.filestore import FileStore
+from ..resources import resources
 from ..schemas.openai import MAX_IMAGES_PER_REQUEST, ImagesGenerationRequest
 
 router = APIRouter()
@@ -61,8 +61,8 @@ async def _render_assets(
 @router.post("/v1/images/generations", dependencies=[Depends(require_api_key)])
 async def images_generations(req: ImagesGenerationRequest, request: Request) -> dict[str, Any]:
     provider_id, model_slug = parse_model_id(req.model)
-    dispatcher: BackendDispatcher = request.app.state.dispatcher
-    backend = dispatcher.for_provider(provider_id)
+    res = resources(request)
+    backend = res.dispatcher.for_provider(provider_id)
 
     assets = await backend.generate_image(
         model_slug=model_slug,
@@ -71,13 +71,11 @@ async def images_generations(req: ImagesGenerationRequest, request: Request) -> 
         n=req.n,
     )
 
-    settings: BridgeSettings = request.app.state.settings
-    filestore: FileStore = request.app.state.filestore
     data = await _render_assets(
         assets,
         response_format=req.response_format,
-        filestore=filestore,
-        settings=settings,
+        filestore=res.filestore,
+        settings=res.settings,
         provider_id=provider_id,
         model_slug=model_slug,
         prompt=req.prompt,
@@ -135,8 +133,8 @@ async def images_edits(
         images.append(InputImage(data=raw, content_type=upload.content_type or "image/png"))
 
     provider_id, model_slug = parse_model_id(model)
-    dispatcher: BackendDispatcher = request.app.state.dispatcher
-    backend = dispatcher.for_provider(provider_id)
+    res = resources(request)
+    backend = res.dispatcher.for_provider(provider_id)
 
     assets = await backend.edit_image(
         model_slug=model_slug,
@@ -146,13 +144,11 @@ async def images_edits(
         n=n,
     )
 
-    settings: BridgeSettings = request.app.state.settings
-    filestore: FileStore = request.app.state.filestore
     data = await _render_assets(
         assets,
         response_format=response_format,
-        filestore=filestore,
-        settings=settings,
+        filestore=res.filestore,
+        settings=res.settings,
         provider_id=provider_id,
         model_slug=model_slug,
         prompt=prompt,

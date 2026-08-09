@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Header, Request, Response
 
 from ..auth import require_api_key
 from ..errors import JobNotFound
-from ..infra.filestore import FileStore
+from ..resources import resources
 from ._assets import asset_response
 
 router = APIRouter()
@@ -26,7 +26,7 @@ async def get_file_content(
     request: Request,
     if_none_match: Annotated[str | None, Header()] = None,
 ) -> Response:
-    filestore: FileStore = request.app.state.filestore
+    filestore = resources(request).filestore
     opened = await filestore.open_for_read(file_id)
     if opened is None:
         raise JobNotFound(f"File {file_id!r} not found")

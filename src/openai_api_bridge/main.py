@@ -38,6 +38,8 @@ from .infra.eviction import EvictionLoop
 from .infra.filestore import FileStore
 from .infra.jobstore import JobStore
 from .infra.tasks import TaskScheduler
+from .resources import BridgeResources
+from .resources import install as install_resources
 from .util.http import aclose_asset_client
 
 log = logging.getLogger(__name__)
@@ -82,14 +84,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     eviction.start()
 
-    app.state.settings = settings
-    app.state.providers = providers
-    app.state.db = db
-    app.state.filestore = filestore
-    app.state.jobstore = jobstore
-    app.state.dispatcher = dispatcher
-    app.state.scheduler = scheduler
-    app.state.eviction = eviction
+    install_resources(
+        app,
+        BridgeResources(
+            settings=settings,
+            providers=providers,
+            db=db,
+            filestore=filestore,
+            jobstore=jobstore,
+            dispatcher=dispatcher,
+            scheduler=scheduler,
+            eviction=eviction,
+        ),
+    )
 
     log.info(
         "Ready on %s:%d  files=%s  cache=%dGB  retention=%dd",

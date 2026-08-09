@@ -63,7 +63,9 @@ adapter (`backends/<name>/`) → upstream HTTP.
 - **Lifespan resource graph (`main.py`)** builds and tears down in a fixed order
   (settings → providers → db → migrations → stores → dispatcher → scheduler →
   eviction). Single uvicorn worker only — SQLite + in-memory job state don't
-  survive forking.
+  survive forking. The built graph is installed as one frozen `BridgeResources`
+  (`resources.py`) and routes reach it via `resources(request)` — don't read
+  `request.app.state` directly, that's an untyped cast the checker can't verify.
 
 ### Video jobs (the one async/stateful path)
 

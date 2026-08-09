@@ -19,6 +19,7 @@ import pytest
 from openai_api_bridge.api.models import _entries_for, list_models
 from openai_api_bridge.backends.base import Backend, ModelEntry
 from openai_api_bridge.errors import UpstreamError
+from openai_api_bridge.resources import install
 
 
 class _BarrierBackend(Backend):
@@ -46,11 +47,23 @@ class _FailingBackend(Backend):
 
 
 def _request_with(providers: list[tuple[str, Backend]], *, budget: float = 5.0) -> Any:
-    dispatcher = SimpleNamespace(all_providers=lambda: providers)
-    settings = SimpleNamespace(models_timeout_seconds=budget)
-    return SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(dispatcher=dispatcher, settings=settings))
+    """A stand-in Request carrying just the resources this endpoint reads.
+
+    Installed through ``resources.install`` rather than by setting the
+    attribute directly, so the test doesn't hardcode where the resource graph
+    lives — that's the module's business, and it moved once already.
+
+    A stub rather than a real ``BridgeResources``: the endpoint reads two of
+    its eight fields, and building a database and a scheduler to test
+    fan-out ordering would be noise.
+    """
+    stub = SimpleNamespace(
+        dispatcher=SimpleNamespace(all_providers=lambda: providers),
+        settings=SimpleNamespace(models_timeout_seconds=budget),
     )
+    app = SimpleNamespace(state=SimpleNamespace())
+    install(app, stub)
+    return SimpleNamespace(app=app)
 
 
 async def test_providers_are_queried_concurrently() -> None:

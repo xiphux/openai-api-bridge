@@ -10,16 +10,14 @@ from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, U
 
 from ..auth import require_api_key
 from ..config import parse_model_id
-from ..dispatcher import BackendDispatcher
 from ..errors import (
     InvalidRequest,
     JobNotFound,
     JobNotReady,
     UpstreamError,
 )
-from ..infra.filestore import FileStore
-from ..infra.jobstore import JobStore, VideoJob
-from ..infra.tasks import TaskScheduler
+from ..infra.jobstore import VideoJob
+from ..resources import resources
 from ._assets import asset_response
 from ._videos_runner import run_video_job
 
@@ -61,10 +59,10 @@ async def videos_create(
     ] = None,
 ) -> dict[str, Any]:
     provider_id, model_slug = parse_model_id(model)
-    dispatcher: BackendDispatcher = request.app.state.dispatcher
+    res = resources(request)
     # Eagerly fail with 404 if the provider is unknown — friendlier than
     # accepting the job and immediately failing inside the runner.
-    dispatcher.for_provider(provider_id)
+    res.dispatcher.for_provider(provider_id)
 
     if seconds is not None and seconds <= 0:
         raise InvalidRequest("seconds must be positive", param="seconds")
@@ -78,8 +76,7 @@ async def videos_create(
         input_ref_ct = input_reference.content_type or "image/png"
 
     job_id = secrets.token_hex(16)
-    jobstore: JobStore = request.app.state.jobstore
-    job = await jobstore.create(
+    job = await res.jobstore.create(
         job_id=job_id,
         model=model,
         prompt=prompt,
@@ -87,10 +84,7 @@ async def videos_create(
         seconds=seconds,
     )
 
-    scheduler: TaskScheduler = request.app.state.scheduler
-    filestore: FileStore = request.app.state.filestore
-
-    scheduler.submit(
+    res.scheduler.submit(
         run_video_job(
             job_id=job_id,
             provider_id=provider_id,
@@ -100,9 +94,9 @@ async def videos_create(
             seconds=seconds,
             input_reference=input_ref_bytes,
             input_reference_content_type=input_ref_ct,
-            dispatcher=dispatcher,
-            jobstore=jobstore,
-            filestore=filestore,
+            dispatcher=res.dispatcher,
+            jobstore=res.jobstore,
+            filestore=res.filestore,
         ),
         name=f"video-job-{job_id}",
     )
@@ -112,8 +106,7 @@ async def videos_create(
 
 @router.get("/v1/videos/{video_id}", dependencies=[Depends(require_api_key)])
 async def videos_get(video_id: str, request: Request) -> dict[str, Any]:
-    jobstore: JobStore = request.app.state.jobstore
-    job = await jobstore.get(video_id)
+    job = await resources(request).jobstore.get(video_id)
     if job is None:
         raise JobNotFound(f"Video job {video_id!r} not found")
     return _video_to_dict(job)
@@ -131,10 +124,9 @@ async def videos_cancel(video_id: str, request: Request) -> dict[str, Any]:
     restarted since the job was submitted), we still mark the DB row failed
     so callers see a consistent terminal state.
     """
-    jobstore: JobStore = request.app.state.jobstore
-    scheduler: TaskScheduler = request.app.state.scheduler
+    res = resources(request)
 
-    job = await jobstore.get(video_id)
+    job = await res.jobstore.get(video_id)
     if job is None:
         raise JobNotFound(f"Video job {video_id!r} not found")
     if job.status in ("completed", "failed"):
@@ -144,10 +136,10 @@ async def videos_cancel(video_id: str, request: Request) -> dict[str, Any]:
     # state immediately, but only while it's still active: the runner can
     # complete between the read above and this write, and an unconditional
     # update would flip a finished render to failed and orphan its file.
-    await jobstore.fail_if_active(video_id, "Cancelled by user")
-    scheduler.cancel(f"video-job-{video_id}")
+    await res.jobstore.fail_if_active(video_id, "Cancelled by user")
+    res.scheduler.cancel(f"video-job-{video_id}")
 
-    refreshed = await jobstore.get(video_id)
+    refreshed = await res.jobstore.get(video_id)
     assert refreshed is not None
     return _video_to_dict(refreshed)
 
@@ -158,10 +150,9 @@ async def videos_get_content(
     request: Request,
     if_none_match: Annotated[str | None, Header()] = None,
 ) -> Response:
-    jobstore: JobStore = request.app.state.jobstore
-    filestore: FileStore = request.app.state.filestore
+    res = resources(request)
 
-    job = await jobstore.get(video_id)
+    job = await res.jobstore.get(video_id)
     if job is None:
         raise JobNotFound(f"Video job {video_id!r} not found")
     if job.status != "completed":
@@ -169,7 +160,7 @@ async def videos_get_content(
     if not job.file_id:
         raise UpstreamError("Job marked completed but has no file_id")
 
-    opened = await filestore.open_for_read(job.file_id)
+    opened = await res.filestore.open_for_read(job.file_id)
     if opened is None:
         # The file was evicted before the client fetched it. We could re-pin
         # at completion time to prevent this, but for v1 we accept it.

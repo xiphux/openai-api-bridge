@@ -11,10 +11,9 @@ from fastapi import APIRouter, Depends, Request
 
 from ..auth import require_api_key
 from ..backends.base import Backend, ModelEntry
-from ..config import BridgeSettings
-from ..dispatcher import BackendDispatcher
 from ..errors import BridgeError
 from ..infra.tasks import SingleFlight
+from ..resources import resources
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +102,7 @@ async def _entries_within(provider_id: str, backend: Backend, budget: float) -> 
 
 @router.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models(request: Request) -> dict[str, Any]:
-    dispatcher: BackendDispatcher = request.app.state.dispatcher
+    res = resources(request)
     now = int(time.time())
     out: list[dict[str, Any]] = []
     # Fan out concurrently: awaiting each provider in turn made this endpoint
@@ -111,9 +110,8 @@ async def list_models(request: Request) -> dict[str, Any]:
     # client's model-picker refresh hits. Providers parallelise internally
     # already (Venice's two listings, fal's asset fetches) — this is the one
     # level that didn't. Order is preserved, so the listing stays stable.
-    providers = list(dispatcher.all_providers())
-    settings: BridgeSettings = request.app.state.settings
-    budget = settings.models_timeout_seconds
+    providers = list(res.dispatcher.all_providers())
+    budget = res.settings.models_timeout_seconds
     per_provider = await asyncio.gather(
         *(_entries_within(provider_id, backend, budget) for provider_id, backend in providers)
     )
