@@ -11,6 +11,7 @@ as a wheel, a Docker image, or a checked-out source tree.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Iterable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -32,6 +33,16 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
         self._conn: aiosqlite.Connection | None = None
+        # Writes serialize here, not just inside SQLite. One connection is
+        # shared by every task, and a commit on it commits *everything*
+        # outstanding — so without this an `execute` landing between two
+        # statements of a `transaction()` block would commit the block's
+        # partial work, and a rollback would discard a bystander's write.
+        # See :meth:`transaction`.
+        self._write_lock = asyncio.Lock()
+        # The task currently inside `transaction()`, so re-entering from it can
+        # be reported rather than deadlocking on the non-reentrant lock.
+        self._writer: asyncio.Task[Any] | None = None
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -67,8 +78,20 @@ class Database:
         return self._conn
 
     async def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        await self.conn.execute(sql, params)
-        await self.conn.commit()
+        """Run one statement and commit it.
+
+        Takes the write lock, so this can't commit a ``transaction()`` block
+        that another task has open — see that method.
+        """
+        if self._writer is not None and self._writer is asyncio.current_task():
+            raise RuntimeError(
+                "Database.execute() called from inside transaction(): it commits, "
+                "which would end the transaction early. Use the connection the "
+                "context manager yields instead."
+            )
+        async with self._write_lock:
+            await self.conn.execute(sql, params)
+            await self.conn.commit()
 
     async def fetchone(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Row | None:
         async with self.conn.execute(sql, params) as cur:
@@ -80,13 +103,29 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Group multiple statements into a single commit. Rolls back on error."""
-        try:
-            yield self.conn
-            await self.conn.commit()
-        except Exception:
-            await self.conn.rollback()
-            raise
+        """Group multiple statements into a single commit. Rolls back on error.
+
+        Serialized against every other writer. That is what makes the promise
+        in the first line true: the connection is shared process-wide, and
+        SQLite's commit and rollback are connection-scoped rather than
+        block-scoped — so an unlocked version could have a concurrent
+        :meth:`execute` commit half of this block, or this block's rollback
+        discard a write that some other task had already committed. Both were
+        reachable, since anything between two statements here yields the loop.
+
+        Use the connection this yields for the statements inside the block;
+        calling :meth:`execute` from in here raises rather than deadlocking.
+        """
+        async with self._write_lock:
+            self._writer = asyncio.current_task()
+            try:
+                yield self.conn
+                await self.conn.commit()
+            except Exception:
+                await self.conn.rollback()
+                raise
+            finally:
+                self._writer = None
 
 
 _MIGRATIONS: list[tuple[int, str]] = [
