@@ -37,11 +37,18 @@ class ConfigError(BridgeError):
 # Floor on BRIDGE_API_KEY, enforced at startup. The value guards every
 # endpoint, and `Field(...)` alone only rejects the variable being *unset* —
 # an empty string satisfies it, and `hmac.compare_digest(b"", b"")` is True,
-# so `BRIDGE_API_KEY=` (an easy thing to leave behind while editing a .env,
-# and what docker-compose's `${BRIDGE_API_KEY:?}` guard lets through) turned
-# `Authorization: Bearer ` into a valid credential for anyone who could reach
-# the port. Refusing to boot is the only safe answer: a bridge that silently
-# serves unauthenticated looks exactly like one that works.
+# so `BRIDGE_API_KEY=` turned `Authorization: Bearer ` into a valid credential
+# for anyone who could reach the port.
+#
+# An easy thing to leave behind while editing a .env, and two of the three
+# documented ways to run the bridge hand it straight to the process: the
+# local-dev `set -a && source .env` flow (and this class's own `env_file`,
+# which reads a blanked .env directly), and systemd's `EnvironmentFile=`,
+# which assigns `VAR=` as an empty string. Compose is the exception —
+# `${BRIDGE_API_KEY:?}` is POSIX "unset *or empty*", so it already refuses.
+#
+# Refusing to boot is the only safe answer: a bridge that silently serves
+# unauthenticated looks exactly like one that works.
 #
 # 16 is a floor, not a recommendation — README suggests `openssl rand -hex 24`.
 _MIN_API_KEY_LENGTH = 16
@@ -60,6 +67,14 @@ class BridgeSettings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # Keep the offending value out of the rendered error. Pydantic appends
+        # ``input_value=`` to every validation failure, and the one field here
+        # most likely to fail is the API key — so a deployment whose key is
+        # rejected for being too short would print that key, in the clear, to
+        # stderr and the journal on every start attempt. It only ever prints a
+        # *rejected* key, but "rejected" includes a truncated paste of a real
+        # one. The field names in the message are enough to act on.
+        hide_input_in_errors=True,
     )
 
     api_key: str = Field(..., alias="BRIDGE_API_KEY")
@@ -83,7 +98,10 @@ class BridgeSettings(BaseSettings):
     # passthrough paths — on a single uvicorn worker, so one oversized request
     # is felt by every other client. 100MB clears a 16-image edit at realistic
     # resolutions and a large embedding batch; 0 disables the check.
-    max_request_mb: int = Field(default=100, alias="BRIDGE_MAX_REQUEST_MB")
+    # ge=0 because the middleware treats any non-positive value as "off", while
+    # every doc says only 0 disables it. Without the bound a typo'd -1 would
+    # silently switch a limit off rather than being rejected.
+    max_request_mb: int = Field(default=100, ge=0, alias="BRIDGE_MAX_REQUEST_MB")
     retention_days: int = Field(default=30, alias="RETENTION_DAYS")
     max_cache_gb: int = Field(default=50, alias="MAX_CACHE_GB")
     eviction_interval_seconds: int = Field(default=600, alias="EVICTION_INTERVAL_SECONDS")
@@ -120,7 +138,23 @@ class BridgeSettings(BaseSettings):
         floor — a key of sixteen spaces is as good as no key at all. The
         stored value is left untouched, since trimming it would change what an
         existing working credential compares against.
+
+        *Trailing* whitespace is the exception, and it is rejected outright.
+        HTTP strips trailing optional whitespace from a field value, so a key
+        stored as ``"…789  "`` can never equal what any client is physically
+        able to present — the bridge would boot reporting success and then 401
+        every single request, with nothing pointing at the key. Verified
+        against h11: ``Authorization: Bearer abc  `` arrives as
+        ``b"Bearer abc"``. Leading whitespace is *not* rejected, because it
+        survives the wire (``Bearer  abc`` presents as ``" abc"``) and such a
+        key genuinely works today.
         """
+        if v != v.rstrip():
+            raise ValueError(
+                "BRIDGE_API_KEY has trailing whitespace. HTTP strips it from the "
+                "Authorization header, so no client could ever present this value "
+                "and every request would be rejected. Remove the trailing space."
+            )
         stripped = v.strip()
         if stripped in _PLACEHOLDER_API_KEYS:
             raise ValueError(
@@ -245,7 +279,9 @@ class ImageRouterProviderConfig(BaseModel):
     # bounded amount of memory on a single-worker process rather than whatever
     # the far end decides to send. Generous by default because a video
     # legitimately runs to hundreds of MB; 0 disables the bound.
-    max_asset_mb: int = 512
+    # ge=0 for the same reason as max_request_mb: the adapters read any
+    # non-positive value as "unbounded", but only 0 is documented to do that.
+    max_asset_mb: int = Field(default=512, ge=0)
     # How long the model catalogue is reused before being re-fetched.
     # /v1/models fans out to every provider on every request, so without this
     # each client refresh costs an upstream round trip. A TTL rather than a
@@ -366,7 +402,9 @@ class FalProviderConfig(BaseModel):
     # Same reasoning as ImageRouter's: the fetch is streamed and abandoned on
     # crossing this, so a runaway payload can't be buffered whole into a
     # single-worker process. 0 disables the bound.
-    max_asset_mb: int = 512
+    # ge=0 for the same reason as max_request_mb: the adapters read any
+    # non-positive value as "unbounded", but only 0 is documented to do that.
+    max_asset_mb: int = Field(default=512, ge=0)
     # Per-model overrides (moderation, extra body params, prompt metadata).
     # These do NOT restrict what's served while ``discover_models`` is on — set
     # that false to serve only what's listed here.

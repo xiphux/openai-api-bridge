@@ -180,7 +180,16 @@ class FileStore:
         return FileMetadata(
             id=row["id"],
             storage_path=row["storage_path"],
-            content_type=row["content_type"],
+            # Sanitised on the way out as well as on the way in. ``put`` covers
+            # everything written from now on, but rows predate it: a database
+            # carried across the upgrade still holds whatever the upstream
+            # claimed, and that value is handed straight to ``FileResponse`` as
+            # the response media type. Without this the narrowing would be true
+            # only of assets stored after the upgrade — which is not what the
+            # README promises, and not the population the narrowing is for.
+            # One frozenset lookup per read; the write-side call stays so the
+            # stored row is right too.
+            content_type=sanitize_content_type(row["content_type"]),
             byte_size=row["byte_size"],
             kind=row["kind"],
             source_backend=row["source_backend"],

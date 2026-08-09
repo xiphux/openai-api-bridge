@@ -89,12 +89,15 @@ class JobNotReady(BridgeError):
 
 
 class RequestTooLarge(BridgeError):
-    """The request body exceeds ``BRIDGE_MAX_REQUEST_MB``.
+    """The 413 for a request body over ``BRIDGE_MAX_REQUEST_MB``.
 
-    Raised from ASGI middleware rather than a route, because the point is to
-    refuse the bytes *before* anything buffers them — so it is rendered
-    directly there rather than through ``bridge_error_handler``, which sits
-    inside the middleware stack and never sees it.
+    **Never actually raised** — unlike every sibling here, which exists to be
+    thrown and caught by ``bridge_error_handler``. ``BodySizeLimitMiddleware``
+    reads only its ``status_code`` / ``error_type`` / ``code`` and renders the
+    response itself, because the handler that would otherwise catch it sits
+    *inside* the middleware stack and would never see an exception raised from
+    outside it. Kept as a class so the 413's envelope is declared in the same
+    place as every other error the bridge returns.
     """
 
     status_code = 413

@@ -44,7 +44,10 @@ class _BodyTooLarge(Exception):
     """Signals an over-cap body from inside the wrapped ``receive``.
 
     Raised rather than answered on the spot because ``receive`` has no way to
-    send a response; ``__call__`` catches it and renders the 413.
+    send a response. It is the signal to *stop reading*, and it reliably does
+    that — but it is explicitly **not** relied on to reach ``__call__``: see
+    :meth:`BodySizeLimitMiddleware.__call__` for why the response is driven by
+    a flag instead.
     """
 
     def __init__(self, received: int) -> None:
@@ -110,36 +113,62 @@ class BodySizeLimitMiddleware:
                 return
 
         received = 0
+        # Bytes received when the cap was crossed; 0 means it never was. A
+        # flag rather than the exception alone, because the exception does not
+        # reliably come back to us — see below.
+        exceeded = 0
         response_started = False
 
         async def limited_receive() -> Message:
-            nonlocal received
+            nonlocal received, exceeded
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.max_bytes:
+                    exceeded = received
                     raise _BodyTooLarge(received)
             return message
 
         async def guarded_send(message: Message) -> None:
+            """Forward the app's response — unless the cap was crossed.
+
+            FastAPI reads the body for any route that binds it as a parameter
+            (``Form``/``File``/``UploadFile``, or a pydantic body model) inside
+            its own request handler, which wraps that read in a catch-all
+            ``except Exception`` and turns anything it catches into
+            ``HTTPException(400, "There was an error parsing the body")``.
+            ``_BodyTooLarge`` is a plain exception, so on exactly those routes
+            — ``/v1/images/edits``, ``/v1/videos``, ``/v1/images/generations``,
+            the ones this middleware exists for — it was swallowed there and
+            the client got a 400 in FastAPI's ``{"detail": ...}`` shape rather
+            than the bridge's 413 envelope, with no ``Connection: close`` and
+            nothing in the log.
+
+            Subclassing ``HTTPException`` does not fix it: Starlette's
+            ``ExceptionMiddleware`` sits *inside* this one and would render its
+            own ``{"detail": ...}`` before we ever saw it. So the verdict is
+            carried by ``exceeded``, which no downstream handler can swallow,
+            and the app's response is replaced on its way out.
+            """
             nonlocal response_started
+            if exceeded and not response_started:
+                response_started = True
+                await _log_and_send(exceeded)
+                return
+            if exceeded:
+                # Our 413 is already on the wire; drop whatever the app is
+                # still trying to say about the request.
+                return
             if message["type"] == "http.response.start":
                 response_started = True
             await send(message)
 
-        try:
-            await self.app(scope, limited_receive, guarded_send)
-        except _BodyTooLarge as e:
-            if response_started:
-                # Headers are already on the wire; there is no status left to
-                # set. Let it surface as a failed response rather than
-                # pretending we can answer twice.
-                raise
+        async def _log_and_send(size: int) -> None:
             log.warning(
                 "Refusing %s %s: body reached %d bytes, past the %d byte cap",
                 scope.get("method", "?"),
                 scope.get("path", "?"),
-                e.received,
+                size,
                 self.max_bytes,
             )
             response = _too_large_response(
@@ -147,3 +176,17 @@ class BodySizeLimitMiddleware:
                 "(BRIDGE_MAX_REQUEST_MB) while being received."
             )
             await response(scope, receive, send)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _BodyTooLarge as e:
+            # The routes that read the body themselves (the chat and embedding
+            # passthroughs call ``request.json()`` in the handler) do let it
+            # propagate. Nothing has been sent in that case, so answer here.
+            if response_started:
+                # Headers are already on the wire; there is no status left to
+                # set. Let it surface as a failed response rather than
+                # pretending we can answer twice.
+                raise
+            response_started = True
+            await _log_and_send(e.received)

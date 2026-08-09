@@ -194,10 +194,13 @@ What the bridge does enforce:
 - Stored assets are served `nosniff` + `Content-Disposition: attachment`, with
   media types narrowed to a known-good set.
 - Provider secrets live in environment variables referenced *by name* from
-  `config.toml`, are read at point of use, and are never copied into
-  application state or written to the config file. Asset downloads go out on a
-  separate unauthenticated client, so an upstream token can never be attached
-  to a CDN request or survive a redirect.
+  `config.toml`, are read from `os.environ` at the point of use, and are never
+  copied into the pydantic config objects or written back to the config file.
+  They are not hidden from the process: each backend adapter holds its resolved
+  token in memory for the process lifetime, in the HTTP client's default
+  headers, as any long-lived client must. Asset downloads go out on a separate
+  unauthenticated client, so an upstream token can never be attached to a CDN
+  request or survive a redirect.
 - An upstream's `401`/`403` response body is never echoed to clients — some
   providers quote the offending token back.
 
@@ -220,6 +223,34 @@ proxy (`BRIDGE_HOST=127.0.0.1`) unless it genuinely needs to answer on other
 interfaces. The default is `0.0.0.0` because the Docker image needs it to be
 reachable outside the container; on a bare-metal or systemd install that
 default puts the bridge on every interface the host has.
+
+### Upgrading from 0.5.x
+
+One of the changes above can stop an existing deployment from starting.
+`BRIDGE_API_KEY` is now validated at boot: a key under 16 characters, or the
+`.env.example` placeholder, aborts the process instead of serving. There is no
+override — the empty-key case it closes made `Authorization: Bearer ` a valid
+credential, and a warn-and-continue mode would leave that open. **Mint a new
+key (`openssl rand -hex 24`) and roll it out to clients before upgrading**,
+since every client authenticating against the old key has to change with it.
+
+The other new defaults are reversible without re-keying. Compose users: these
+are env vars, and `docker-compose.yml`'s `environment:` block is an allowlist —
+setting one in `.env` alone will not reach the container unless the variable is
+also listed there (the shipped file lists both).
+
+- `/docs`, `/redoc` and `/openapi.json` now 404 — set `BRIDGE_ENABLE_DOCS=true`
+  to restore them.
+- Request bodies over 100MB are refused with `413` — set
+  `BRIDGE_MAX_REQUEST_MB` higher, or `0` to disable the check.
+- Assets downloaded from fal and ImageRouter are capped at 512MB, where they
+  were previously unbounded. A larger generation now fails *after* the provider
+  has billed for it, so raise `max_asset_mb` in the provider's `[[providers]]`
+  block if you generate long video, or set `0` to restore the old behaviour.
+- `GET /v1/videos/{id}/content` now sends `Content-Disposition: attachment`
+  (`/v1/files/{id}/content` always did). `<video>` and `<img>` embedding is
+  unaffected; only opening the URL directly in a browser changes, from playing
+  inline to downloading.
 
 ## API surface
 
@@ -445,8 +476,11 @@ both content endpoints (`/v1/files/{id}/content` and
   `content-type` header claimed when the bytes were fetched, so these stop a
   browser rendering an unexpected payload at the bridge's own origin. Neither
   affects `<img>` or `<video>` embedding, which ignores both. Stored types are
-  additionally narrowed to a known-good set at write time — anything else is
-  recorded as `application/octet-stream`, bytes kept, type not vouched for.
+  additionally narrowed to a known-good set — anything outside it is served as
+  `application/octet-stream`, bytes kept, type not vouched for. Narrowing
+  happens both when an asset is stored and when it is served, so assets already
+  in the cache from an earlier version are covered too; for those, only the
+  `Content-Type` header changes, never the bytes or the URL.
 
 The cache window deliberately outlives the eviction window above: a client
 that kept the bytes is still holding a correct copy after the bridge has

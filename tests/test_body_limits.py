@@ -9,7 +9,7 @@ cases that must keep working untouched.
 from __future__ import annotations
 
 import textwrap
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -140,6 +140,89 @@ def test_understated_content_length_still_rejected(
     )
     assert r.status_code == 413
     assert "while being received" in r.json()["error"]["message"]
+
+
+# The counter path on FastAPI-parameter-bound routes.
+#
+# These are the routes the cap exists for — /v1/images/edits reads up to 16
+# uploads, /v1/videos an input_reference — and they are exactly the ones where
+# the counter's verdict used to be lost: FastAPI reads a bound body inside its
+# own handler, which wraps that read in a catch-all `except Exception` and
+# rewrites it to `HTTPException(400, "There was an error parsing the body")`.
+# The result was a 400 in FastAPI's `{"detail": ...}` shape instead of the
+# bridge's 413 envelope, with no Connection: close and no log line.
+#
+# The multipart tests above cannot cover this: httpx `files=` builds the body
+# in memory and sends an honest Content-Length, so they take the fast path and
+# never reach the counter. A chunked body is what forces it.
+_BOUNDARY = "----bridgetest"
+
+
+def _oversized_multipart(field: str) -> Iterator[bytes]:
+    """A structurally VALID multipart body whose file part is over the cap.
+
+    Valid matters. A stream of null bytes under a multipart content-type is
+    rejected by the parser as malformed before the counter ever trips, which
+    yields a 400 for an entirely different reason and would make this test
+    pass against a broken middleware.
+    """
+    for name, value in (("model", "ghost/x"), ("prompt", "x")):
+        yield (
+            f'--{_BOUNDARY}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
+        ).encode()
+    yield (
+        f'--{_BOUNDARY}\r\nContent-Disposition: form-data; name="{field}"; '
+        f'filename="big.png"\r\nContent-Type: image/png\r\n\r\n'
+    ).encode()
+    for _ in range(_LIMIT_BYTES // 1024 + 2):
+        yield b"\x00" * 1024
+    yield f"\r\n--{_BOUNDARY}--\r\n".encode()
+
+
+def _oversized_json() -> Iterator[bytes]:
+    yield b'{"model":"ghost/x","prompt":"'
+    for _ in range(_LIMIT_BYTES // 1024 + 2):
+        yield b"x" * 1024
+    yield b'"}'
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type", "make_body"),
+    [
+        (
+            "/v1/images/edits",
+            f"multipart/form-data; boundary={_BOUNDARY}",
+            lambda: _oversized_multipart("image"),
+        ),
+        (
+            "/v1/videos",
+            f"multipart/form-data; boundary={_BOUNDARY}",
+            lambda: _oversized_multipart("input_reference"),
+        ),
+        ("/v1/images/generations", "application/json", _oversized_json),
+    ],
+)
+def test_counter_path_answers_413_on_parameter_bound_routes(
+    small_limit_client: TestClient,
+    auth_headers: dict[str, str],
+    path: str,
+    content_type: str,
+    make_body: Callable[[], Iterator[bytes]],
+) -> None:
+    r = small_limit_client.post(
+        path,
+        headers={**auth_headers, "Content-Type": content_type},
+        content=make_body(),
+    )
+
+    assert r.status_code == 413, f"{path} answered {r.status_code}: {r.text[:200]}"
+    payload = r.json()
+    # The OpenAI envelope, not FastAPI's {"detail": ...}.
+    assert "error" in payload, f"{path} returned a non-bridge error shape: {payload}"
+    assert payload["error"]["code"] == "request_too_large"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "while being received" in payload["error"]["message"]
+    assert r.headers.get("connection") == "close"
 
 
 def test_body_under_the_cap_passes_through(

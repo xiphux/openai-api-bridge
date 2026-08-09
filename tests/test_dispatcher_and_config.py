@@ -55,9 +55,14 @@ def test_bridge_settings_preserves_key_verbatim() -> None:
 
     Trimming would change what an existing, working credential compares
     against and lock its holder out on upgrade.
+
+    Leading whitespace, specifically — this once used a value padded on both
+    sides, which encoded the wrong belief. A *trailing*-padded key cannot
+    survive the wire at all and is now rejected outright; see
+    ``test_bridge_settings_rejects_a_trailing_whitespace_key``.
     """
-    settings = BridgeSettings(BRIDGE_API_KEY=" 0123456789abcdef ")  # type: ignore[call-arg]
-    assert settings.api_key == " 0123456789abcdef "
+    settings = BridgeSettings(BRIDGE_API_KEY="  0123456789abcdef")  # type: ignore[call-arg]
+    assert settings.api_key == "  0123456789abcdef"
 
 
 # --- parse_model_id ---------------------------------------------------------
@@ -204,3 +209,40 @@ async def test_dispatcher_routes_to_comfyui_backend(tmp_path: Path) -> None:
     backend = dispatcher.for_provider("comfy-a")
     assert isinstance(backend, ComfyUIBackend)
     await dispatcher.aclose()
+
+
+@pytest.mark.parametrize("bad", ["0123456789abcdef ", "0123456789abcdef\t", "0123456789abcdef\n"])
+def test_bridge_settings_rejects_a_trailing_whitespace_key(bad: str) -> None:
+    """A key HTTP will not deliver is a key that authenticates nobody.
+
+    Trailing optional whitespace is stripped from a header value on the wire,
+    so such a key can never equal what a client presents: the bridge would boot
+    reporting success and then 401 every request, with nothing naming the
+    cause.
+    """
+    with pytest.raises(ValidationError, match="trailing whitespace"):
+        BridgeSettings(BRIDGE_API_KEY=bad)  # type: ignore[call-arg]
+
+
+def test_bridge_settings_allows_a_leading_whitespace_key() -> None:
+    """Leading whitespace survives the wire, so such a key genuinely works.
+
+    ``Authorization: Bearer  secret`` presents as ``" secret"`` after the
+    prefix is removed. Rejecting it would break a working deployment.
+    """
+    settings = BridgeSettings(BRIDGE_API_KEY=" 0123456789abcdef")  # type: ignore[call-arg]
+    assert settings.api_key == " 0123456789abcdef"
+
+
+@pytest.mark.parametrize("value", [-1, -100])
+def test_bridge_settings_rejects_a_negative_request_cap(value: int) -> None:
+    """Only 0 is documented to disable the cap; a negative would do it silently."""
+    with pytest.raises(ValidationError):
+        BridgeSettings(BRIDGE_API_KEY="0123456789abcdef", BRIDGE_MAX_REQUEST_MB=value)  # type: ignore[call-arg]
+
+
+def test_provider_configs_reject_a_negative_asset_cap() -> None:
+    from openai_api_bridge.config import FalProviderConfig
+
+    with pytest.raises(ValidationError):
+        FalProviderConfig(backend="fal", id="f", api_token_env="X", max_asset_mb=-1)

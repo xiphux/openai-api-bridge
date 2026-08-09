@@ -664,3 +664,64 @@ async def test_size_cap_error_does_not_echo_a_signed_asset_url() -> None:
             await fetch_asset_with_retry(signed, provider_label="Test", max_bytes=1000)
 
     assert "SECRETSIG" not in exc.value.message
+
+
+@pytest.mark.parametrize(
+    ("status", "headers"),
+    [
+        # httpx follows 301/302/303/307/308 only when a Location is present, so
+        # each of these is left for the bridge to judge.
+        (300, {}),
+        (304, {}),
+        (305, {}),
+        (302, {}),  # malformed: a redirect status with no Location
+    ],
+)
+async def test_asset_fetch_treats_an_unfollowed_redirect_as_a_failure(
+    status: int, headers: dict[str, str]
+) -> None:
+    """A 3xx is not a generated asset.
+
+    This gate replaced ``raise_for_status()``, which raised on anything outside
+    2xx. Written as ``status >= 400`` it let an unfollowed redirect fall through
+    to the body read, so a redirect stub or a CDN error page was stored as the
+    caller's image and reported as success — for a generation already billed.
+    """
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/moved.png").mock(
+            return_value=httpx.Response(status, content=b"<html>moved</html>", headers=headers)
+        )
+        with pytest.raises(UpstreamError) as exc:
+            await fetch_asset_with_retry(
+                "https://cdn.example/moved.png", provider_label="Test", max_attempts=1
+            )
+
+    assert str(status) in exc.value.message
+    assert exc.value.status_code == 502
+
+
+async def test_asset_fetch_still_follows_a_well_formed_redirect() -> None:
+    """The ordinary redirect keeps working — httpx resolves it before we look."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/start.png").mock(
+            return_value=httpx.Response(302, headers={"location": "https://cdn.example/real.png"})
+        )
+        mock.get("https://cdn.example/real.png").mock(
+            return_value=httpx.Response(
+                200, content=b"\x89PNG", headers={"content-type": "image/png"}
+            )
+        )
+        data, content_type = await fetch_asset_with_retry(
+            "https://cdn.example/start.png", provider_label="Test"
+        )
+
+    assert data == b"\x89PNG"
+    assert content_type == "image/png"

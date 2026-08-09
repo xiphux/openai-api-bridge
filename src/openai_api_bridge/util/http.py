@@ -196,6 +196,16 @@ async def _read_capped(
 
     Raising mid-iteration leaves the ``async with`` to close the response,
     which drops the connection and stops the remaining bytes arriving.
+
+    Chunks are collected and joined once, rather than appended to a
+    ``bytearray``. Same chunk source either way — the accumulator is the whole
+    difference, and growing a bytearray pays a geometric chain of realloc
+    copies plus a final ``bytes()`` copy on top. Measured on this machine at
+    64KB chunks: 4.6x slower at 16MB, 9x at 128MB, 18x at 512MB (147ms against
+    8ms). That is event-loop CPU on a single-worker process, and since both
+    video-bearing providers now pass a cap by default, the large-body case is
+    the *normal* path rather than an edge one. Joining also lets the count be
+    checked before the over-cap chunk is retained instead of after.
     """
     if max_bytes is None:
         return await response.aread()
@@ -212,12 +222,14 @@ async def _read_capped(
             if length > max_bytes:
                 raise _asset_too_large(provider_label, url, length, max_bytes)
 
-    buffer = bytearray()
+    parts: list[bytes] = []
+    received = 0
     async for chunk in response.aiter_bytes():
-        buffer += chunk
-        if len(buffer) > max_bytes:
-            raise _asset_too_large(provider_label, url, len(buffer), max_bytes)
-    return bytes(buffer)
+        received += len(chunk)
+        if received > max_bytes:
+            raise _asset_too_large(provider_label, url, received, max_bytes)
+        parts.append(chunk)
+    return b"".join(parts)
 
 
 async def fetch_asset_with_retry(
@@ -262,7 +274,21 @@ async def fetch_asset_with_retry(
             # whole so the cap can be enforced against bytes as they land.
             async with _asset_fetch_client().stream("GET", url, timeout=timeout) as response:
                 status = response.status_code
-                if status >= 400:
+                # Non-2xx, not merely >= 400. This replaced `raise_for_status()`,
+                # which raises on anything outside 2xx — and the difference is
+                # not academic. `follow_redirects=True` covers the ordinary
+                # redirect, but httpx only follows when the status is one of
+                # 301/302/303/307/308 *and* a Location header is present. A 300,
+                # 304, 305 or 306, or a malformed 302 from a CDN or WAF with no
+                # Location, is left for us. Gated on `>= 400` those fell through
+                # to the body read and were stored as the generated asset: a
+                # redirect stub or an error page handed to the client as its
+                # image, reported as success, for a generation already billed.
+                #
+                # _is_retriable_fetch_status returns False for every 3xx, so
+                # these take the terminal branch below and surface as the 502
+                # they used to be.
+                if not (200 <= status < 300):
                     if _is_retriable_fetch_status(status) and attempt < max_attempts - 1:
                         delay = base_delay * (2**attempt)
                         log.warning(

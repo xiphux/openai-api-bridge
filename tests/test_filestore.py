@@ -365,3 +365,32 @@ async def test_put_preserves_legitimate_media_types(
     meta = await filestore.get_metadata(file_id)
     assert meta is not None
     assert meta.content_type == expected
+
+
+async def test_read_sanitises_a_row_written_before_the_allowlist(filestore: FileStore) -> None:
+    """Rows predating the narrowing must not still dictate the served type.
+
+    `put` covers everything written from now on, but a database carried across
+    the upgrade holds whatever the upstream claimed, and that value is handed
+    to FileResponse as the response media type.
+    """
+    file_id = await filestore.put(
+        b"data",
+        content_type="image/png",
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    # Simulate a row written by the previous version, bypassing put()'s sanitiser.
+    await filestore.db.execute(
+        "UPDATE generated_files SET content_type = ? WHERE id = ?",
+        ("text/html", file_id),
+    )
+
+    meta = await filestore.get_metadata(file_id)
+    assert meta is not None
+    assert meta.content_type == "application/octet-stream"
+
+    opened = await filestore.open_for_read(file_id)
+    assert opened is not None
+    assert opened.meta.content_type == "application/octet-stream"
