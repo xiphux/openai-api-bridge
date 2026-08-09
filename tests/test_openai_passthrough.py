@@ -122,6 +122,26 @@ def test_models_lists_upstream_models_with_prefix(
 
 
 @respx.mock
+def test_models_catalogue_is_cached(client_with_openai: TestClient) -> None:
+    """The catalogue is reused, like every other backend's.
+
+    This backend was the one without a cache, which made a slow upstream cost
+    a round trip on every single model-picker refresh rather than one per TTL
+    window.
+    """
+    route = respx.get(f"{UPSTREAM}/v1/models").mock(
+        return_value=httpx.Response(
+            200, json={"object": "list", "data": [{"id": "m", "object": "model"}]}
+        )
+    )
+
+    for _ in range(3):
+        assert client_with_openai.get("/v1/models", headers=HEADERS).status_code == 200
+
+    assert route.call_count == 1
+
+
+@respx.mock
 def test_chat_completion_sync_forwards_body_and_strips_prefix(
     client_with_openai: TestClient,
 ) -> None:

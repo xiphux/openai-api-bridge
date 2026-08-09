@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ...config import OpenAIPassthroughProviderConfig
+from ...util.cache import AsyncTTLCache
 from ..base import Backend, ModelEntry
 from .client import OpenAIClient
 
@@ -85,11 +86,17 @@ class OpenAIPassthroughBackend(Backend):
             api_token=cfg.resolve_api_token(),
             request_timeout_seconds=cfg.request_timeout_seconds,
         )
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
+            cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
+        )
 
     async def aclose(self) -> None:
         await self.client.aclose()
 
     async def list_models(self) -> list[ModelEntry]:
+        return await self._catalog.get(self._fetch_models)
+
+    async def _fetch_models(self) -> list[ModelEntry]:
         raw = await self.client.list_models()
         # `kind` is intentionally None — OpenAI's /v1/models doesn't expose
         # modality, and trying to guess from name patterns ("text-embedding-*"

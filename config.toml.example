@@ -127,6 +127,10 @@ api_token_env = "VENICE_API_TOKEN"
 # base_url = "https://api.groq.com/openai"
 # api_token_env = "GROQ_API_KEY"
 # request_timeout_seconds = 120.0
+# # catalog_ttl_seconds = 300.0   # reuse the model listing for this long
+# # catalog_retry_seconds = 30.0  # after a failed fetch, wait this long
+# #                               # before trying again — one timeout per
+# #                               # window instead of one per caller
 
 # Note: for OpenRouter, prefer the dedicated `openrouter` backend below
 # rather than configuring it as openai-passthrough. OpenRouter's image

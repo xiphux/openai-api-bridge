@@ -52,11 +52,21 @@ see `src/openai_api_bridge/backends/` for the existing implementations.
 
 `GET /v1/models` fans out to every configured provider, so an uncached backend
 pays an upstream round trip each time a client refreshes its model picker.
-ImageRouter, OpenRouter and Venice cache their listing for
+ImageRouter, OpenRouter, Venice and OpenAI passthrough cache their listing for
 `catalog_ttl_seconds` (default 300; `0` disables). It's a TTL rather than a
 permanent cache so a model added upstream appears without restarting the
 bridge. (ComfyUI is separate — it scans workflow files from disk, governed by
 `cache_workflows`.)
+
+The endpoint also bounds how long it waits on any one provider, at
+`MODELS_TIMEOUT_SECONDS` (default 5; `0` disables the bound). Providers are
+queried concurrently, so without it the endpoint's latency is the slowest
+upstream's read timeout — a wedged upstream stalls the whole listing, healthy
+providers included. A provider that misses the budget is left out of *that*
+listing only: its fetch is deliberately not cancelled, so its own catalogue
+cache still fills and it reappears on a later request. A cold fal catalogue
+(10–13 paginated round trips) usually takes the first request after boot to
+warm up this way.
 
 Concurrent requests collapse into the fetch already in flight rather than each
 starting their own. A **failed** fetch is remembered for `catalog_retry_seconds`
@@ -223,6 +233,7 @@ sensibly:
 | `MAX_CACHE_GB` | `50` | Size cap for the file cache (LRU past this) |
 | `EVICTION_INTERVAL_SECONDS` | `600` | How often the eviction loop runs |
 | `MAX_CONCURRENT_VIDEO_JOBS` | `2` | Parallel video generations (see [Video jobs](#video-jobs)) |
+| `MODELS_TIMEOUT_SECONDS` | `5` | Per-provider budget for `GET /v1/models` (see [Model catalogue caching](#model-catalogue-caching)); `0` disables |
 | `LOG_LEVEL` | `INFO` | TRACE / DEBUG / INFO / WARNING / ERROR |
 
 Provider API tokens (`VENICE_API_TOKEN`, `IMAGEROUTER_API_KEY`,

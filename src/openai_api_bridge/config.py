@@ -64,6 +64,18 @@ class BridgeSettings(BaseSettings):
     max_cache_gb: int = Field(default=50, alias="MAX_CACHE_GB")
     eviction_interval_seconds: int = Field(default=600, alias="EVICTION_INTERVAL_SECONDS")
     max_concurrent_video_jobs: int = Field(default=2, alias="MAX_CONCURRENT_VIDEO_JOBS")
+    # How long `GET /v1/models` waits for any one provider's catalogue before
+    # leaving it out of *this* listing. The endpoint awaits every provider at
+    # once, so without a bound its latency is the slowest upstream's read
+    # timeout — two minutes for an openai-passthrough provider whose upstream
+    # is wedged, on every single model-picker refresh, taking every healthy
+    # provider's models with it.
+    #
+    # The provider isn't dropped permanently: the fetch is left running so its
+    # own catalogue cache still fills, and the next request serves it from
+    # there. A cold fal catalogue (10-13 paginated round trips) legitimately
+    # exceeds this on the first request after boot and appears on the second.
+    models_timeout_seconds: float = Field(default=5.0, alias="MODELS_TIMEOUT_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     @property
@@ -363,6 +375,25 @@ class OpenAIPassthroughProviderConfig(BaseModel):
     # this — the bridge holds the connection open for as long as the upstream
     # keeps writing.
     request_timeout_seconds: float = 120.0
+    # How long the model catalogue is reused before being re-fetched. Same
+    # knobs, and the same reasoning, as every other backend: /v1/models fans
+    # out to every provider on every request, so an uncached listing costs an
+    # upstream round trip per client refresh. This backend went without one
+    # for longer than the others, which made it the sole reason a wedged
+    # upstream could stall the whole endpoint on every request rather than
+    # once per window. 0 disables caching.
+    #
+    # Note for llama.cpp: a model's `meta.n_ctx` only appears while it is
+    # loaded, so a cached listing can report a context window the upstream has
+    # since unloaded. Router mode also publishes `status.args`, which is read
+    # as a cold fallback, so the field survives the model being swapped out.
+    catalog_ttl_seconds: float = 300.0
+    # After a failed catalogue fetch, how long before another is attempted.
+    # The fetch runs under a lock, so without this a burst arriving during an
+    # upstream hang would each start their own fetch and queue behind one
+    # another; instead the first pays the timeout and the rest fail fast.
+    # 0 retries immediately.
+    catalog_retry_seconds: float = 30.0
 
     def resolve_api_token(self) -> str | None:
         if not self.api_token_env:
