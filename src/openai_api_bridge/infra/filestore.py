@@ -317,6 +317,23 @@ class FileStore:
         )
 
     async def set_pinned(self, file_id: str, pinned: bool) -> None:
+        """Exempt a file from both eviction policies, or stop exempting it.
+
+        **Nothing calls this.** ``EvictionLoop`` filters on the flag and
+        ``put`` can set it, but no code path does, so every stored file is
+        evictable — including a video whose job has just completed, which
+        ``GET /v1/videos/{id}/content`` handles by answering 404 rather than
+        pretending otherwise.
+
+        Kept rather than deleted because the missing piece is a policy
+        decision, not a line of code. Pinning a finished video protects it
+        from LRU, and something has to say when the pin is released: on first
+        fetch leaves a never-fetched job pinned forever, while never releasing
+        it makes ``MAX_CACHE_GB`` a soft cap that a video-heavy workload will
+        simply exceed. Both are defensible and neither is obviously right for
+        every deployment, so the bridge currently promises the honest thing
+        instead.
+        """
         await self.db.execute(
             "UPDATE generated_files SET pinned = ? WHERE id = ?",
             (1 if pinned else 0, file_id),

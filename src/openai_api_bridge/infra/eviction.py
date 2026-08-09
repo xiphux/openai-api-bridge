@@ -6,7 +6,13 @@ Runs a periodic asyncio task that combines two policies:
 2. **LRU-by-size** — if the total still exceeds ``max_cache_bytes``, delete
    least-recently-accessed files until back under cap.
 
-Pinned files (referenced by an in-flight video_jobs row) are exempt from both.
+Both sweeps skip rows with ``pinned`` set — but **nothing sets it**. See
+:meth:`~openai_api_bridge.infra.filestore.FileStore.set_pinned`: the flag is
+schema and filter with no writer, so in practice every stored file is
+evictable, including a video whose job just completed. The filters are kept
+because they are the cheap half of the mechanism and removing them would mean
+a migration to get back.
+
 The sweeper deletes the SQLite row first; readers that already opened the FD
 keep streaming fine on Linux even after the unlink.
 """

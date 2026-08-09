@@ -361,10 +361,17 @@ cache is **not permanent storage** — an eviction loop (every
 - **LRU**: when the cache exceeds `MAX_CACHE_GB` (default 50), the
   least-recently-accessed files are deleted until it fits.
 
-Files referenced by an in-flight video job are pinned and never evicted
-mid-job. Clients that want to keep generated media should download and
-persist it on their side — [GlyphStream][glyphstream] does exactly this,
-pulling each asset into its own media store on first generation.
+**Nothing is exempt.** The schema carries a `pinned` flag and both sweeps skip
+rows that set it, but nothing in the bridge sets it today — so a completed
+video's file is subject to LRU like any other asset, and a client that polls
+`GET /v1/videos/{id}` slowly enough can find its finished render already gone
+(the content endpoint answers `404` with "evicted from cache" rather than
+anything ambiguous). In practice this needs the cache to be at `MAX_CACHE_GB`
+already; it is a narrow window, not a routine one.
+
+Clients that want to keep generated media should download and persist it on
+their side — [GlyphStream][glyphstream] does exactly this, pulling each asset
+into its own media store on first generation.
 
 ### Conditional requests
 
