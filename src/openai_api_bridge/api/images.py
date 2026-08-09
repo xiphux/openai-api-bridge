@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from ..auth import require_api_key
 from ..backends.base import GeneratedAsset, InputImage
-from ..config import BridgeSettings, get_settings, parse_model_id
+from ..config import BridgeSettings, parse_model_id
 from ..dispatcher import BackendDispatcher
 from ..errors import InvalidRequest
 from ..infra.filestore import FileStore
@@ -146,7 +146,7 @@ async def images_edits(
         n=n,
     )
 
-    settings: BridgeSettings = get_settings()
+    settings: BridgeSettings = request.app.state.settings
     filestore: FileStore = request.app.state.filestore
     data = await _render_assets(
         assets,
