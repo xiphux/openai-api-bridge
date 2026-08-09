@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from openai_api_bridge.infra import eviction
 from openai_api_bridge.infra.eviction import run_eviction_pass
 from openai_api_bridge.infra.filestore import FileStore
 
@@ -117,6 +118,52 @@ async def test_no_eviction_when_under_cap(filestore: FileStore) -> None:
     )
     assert ttl == 0 and lru == 0
     assert await filestore.get_metadata(fid) is not None
+
+
+async def test_lru_evicts_across_scan_chunks_in_access_order(
+    filestore: FileStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The candidate scan is chunked, so eviction spanning more than one chunk
+    must still retire strictly oldest-first and stop at the cap — the property
+    the single unbounded query used to give for free."""
+    monkeypatch.setattr(eviction, "_LRU_SCAN_CHUNK", 3)
+
+    # 10 files x 100 bytes. atime decreases with index, so index 0 is oldest.
+    ids = await _put_with_ages(
+        filestore,
+        [(bytes([65 + i]) * 100, 60, 1000 - i * 10, False) for i in range(10)],
+    )
+    # Cap at 450 -> must delete the 6 oldest (1000 -> 400), keeping the 4 newest.
+    ttl, lru = await run_eviction_pass(
+        filestore,
+        retention_seconds=86400,
+        max_cache_bytes=450,
+    )
+    assert ttl == 0
+    assert lru == 6, "must cross the 3-row chunk boundary and still stop at the cap"
+    for fid in ids[:6]:
+        assert await filestore.get_metadata(fid) is None
+    for fid in ids[6:]:
+        assert await filestore.get_metadata(fid) is not None
+
+
+async def test_lru_stops_when_only_pinned_files_remain(
+    filestore: FileStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned bytes alone over the cap must terminate the scan, not spin on a
+    query that keeps returning nothing."""
+    monkeypatch.setattr(eviction, "_LRU_SCAN_CHUNK", 2)
+    ids = await _put_with_ages(
+        filestore,
+        [(b"p" * 100, 60, 500, True), (b"q" * 100, 60, 400, True), (b"v" * 100, 60, 300, False)],
+    )
+    ttl, lru = await run_eviction_pass(filestore, retention_seconds=86400, max_cache_bytes=50)
+    assert ttl == 0
+    assert lru == 1, "only the unpinned file is evictable"
+    assert await filestore.get_metadata(ids[2]) is None
+    assert await filestore.get_metadata(ids[0]) is not None
 
 
 @pytest.mark.parametrize("retention_days", [1, 7, 30, 365])

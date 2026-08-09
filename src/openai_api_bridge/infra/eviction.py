@@ -28,6 +28,14 @@ from .filestore import FileStore
 
 log = logging.getLogger(__name__)
 
+# How many LRU candidates to consider at a time. The sweep only needs enough
+# rows to get back under the cap, which is normally a handful — but the query
+# is ordered by last_accessed_at over the whole table, so an unbounded fetch
+# materialised *every* unpinned row to pick them. At the default 50GB cap
+# that's however many files fit in 50GB, built into a Python list on the event
+# loop, on every pass that runs even slightly over.
+_LRU_SCAN_CHUNK = 1000
+
 
 async def run_eviction_pass(
     filestore: FileStore,
@@ -49,11 +57,19 @@ async def run_eviction_pass(
 
     lru_deleted = 0
     total = await filestore.total_byte_size()
-    if total > max_cache_bytes:
+    while total > max_cache_bytes:
+        # Oldest-accessed first, a chunk at a time. Re-querying after each
+        # batch returns the next-oldest survivors, so the order — and the cap
+        # arithmetic below — is identical to scanning the whole table at once.
         candidates = await filestore.db.fetchall(
             "SELECT id, byte_size FROM generated_files WHERE pinned = 0"
-            " ORDER BY last_accessed_at ASC"
+            " ORDER BY last_accessed_at ASC LIMIT ?",
+            (_LRU_SCAN_CHUNK,),
         )
+        if not candidates:
+            # Everything left is pinned. The cap is a target, not a guarantee,
+            # when pinned bytes alone exceed it.
+            break
         # Pick the victims first, then delete them in one batch, so the cap
         # arithmetic stays identical to the row-at-a-time version.
         victims: list[str] = []
@@ -62,7 +78,10 @@ async def run_eviction_pass(
                 break
             victims.append(row["id"])
             total -= int(row["byte_size"])
-        lru_deleted = await filestore.delete_many(victims)
+        lru_deleted += await filestore.delete_many(victims)
+        if len(victims) < len(candidates):
+            # Got under the cap inside this chunk; no need to look further.
+            break
 
     return ttl_deleted, lru_deleted
 
