@@ -21,11 +21,18 @@ class _Permissive(BaseModel):
 
 # --- /v1/images/generations -------------------------------------------------
 
+# Ceiling on images per request. Lives here rather than beside the endpoint
+# because this model is what enforces it on the JSON path — but the multipart
+# edits path can't use a pydantic model (it binds Form fields), so it checks
+# the same value by hand. Two enforcement points, one number: they disagreed
+# silently when it was written out twice.
+MAX_IMAGES_PER_REQUEST = 4
+
 
 class ImagesGenerationRequest(_Permissive):
     model: str
     prompt: str
-    n: int = Field(default=1, ge=1, le=4)
+    n: int = Field(default=1, ge=1, le=MAX_IMAGES_PER_REQUEST)
     size: str | None = None
     response_format: Literal["url", "b64_json"] = "url"
 

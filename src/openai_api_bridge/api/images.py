@@ -14,11 +14,10 @@ from ..config import BridgeSettings, get_settings, parse_model_id
 from ..dispatcher import BackendDispatcher
 from ..errors import InvalidRequest
 from ..infra.filestore import FileStore
-from ..schemas.openai import ImagesGenerationRequest
+from ..schemas.openai import MAX_IMAGES_PER_REQUEST, ImagesGenerationRequest
 
 router = APIRouter()
 
-_MAX_N = 4
 # Cap on reference images per edit. Matches OpenAI's /images/edits limit and
 # bounds memory on backends that buffer every image (OpenRouter base64-expands
 # them); edits are authenticated, so this is a sanity guard, not a DoS control.
@@ -103,8 +102,13 @@ async def images_edits(
     size: Annotated[str | None, Form()] = None,
     response_format: Annotated[str, Form()] = "url",
 ) -> dict[str, Any]:
-    if not 1 <= n <= _MAX_N:
-        raise InvalidRequest(f"n must be between 1 and {_MAX_N} (got {n})", param="n")
+    # The same ceiling ImagesGenerationRequest applies on the JSON path, which
+    # this endpoint can't reuse: its fields are multipart Form bindings, not a
+    # pydantic body model.
+    if not 1 <= n <= MAX_IMAGES_PER_REQUEST:
+        raise InvalidRequest(
+            f"n must be between 1 and {MAX_IMAGES_PER_REQUEST} (got {n})", param="n"
+        )
     if response_format not in ("url", "b64_json"):
         raise InvalidRequest(
             f"response_format must be 'url' or 'b64_json' (got {response_format!r})",
