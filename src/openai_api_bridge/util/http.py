@@ -151,9 +151,31 @@ def _is_retriable_fetch_status(status: int) -> bool:
     return status in (401, 404, 408, 425, 429) or (status >= 500 and status != 501)
 
 
+def redact_url(url: str) -> str:
+    """An asset URL with its query string dropped, for a client-facing message.
+
+    Provider asset URLs are routinely pre-signed — fal and ImageRouter both
+    hand back CDN links whose query carries the signature and expiry that make
+    them fetchable. Those messages are rendered into the OpenAI error envelope
+    and returned over the wire, so the credential travels with them and lands
+    wherever the client logs its errors.
+
+    The path still names the asset, which is what makes an error readable, so
+    nothing diagnostic is lost. Log lines deliberately keep the full URL: they
+    stay on the bridge's own host, and an expired or malformed signature is
+    exactly the thing an operator needs to see to debug a failing fetch.
+
+    Query only. A signature carried in the *path* would survive this, which no
+    provider here does today — the point is to stop the routine leak, not to
+    claim a URL can never identify itself.
+    """
+    return url.split("?", 1)[0]
+
+
 def _asset_too_large(provider_label: str, url: str, size: int, max_bytes: int) -> UpstreamError:
     return UpstreamError(
-        f"{provider_label} asset exceeded the {max_bytes} byte cap ({size} bytes) for {url}"
+        f"{provider_label} asset exceeded the {max_bytes} byte cap "
+        f"({size} bytes) for {redact_url(url)}"
     )
 
 
@@ -257,8 +279,8 @@ async def fetch_asset_with_retry(
                     # regardless, as this once did, spent three upstream calls
                     # and two backoff sleeps to confirm a guaranteed failure.
                     message = (
-                        f"{provider_label} asset fetch returned {status} for {url} "
-                        f"after {attempt + 1} attempt(s)"
+                        f"{provider_label} asset fetch returned {status} for "
+                        f"{redact_url(url)} after {attempt + 1} attempt(s)"
                     )
                     # Keep the type: a throttled fetch that outlasts our
                     # attempts is still a rate limit, and callers branch on
@@ -291,9 +313,10 @@ async def fetch_asset_with_retry(
                 await asyncio.sleep(delay)
                 continue
             raise UpstreamError(
-                f"{provider_label} asset fetch failed for {url} after {max_attempts} attempts: {e}"
+                f"{provider_label} asset fetch failed for {redact_url(url)} "
+                f"after {max_attempts} attempts: {e}"
             ) from e
 
     raise UpstreamError(
-        f"{provider_label} asset fetch failed for {url} after {max_attempts} attempts"
+        f"{provider_label} asset fetch failed for {redact_url(url)} after {max_attempts} attempts"
     ) from last_error

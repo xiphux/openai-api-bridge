@@ -612,3 +612,55 @@ async def _in_fresh_loop() -> object:
     from openai_api_bridge.util.http import _asset_fetch_client
 
     return _asset_fetch_client()
+
+
+# --- signed asset URLs in client-facing messages ----------------------------
+
+
+def test_redact_url_drops_a_signature_query() -> None:
+    from openai_api_bridge.util.http import redact_url
+
+    signed = "https://v3.fal.media/files/abc/out.mp4?Signature=SECRETSIG&Expires=1799999999"
+    assert redact_url(signed) == "https://v3.fal.media/files/abc/out.mp4"
+
+
+def test_redact_url_leaves_an_unsigned_url_alone() -> None:
+    from openai_api_bridge.util.http import redact_url
+
+    plain = "https://storage.imagerouter.io/a/b.png"
+    assert redact_url(plain) == plain
+
+
+async def test_fetch_error_does_not_echo_a_signed_asset_url() -> None:
+    """Asset URLs are routinely pre-signed, and these messages are rendered
+    into the error envelope and sent over the wire."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    signed = "https://cdn.example/out.mp4?Signature=SECRETSIG&Expires=1799999999"
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get(url=signed).mock(return_value=httpx.Response(403))
+        with pytest.raises(UpstreamError) as exc:
+            await fetch_asset_with_retry(signed, provider_label="Test")
+
+    assert "SECRETSIG" not in exc.value.message
+    assert "https://cdn.example/out.mp4" in exc.value.message
+
+
+async def test_size_cap_error_does_not_echo_a_signed_asset_url() -> None:
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    signed = "https://cdn.example/big.mp4?Signature=SECRETSIG"
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get(url=signed).mock(
+            return_value=httpx.Response(
+                200, content=b"x" * 5000, headers={"content-type": "video/mp4"}
+            )
+        )
+        with pytest.raises(UpstreamError) as exc:
+            await fetch_asset_with_retry(signed, provider_label="Test", max_bytes=1000)
+
+    assert "SECRETSIG" not in exc.value.message
