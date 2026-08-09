@@ -181,9 +181,59 @@ class BridgeSettings(BaseSettings):
 # --- Provider config (TOML-backed) ------------------------------------------
 
 
-class ComfyUIProviderConfig(BaseModel):
-    backend: Literal["comfyui"]
+def _require_env_token(provider_id: str, env_name: str) -> str:
+    """Read a provider secret from the environment at the point of use.
+
+    Secrets live in the TOML as the *name* of an env var and are never copied
+    into pydantic state, so every provider that authenticates has to do this
+    lookup. Shared rather than repeated per provider class so the error message
+    an operator sees is identical whichever backend they misconfigured.
+    """
+    token = os.environ.get(env_name)
+    if not token:
+        raise ConfigError(f"Provider '{provider_id}': env var '{env_name}' is not set")
+    return token
+
+
+class _ProviderBase(BaseModel):
+    """What every ``[[providers]]`` block carries regardless of backend.
+
+    ``id`` lives here rather than on each subclass so the mixins below can name
+    it in their error messages.
+    """
+
     id: str
+
+
+class _TokenAuthProvider(_ProviderBase):
+    """A provider whose upstream requires a credential."""
+
+    api_token_env: str
+
+    def resolve_api_token(self) -> str:
+        return _require_env_token(self.id, self.api_token_env)
+
+
+class _CachedCatalogProvider(_ProviderBase):
+    """A provider that caches its upstream model listing.
+
+    ``/v1/models`` fans out to every provider on every request, so without a
+    cache each client refresh costs an upstream round trip. A TTL rather than a
+    permanent cache so newly added models appear without a restart; 0 disables
+    caching.
+
+    ``catalog_retry_seconds`` is how long a *failed* fetch is remembered. The
+    fetch runs under a lock, so without it a burst arriving during an upstream
+    hang would each start their own fetch and queue behind one another; instead
+    the first pays the timeout and the rest fail fast. 0 retries immediately.
+    """
+
+    catalog_ttl_seconds: float = 300.0
+    catalog_retry_seconds: float = 30.0
+
+
+class ComfyUIProviderConfig(_ProviderBase):
+    backend: Literal["comfyui"]
     url: str = "http://127.0.0.1:8188"
     workflows_dir: Path
     # Where completion polling *starts*. It eases out towards the ceiling for
@@ -217,11 +267,9 @@ class ComfyUIProviderConfig(BaseModel):
     cache_workflows: bool = True
 
 
-class VeniceProviderConfig(BaseModel):
+class VeniceProviderConfig(_TokenAuthProvider, _CachedCatalogProvider):
     backend: Literal["venice"]
-    id: str
     base_url: str = "https://api.venice.ai"
-    api_token_env: str
     # Venice diffusion knobs. Defaults match the legacy pipe; tunable per
     # provider in TOML if a user wants higher/lower fidelity by default.
     steps: int = 16
@@ -234,32 +282,16 @@ class VeniceProviderConfig(BaseModel):
     # bounded tail after Venice recovers, traded against re-fetching the
     # catalogue on every single edit while it's down.
     route_retry_seconds: float = 60.0
-    # How long a successfully-read model catalogue is reused before being
-    # re-fetched. /v1/models costs two upstream calls on Venice (the
-    # text-to-image and image-to-image listings), and edit routing reads the
-    # same catalogue, so without this every listing request and every
-    # first-of-process edit pays for both. A TTL rather than a permanent cache
-    # so models Venice adds appear without restarting the bridge. 0 disables
-    # caching entirely.
-    catalog_ttl_seconds: float = 300.0
-    # After a failed catalogue fetch, how long before another is attempted.
-    # The fetch runs under a lock, so without this a burst arriving during an
-    # upstream hang would each start their own fetch and queue behind one
-    # another; instead the first pays the timeout and the rest fail fast.
-    # 0 retries immediately. This also bounds how long an *incomplete* listing
-    # is served — for that, whichever of this and catalog_ttl_seconds is
-    # shorter applies — so when that bound exceeds route_retry_seconds it, not
-    # that knob, is what governs when edit routing recovers.
-    catalog_retry_seconds: float = 30.0
-
-    def resolve_api_token(self) -> str:
-        token = os.environ.get(self.api_token_env)
-        if not token:
-            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
-        return token
+    # Catalogue caching is inherited (see _CachedCatalogProvider). Two Venice
+    # specifics: a listing costs *two* upstream calls (the text-to-image and
+    # image-to-image listings) and edit routing reads the same catalogue, so an
+    # uncached Venice pays double. And catalog_retry_seconds also bounds how
+    # long an *incomplete* listing is served — for that, whichever of it and
+    # catalog_ttl_seconds is shorter applies — so when that bound exceeds
+    # route_retry_seconds it, not that knob, governs when edit routing recovers.
 
 
-class ImageRouterProviderConfig(BaseModel):
+class ImageRouterProviderConfig(_TokenAuthProvider, _CachedCatalogProvider):
     """ImageRouter (https://imagerouter.io) — partial-OpenAI gateway with
     image + video generation across many providers.
 
@@ -270,9 +302,7 @@ class ImageRouterProviderConfig(BaseModel):
     """
 
     backend: Literal["imagerouter"]
-    id: str
     base_url: str = "https://api.imagerouter.io"
-    api_token_env: str
     # Ceiling on a single generated asset the bridge downloads from the
     # provider's CDN, in MB. The fetch is streamed and abandoned the moment it
     # passes this, so an asset that is wrong by orders of magnitude costs a
@@ -282,27 +312,9 @@ class ImageRouterProviderConfig(BaseModel):
     # ge=0 for the same reason as max_request_mb: the adapters read any
     # non-positive value as "unbounded", but only 0 is documented to do that.
     max_asset_mb: int = Field(default=512, ge=0)
-    # How long the model catalogue is reused before being re-fetched.
-    # /v1/models fans out to every provider on every request, so without this
-    # each client refresh costs an upstream round trip. A TTL rather than a
-    # permanent cache so newly added models appear without a restart.
-    # 0 disables caching.
-    catalog_ttl_seconds: float = 300.0
-    # After a failed catalogue fetch, how long before another is attempted.
-    # The fetch runs under a lock, so without this a burst arriving during an
-    # upstream hang would each start their own fetch and queue behind one
-    # another; instead the first pays the timeout and the rest fail fast.
-    # 0 retries immediately.
-    catalog_retry_seconds: float = 30.0
-
-    def resolve_api_token(self) -> str:
-        token = os.environ.get(self.api_token_env)
-        if not token:
-            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
-        return token
 
 
-class OpenRouterProviderConfig(BaseModel):
+class OpenRouterProviderConfig(_TokenAuthProvider, _CachedCatalogProvider):
     """OpenRouter (https://openrouter.ai) — multi-vendor aggregator that's
     OpenAI-compatible for chat and embeddings but routes image generation
     through chat completions with a non-standard ``message.images``
@@ -312,28 +324,8 @@ class OpenRouterProviderConfig(BaseModel):
     """
 
     backend: Literal["openrouter"]
-    id: str
     base_url: str = "https://openrouter.ai/api"
-    api_token_env: str
     request_timeout_seconds: float = 120.0
-    # How long the model catalogue is reused before being re-fetched.
-    # /v1/models fans out to every provider on every request, so without this
-    # each client refresh costs an upstream round trip. A TTL rather than a
-    # permanent cache so newly added models appear without a restart.
-    # 0 disables caching.
-    catalog_ttl_seconds: float = 300.0
-    # After a failed catalogue fetch, how long before another is attempted.
-    # The fetch runs under a lock, so without this a burst arriving during an
-    # upstream hang would each start their own fetch and queue behind one
-    # another; instead the first pays the timeout and the rest fail fast.
-    # 0 retries immediately.
-    catalog_retry_seconds: float = 30.0
-
-    def resolve_api_token(self) -> str:
-        token = os.environ.get(self.api_token_env)
-        if not token:
-            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
-        return token
 
 
 # Below this, a generated asset would plausibly expire before the bridge could
@@ -377,7 +369,7 @@ class FalModelConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class FalProviderConfig(BaseModel):
+class FalProviderConfig(_TokenAuthProvider):
     """fal.ai (https://fal.ai) — model-hosting broker for tier-1 image models
     (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …).
 
@@ -394,9 +386,7 @@ class FalProviderConfig(BaseModel):
     """
 
     backend: Literal["fal"]
-    id: str
     base_url: str = "https://fal.run"
-    api_token_env: str
     request_timeout_seconds: float = 600.0
     # Ceiling on a single generated asset downloaded from fal's CDN, in MB.
     # Same reasoning as ImageRouter's: the fetch is streamed and abandoned on
@@ -484,14 +474,8 @@ class FalProviderConfig(BaseModel):
     # very next request.
     introspect_retry_seconds: float = 300.0
 
-    def resolve_api_token(self) -> str:
-        token = os.environ.get(self.api_token_env)
-        if not token:
-            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
-        return token
 
-
-class OpenAIPassthroughProviderConfig(BaseModel):
+class OpenAIPassthroughProviderConfig(_CachedCatalogProvider):
     """Generic OpenAI-API-compatible upstream (llama-server, vLLM, OpenAI itself,
     Venice's chat endpoint, any vendor that speaks the OpenAI wire protocol).
 
@@ -501,7 +485,6 @@ class OpenAIPassthroughProviderConfig(BaseModel):
     """
 
     backend: Literal["openai"]
-    id: str
     base_url: str
     # Optional: many local OpenAI-compat servers (llama-server, vLLM with no
     # auth, lmstudio) require no Authorization header. Leave api_token_env
@@ -511,33 +494,18 @@ class OpenAIPassthroughProviderConfig(BaseModel):
     # this — the bridge holds the connection open for as long as the upstream
     # keeps writing.
     request_timeout_seconds: float = 120.0
-    # How long the model catalogue is reused before being re-fetched. Same
-    # knobs, and the same reasoning, as every other backend: /v1/models fans
-    # out to every provider on every request, so an uncached listing costs an
-    # upstream round trip per client refresh. This backend went without one
-    # for longer than the others, which made it the sole reason a wedged
-    # upstream could stall the whole endpoint on every request rather than
-    # once per window. 0 disables caching.
-    #
-    # Note for llama.cpp: a model's `meta.n_ctx` only appears while it is
-    # loaded, so a cached listing can report a context window the upstream has
-    # since unloaded. Router mode also publishes `status.args`, which is read
-    # as a cold fallback, so the field survives the model being swapped out.
-    catalog_ttl_seconds: float = 300.0
-    # After a failed catalogue fetch, how long before another is attempted.
-    # The fetch runs under a lock, so without this a burst arriving during an
-    # upstream hang would each start their own fetch and queue behind one
-    # another; instead the first pays the timeout and the rest fail fast.
-    # 0 retries immediately.
-    catalog_retry_seconds: float = 30.0
+    # Catalogue caching is inherited (see _CachedCatalogProvider). Note for
+    # llama.cpp: a model's `meta.n_ctx` only appears while it is loaded, so a
+    # cached listing can report a context window the upstream has since
+    # unloaded. Router mode also publishes `status.args`, which is read as a
+    # cold fallback, so the field survives the model being swapped out.
 
     def resolve_api_token(self) -> str | None:
+        """Optional credential — unlike every other provider, this one may
+        legitimately have none (llama-server, vLLM without auth, LM Studio)."""
         if not self.api_token_env:
             return None
-        token = os.environ.get(self.api_token_env)
-        if not token:
-            raise ConfigError(f"Provider '{self.id}': env var '{self.api_token_env}' is not set")
-        return token
+        return _require_env_token(self.id, self.api_token_env)
 
 
 ProviderConfig = Annotated[
