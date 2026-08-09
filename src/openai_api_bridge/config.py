@@ -78,6 +78,12 @@ class BridgeSettings(BaseSettings):
         default=Path("/var/lib/openai-api-bridge/state.db"),
         alias="SQLITE_PATH",
     )
+    # Ceiling on an inbound request body. The bridge reads bodies whole —
+    # `UploadFile.read()` on every reference image, `request.json()` on the
+    # passthrough paths — on a single uvicorn worker, so one oversized request
+    # is felt by every other client. 100MB clears a 16-image edit at realistic
+    # resolutions and a large embedding batch; 0 disables the check.
+    max_request_mb: int = Field(default=100, alias="BRIDGE_MAX_REQUEST_MB")
     retention_days: int = Field(default=30, alias="RETENTION_DAYS")
     max_cache_gb: int = Field(default=50, alias="MAX_CACHE_GB")
     eviction_interval_seconds: int = Field(default=600, alias="EVICTION_INTERVAL_SECONDS")
@@ -132,6 +138,10 @@ class BridgeSettings(BaseSettings):
     @property
     def max_cache_bytes(self) -> int:
         return self.max_cache_gb * 1024**3
+
+    @property
+    def max_request_bytes(self) -> int:
+        return self.max_request_mb * 1024**2
 
 
 # --- Provider config (TOML-backed) ------------------------------------------

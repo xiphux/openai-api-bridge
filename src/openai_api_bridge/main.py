@@ -24,6 +24,7 @@ from .api import files as files_api
 from .api import images as images_api
 from .api import models as models_api
 from .api import videos as videos_api
+from .api._limits import BodySizeLimitMiddleware
 from .auth import require_api_key  # noqa: F401  (imported here to keep DI graph alive)
 from .config import (
     BridgeSettings,
@@ -179,6 +180,12 @@ def create_app() -> FastAPI:
     # ``Exception`` and narrowing again at runtime, which loses the precision
     # where it's actually useful. Ignore the two narrow registrations instead;
     # the ``Exception`` one below already matches.
+    # Outermost, so an oversized body is refused before Starlette's multipart
+    # parser spools it to disk or a route reads it into memory. It renders its
+    # own 413 rather than raising, since exception handlers sit inside the
+    # middleware stack and would never see it.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+
     app.add_exception_handler(BridgeError, bridge_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(RequestValidationError, _validation_handler)  # type: ignore[arg-type]
     app.add_exception_handler(Exception, _unhandled_handler)

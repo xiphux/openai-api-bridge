@@ -136,6 +136,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "BRIDGE_API_KEY",
         "BRIDGE_CONFIG_PATH",
         "BRIDGE_ENABLE_DOCS",
+        "BRIDGE_MAX_REQUEST_MB",
         "BRIDGE_PUBLIC_BASE_URL",
         "FILES_DIR",
         "SQLITE_PATH",

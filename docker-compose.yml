@@ -24,6 +24,11 @@ services:
       # never reach the container, and this is the knob that decides whether a
       # slow provider is omitted from a listing.
       MODELS_TIMEOUT_SECONDS: ${MODELS_TIMEOUT_SECONDS:-5}
+      # Request-body ceiling and the unauthenticated docs routes. Listed for
+      # the same reason as the knob above — this block is an allowlist, so a
+      # value set only in .env never reaches the container.
+      BRIDGE_MAX_REQUEST_MB: ${BRIDGE_MAX_REQUEST_MB:-100}
+      BRIDGE_ENABLE_DOCS: ${BRIDGE_ENABLE_DOCS:-false}
       BRIDGE_PUBLIC_BASE_URL: ${BRIDGE_PUBLIC_BASE_URL:-}
     volumes:
       # Provider definitions. Bind-mount because they're hand-edited.

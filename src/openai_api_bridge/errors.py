@@ -88,6 +88,20 @@ class JobNotReady(BridgeError):
     code = "job_not_ready"
 
 
+class RequestTooLarge(BridgeError):
+    """The request body exceeds ``BRIDGE_MAX_REQUEST_MB``.
+
+    Raised from ASGI middleware rather than a route, because the point is to
+    refuse the bytes *before* anything buffers them — so it is rendered
+    directly there rather than through ``bridge_error_handler``, which sits
+    inside the middleware stack and never sees it.
+    """
+
+    status_code = 413
+    error_type = "invalid_request_error"
+    code = "request_too_large"
+
+
 # 5xx — upstream / infra errors
 
 
