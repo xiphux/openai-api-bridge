@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from ..config import BridgeSettings
 from ..dispatcher import BackendDispatcher
 from ..errors import BridgeError
 from ..infra.filestore import FileStore
@@ -24,7 +23,6 @@ async def run_video_job(
     job_id: str,
     provider_id: str,
     model_slug: str,
-    full_model_id: str,
     prompt: str,
     size: str | None,
     seconds: float | None,
@@ -33,10 +31,8 @@ async def run_video_job(
     dispatcher: BackendDispatcher,
     jobstore: JobStore,
     filestore: FileStore,
-    settings: BridgeSettings,
 ) -> None:
     """Drive one video generation; persist state transitions to ``video_jobs``."""
-    del settings, full_model_id  # reserved for future telemetry
 
     async def _persist_upstream_id(upstream_id: str) -> None:
         try:

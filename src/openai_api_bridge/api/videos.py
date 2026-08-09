@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
 
 from ..auth import require_api_key
-from ..config import BridgeSettings, parse_model_id
+from ..config import parse_model_id
 from ..dispatcher import BackendDispatcher
 from ..errors import (
     InvalidRequest,
@@ -88,7 +88,6 @@ async def videos_create(
     )
 
     scheduler: TaskScheduler = request.app.state.scheduler
-    settings: BridgeSettings = request.app.state.settings
     filestore: FileStore = request.app.state.filestore
 
     scheduler.submit(
@@ -96,7 +95,6 @@ async def videos_create(
             job_id=job_id,
             provider_id=provider_id,
             model_slug=model_slug,
-            full_model_id=model,
             prompt=prompt,
             size=size,
             seconds=seconds,
@@ -105,7 +103,6 @@ async def videos_create(
             dispatcher=dispatcher,
             jobstore=jobstore,
             filestore=filestore,
-            settings=settings,
         ),
         name=f"video-job-{job_id}",
     )

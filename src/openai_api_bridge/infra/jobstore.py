@@ -21,6 +21,13 @@ class VideoJob:
     prompt: str
     size: str | None
     seconds: float | None
+    # **Always None.** The column exists and is read back here, but nothing
+    # writes it: an image-to-video reference lives in memory for the life of
+    # the runner task (see `_videos_runner`) and is never put in the FileStore,
+    # which is also why a job can't survive a restart. Kept as schema and as a
+    # field because persisting the reference is the missing half of resumable
+    # video jobs, and dropping the column needs a migration to get back.
+    # Same honesty as `FileStore.set_pinned`.
     input_reference_file_id: str | None
     file_id: str | None
     upstream_id: str | None
@@ -60,15 +67,21 @@ class JobStore:
         prompt: str,
         size: str | None,
         seconds: float | None,
-        input_reference_file_id: str | None = None,
     ) -> VideoJob:
+        """Insert a queued job.
+
+        ``input_reference_file_id`` is deliberately not a parameter — see the
+        note on :class:`VideoJob`. It took one, defaulted to ``None``, and no
+        caller ever passed it, so the column read as live state that was in
+        fact always NULL.
+        """
         now = int(time.time())
         await self.db.execute(
             """INSERT INTO video_jobs (
-                   id, status, model, prompt, size, seconds, input_reference_file_id,
+                   id, status, model, prompt, size, seconds,
                    created_at, updated_at
-               ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?)""",
-            (job_id, model, prompt, size, seconds, input_reference_file_id, now, now),
+               ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)""",
+            (job_id, model, prompt, size, seconds, now, now),
         )
         job = await self.get(job_id)
         assert job is not None  # we just inserted it
