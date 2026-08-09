@@ -236,6 +236,14 @@ def test_image_generation_full_flow(
     assert r2.content == PNG_MAGIC
     assert r2.headers["content-type"] == "image/png"
 
+    # A generated asset never changes, so a client holding it should be able
+    # to skip the transfer entirely on the next render rather than
+    # re-downloading the whole file.
+    assert r2.headers["cache-control"] == "private, max-age=31536000, immutable"
+    r3 = client_with_comfyui.get(url, headers={**headers, "If-None-Match": r2.headers["etag"]})
+    assert r3.status_code == 304
+    assert r3.content == b""
+
 
 @respx.mock
 def test_image_generation_b64_json_response_format(

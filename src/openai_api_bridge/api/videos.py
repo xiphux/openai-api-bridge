@@ -6,8 +6,7 @@ import logging
 import secrets
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, Header, Request, Response, UploadFile
 
 from ..auth import require_api_key
 from ..config import BridgeSettings, parse_model_id
@@ -21,6 +20,7 @@ from ..errors import (
 from ..infra.filestore import FileStore
 from ..infra.jobstore import JobStore, VideoJob
 from ..infra.tasks import TaskScheduler
+from ._assets import asset_response
 from ._videos_runner import run_video_job
 
 log = logging.getLogger(__name__)
@@ -156,7 +156,11 @@ async def videos_cancel(video_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get("/v1/videos/{video_id}/content", dependencies=[Depends(require_api_key)])
-async def videos_get_content(video_id: str, request: Request) -> FileResponse:
+async def videos_get_content(
+    video_id: str,
+    request: Request,
+    if_none_match: Annotated[str | None, Header()] = None,
+) -> Response:
     jobstore: JobStore = request.app.state.jobstore
     filestore: FileStore = request.app.state.filestore
 
@@ -174,4 +178,4 @@ async def videos_get_content(video_id: str, request: Request) -> FileResponse:
         # at completion time to prevent this, but for v1 we accept it.
         raise JobNotFound("Video file no longer available (evicted from cache)")
     abs_path, meta = result
-    return FileResponse(abs_path, media_type=meta.content_type)
+    return asset_response(abs_path, meta, if_none_match=if_none_match)
