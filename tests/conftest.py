@@ -98,6 +98,30 @@ def client(
 
 
 @pytest.fixture
+def docs_client(
+    monkeypatch: pytest.MonkeyPatch,
+    empty_config: Path,
+    files_dir: Path,
+    sqlite_path: Path,
+) -> Iterator[TestClient]:
+    """``client``, but with the interactive docs opted back in."""
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
+    monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(empty_config))
+    monkeypatch.setenv("FILES_DIR", str(files_dir))
+    monkeypatch.setenv("SQLITE_PATH", str(sqlite_path))
+    monkeypatch.setenv("LOG_LEVEL", "WARNING")
+    monkeypatch.setenv("BRIDGE_ENABLE_DOCS", "true")
+    reset_caches_for_tests()
+
+    from openai_api_bridge.main import create_app
+
+    app = create_app()
+    with TestClient(app) as c:
+        yield c
+    reset_caches_for_tests()
+
+
+@pytest.fixture
 def auth_headers() -> dict[str, str]:
     return {"Authorization": "Bearer test-bridge-api-key"}
 
@@ -111,6 +135,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "BRIDGE_API_KEY",
         "BRIDGE_CONFIG_PATH",
+        "BRIDGE_ENABLE_DOCS",
         "BRIDGE_PUBLIC_BASE_URL",
         "FILES_DIR",
         "SQLITE_PATH",

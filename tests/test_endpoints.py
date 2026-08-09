@@ -6,6 +6,7 @@ and 404 paths. Backend-success paths are covered separately with respx stubs.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -30,6 +31,19 @@ def test_auth_rejects_non_ascii_key_as_401(client: TestClient) -> None:
 def test_auth_rejects_wrong_key(client: TestClient) -> None:
     r = client.get("/v1/models", headers={"Authorization": "Bearer nope"})
     assert r.status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_docs_routes_absent_by_default(client: TestClient, path: str) -> None:
+    """FastAPI mounts these outside the auth dependency, so they answered
+    unauthenticated and published the whole API surface to anyone who could
+    reach the port. Off unless BRIDGE_ENABLE_DOCS says otherwise."""
+    assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_docs_routes_served_when_opted_in(docs_client: TestClient, path: str) -> None:
+    assert docs_client.get(path).status_code == 200
 
 
 def test_models_lists_empty(client: TestClient, auth_headers: dict[str, str]) -> None:

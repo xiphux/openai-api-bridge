@@ -154,12 +154,23 @@ def _unhandled_handler(_request: Request, exc: Exception) -> JSONResponse:
 
 
 def create_app() -> FastAPI:
+    # Read here rather than only in the lifespan so a bad config aborts at
+    # import, before uvicorn binds the port. Every caller (the console script,
+    # uvicorn's "main:app" import, the tests) already has the environment set
+    # by this point.
+    settings = get_settings()
+    # FastAPI mounts /docs, /redoc and /openapi.json outside the dependency
+    # graph, so they answer without the bearer token every real route
+    # requires. Passing None removes the routes entirely rather than hiding
+    # them. See BridgeSettings.enable_docs.
+    docs_enabled = settings.enable_docs
     app = FastAPI(
         title="OpenAI API Bridge",
         description="OpenAI-compatible HTTP bridge for ComfyUI and Venice.",
         lifespan=lifespan,
-        # Disable the default OpenAPI/docs auth-free routes? For v1 we leave
-        # them enabled since they don't hit any backend.
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
     # Starlette types the handler argument as taking a bare ``Exception``,
     # but it dispatches by the class registered alongside it, so a handler is

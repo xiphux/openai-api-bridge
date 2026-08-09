@@ -233,6 +233,7 @@ sensibly:
 |---|---|---|
 | `BRIDGE_API_KEY` | — (required) | Bearer token clients must send. Must be at least 16 characters and not the `.env.example` placeholder — the bridge refuses to start otherwise, because an empty value makes `Authorization: Bearer ` a valid credential for every caller that can reach the port. Generate one with `openssl rand -hex 24` |
 | `BRIDGE_HOST` / `BRIDGE_PORT` | `0.0.0.0` / `8080` | Bind address |
+| `BRIDGE_ENABLE_DOCS` | `false` | Serve the interactive API docs (`/docs`, `/redoc`, `/openapi.json`). FastAPI mounts these outside the bearer-token dependency, so they answer *unauthenticated* — off by default; turn on only on a trusted network |
 | `BRIDGE_PUBLIC_BASE_URL` | empty | Public origin used to build asset URLs in responses (e.g. `https://bridge.example.com`). Empty → relative URLs, fine when clients reach the bridge at the same host they requested from |
 | `BRIDGE_CONFIG_PATH` | `/etc/openai-api-bridge/config.toml` | Provider config location |
 | `FILES_DIR` | `/var/lib/openai-api-bridge/files` | Generated-asset cache directory |

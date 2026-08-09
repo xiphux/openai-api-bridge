@@ -94,6 +94,15 @@ class BridgeSettings(BaseSettings):
     # there. A cold fal catalogue (10-13 paginated round trips) legitimately
     # exceeds this on the first request after boot and appears on the second.
     models_timeout_seconds: float = Field(default=5.0, alias="MODELS_TIMEOUT_SECONDS")
+    # Whether to serve the interactive API docs (`/docs`, `/redoc`,
+    # `/openapi.json`). Off by default: FastAPI mounts them *outside* the
+    # bearer-token dependency every real route carries, so they hand the
+    # bridge's complete API surface — and a positive identification of what is
+    # listening — to anyone who can reach the port, without a credential. They
+    # touch no backend, which is why they were left on for v1; that makes them
+    # harmless to *the backends*, not unobservable. Opt in when exploring the
+    # API on a trusted network.
+    enable_docs: bool = Field(default=False, alias="BRIDGE_ENABLE_DOCS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     @field_validator("api_key")
