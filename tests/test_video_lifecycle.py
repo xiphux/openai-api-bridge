@@ -353,3 +353,97 @@ async def test_first_writer_wins_on_the_error_message(jobstore: JobStore) -> Non
     job = await jobstore.get("j3")
     assert job is not None
     assert job.error_message == "Cancelled by user"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_poll_interval_ramps_instead_of_staying_flat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flat interval is wrong at both ends of ComfyUI's range.
+
+    Fast enough for a 3-second image render is ~900 requests over a 15-minute
+    video, at a web thread that is CPU-starved during generation — polling that
+    hard slows the render it is waiting on. Slow enough for the video adds most
+    of a second of dead time to every image.
+    """
+    slept: list[float] = []
+
+    async def record(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(comfy_client_module.asyncio, "sleep", record)
+    respx.get("http://comfy/history/ramp-id").mock(
+        side_effect=[httpx.Response(200, json={}) for _ in range(8)]
+        + [httpx.Response(200, json={"ramp-id": {"outputs": {}}})]
+    )
+    respx.get("http://comfy/queue").mock(
+        return_value=httpx.Response(
+            200, json={"queue_running": [[0, "ramp-id", {}, {}]], "queue_pending": []}
+        )
+    )
+
+    client = ComfyUIClient(
+        base_url="http://comfy",
+        poll_interval_seconds=0.25,
+        max_poll_interval_seconds=5.0,
+    )
+    try:
+        await client.poll_completion("ramp-id", timeout_seconds=600.0)
+    finally:
+        await client.aclose()
+
+    # First check comes quickly, so a fast workflow isn't left waiting.
+    assert slept[0] == pytest.approx(0.25)
+    # And the interval grows rather than staying put.
+    assert slept == sorted(slept)
+    assert slept[-1] > slept[0]
+    # Eight polls in, a long render is already checked far less often — over
+    # 15 minutes that is ~190 requests rather than ~900.
+    assert slept[7] == pytest.approx(0.25 * 1.5**7)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_poll_interval_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ceiling has to stay well inside QUEUE_RECHECK_INTERVAL, or the
+    dropped-prompt detection loses its cadence."""
+    slept: list[float] = []
+
+    async def record(delay: float) -> None:
+        slept.append(delay)
+
+    monkeypatch.setattr(comfy_client_module.asyncio, "sleep", record)
+    respx.get("http://comfy/history/capped-id").mock(
+        side_effect=[httpx.Response(200, json={}) for _ in range(40)]
+        + [httpx.Response(200, json={"capped-id": {"outputs": {}}})]
+    )
+    respx.get("http://comfy/queue").mock(
+        return_value=httpx.Response(
+            200, json={"queue_running": [[0, "capped-id", {}, {}]], "queue_pending": []}
+        )
+    )
+
+    client = ComfyUIClient(
+        base_url="http://comfy",
+        poll_interval_seconds=0.25,
+        max_poll_interval_seconds=5.0,
+    )
+    try:
+        await client.poll_completion("capped-id", timeout_seconds=600.0)
+    finally:
+        await client.aclose()
+
+    assert max(slept) == pytest.approx(5.0)
+    assert max(slept) < comfy_client_module.QUEUE_RECHECK_INTERVAL
+
+
+@pytest.mark.asyncio
+async def test_ceiling_never_outruns_a_deliberately_slow_start() -> None:
+    """An operator who slows polling down shouldn't have the default ceiling
+    speed it back up."""
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=20.0)
+    try:
+        assert client.max_poll_interval == 20.0
+    finally:
+        await client.aclose()

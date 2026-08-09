@@ -73,6 +73,7 @@ class ComfyUIBackend(Backend):
         self.client = ComfyUIClient(
             base_url=cfg.url,
             poll_interval_seconds=cfg.poll_interval_seconds,
+            max_poll_interval_seconds=cfg.max_poll_interval_seconds,
         )
         self._workflows: dict[str, WorkflowRecord] | None = None
         self._stamp: tuple[tuple[str, int, int], ...] | None = None

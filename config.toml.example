@@ -23,7 +23,12 @@ id = "comfyui"
 backend = "comfyui"
 url = "http://127.0.0.1:8188"
 workflows_dir = "/var/lib/openai-api-bridge/workflows"
-poll_interval_seconds = 1.0
+# Completion polling starts here and eases out to max_poll_interval_seconds,
+# so a fast image workflow is collected almost as soon as it finishes while a
+# long video doesn't spend 15 minutes hammering ComfyUI's web thread (which is
+# CPU-starved during generation — polling hard slows the render itself).
+poll_interval_seconds = 0.25
+max_poll_interval_seconds = 5.0
 poll_timeout_image_seconds = 300
 poll_timeout_video_seconds = 900
 

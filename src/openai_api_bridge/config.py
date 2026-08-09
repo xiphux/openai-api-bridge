@@ -91,7 +91,14 @@ class ComfyUIProviderConfig(BaseModel):
     id: str
     url: str = "http://127.0.0.1:8188"
     workflows_dir: Path
-    poll_interval_seconds: float = 1.0
+    # Where completion polling *starts*. It eases out towards
+    # max_poll_interval_seconds as a generation runs on, so this governs how
+    # quickly a fast workflow is collected rather than the steady-state load a
+    # long one puts on the box.
+    poll_interval_seconds: float = 0.25
+    # Ceiling the interval climbs to. Clamped up to poll_interval_seconds, so
+    # setting only the start still slows polling down as intended.
+    max_poll_interval_seconds: float = 5.0
     poll_timeout_image_seconds: float = 300.0
     poll_timeout_video_seconds: float = 900.0
     cache_workflows: bool = True
