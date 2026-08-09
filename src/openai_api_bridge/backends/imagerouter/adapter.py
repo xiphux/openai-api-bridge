@@ -18,6 +18,7 @@ import logging
 
 from ...config import ImageRouterProviderConfig
 from ...util.cache import AsyncTTLCache
+from ...util.concurrency import run_all
 from ..base import (
     Backend,
     GeneratedAsset,
@@ -98,14 +99,17 @@ class ImageRouterBackend(Backend):
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # ImageRouter doesn't support n > 1 natively (its response is single-
-        # image). To honor n, we make sequential requests — same outcome,
-        # different round-trip count. n=1 is by far the common case.
-        out: list[GeneratedAsset] = []
-        for _ in range(n):
+        # image), so honouring n means one request per image. They're
+        # independent, so they go out concurrently: run serially, the caller
+        # waited for the sum of n generations inside a single synchronous
+        # POST /v1/images/generations. n=1 is by far the common case and is
+        # unaffected either way.
+        async def one() -> GeneratedAsset:
             url = await self.client.generate_image_url(model=model_slug, prompt=prompt, size=size)
             data, content_type = await self.client.fetch_asset(url)
-            out.append(GeneratedAsset(data=data, content_type=content_type, kind="image"))
-        return out
+            return GeneratedAsset(data=data, content_type=content_type, kind="image")
+
+        return await run_all([one] * n)
 
     async def edit_image(
         self,
@@ -116,8 +120,7 @@ class ImageRouterBackend(Backend):
         size: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
-        out: list[GeneratedAsset] = []
-        for _ in range(n):
+        async def one() -> GeneratedAsset:
             url = await self.client.edit_image_url(
                 model=model_slug,
                 prompt=prompt,
@@ -125,8 +128,9 @@ class ImageRouterBackend(Backend):
                 size=size,
             )
             data, content_type = await self.client.fetch_asset(url)
-            out.append(GeneratedAsset(data=data, content_type=content_type, kind="image"))
-        return out
+            return GeneratedAsset(data=data, content_type=content_type, kind="image")
+
+        return await run_all([one] * n)
 
     async def generate_video(
         self,

@@ -18,6 +18,7 @@ from typing import Any
 from ...config import VeniceProviderConfig
 from ...errors import InvalidRequest, UnsupportedOperation
 from ...util.cache import AsyncTTLCache
+from ...util.concurrency import run_all
 from ...util.sizes import parse_size
 from ..base import (
     Backend,
@@ -207,8 +208,7 @@ class VeniceBackend(Backend):
         width = w or self.cfg.default_width
         height = h or self.cfg.default_height
 
-        out: list[GeneratedAsset] = []
-        for _ in range(n):
+        async def one() -> GeneratedAsset:
             data = await self.client.generate_image(
                 model=model_slug,
                 prompt=prompt,
@@ -217,8 +217,14 @@ class VeniceBackend(Backend):
                 steps=self.cfg.steps,
                 cfg_scale=self.cfg.cfg_scale,
             )
-            out.append(GeneratedAsset(data=data, content_type=_VENICE_CONTENT_TYPE, kind="image"))
-        return out
+            return GeneratedAsset(data=data, content_type=_VENICE_CONTENT_TYPE, kind="image")
+
+        # Venice has no server-side `n`, so the bridge issues one request per
+        # image — concurrently, since they're independent. Serially the caller
+        # waited for the sum of n generations inside a single synchronous
+        # POST /v1/images/generations, which at the permitted n=4 lands well
+        # past most clients' timeouts.
+        return await run_all([one] * n)
 
     async def edit_image(
         self,
@@ -245,16 +251,17 @@ class VeniceBackend(Backend):
         if target != model_slug:
             log.debug("Venice: routing edit for %r to %r", model_slug, target)
         image = images[0]
-        out: list[GeneratedAsset] = []
-        for _ in range(n):
+
+        async def one() -> GeneratedAsset:
             data, content_type = await self.client.edit_image(
                 model=target,
                 prompt=prompt,
                 image=image.data,
                 image_content_type=image.content_type,
             )
-            out.append(GeneratedAsset(data=data, content_type=content_type, kind="image"))
-        return out
+            return GeneratedAsset(data=data, content_type=content_type, kind="image")
+
+        return await run_all([one] * n)
 
     async def generate_video(
         self,

@@ -23,6 +23,7 @@ from typing import Any
 
 from ...config import OpenRouterProviderConfig
 from ...util.cache import AsyncTTLCache
+from ...util.concurrency import run_all
 from ..base import (
     KIND_OUTPUT_MODALITY,
     Backend,
@@ -133,15 +134,13 @@ class OpenRouterBackend(Backend):
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # OpenRouter doesn't support a server-side ``n`` for image output —
-        # each chat call returns one image. We loop here so the bridge's
-        # ``n>1`` semantics still work.
+        # each chat call returns one image, so the bridge issues n of them.
+        # Concurrently: they're independent, and serially the caller waited
+        # for the sum of n generations inside one synchronous request.
         # ``size`` is ignored: OpenRouter's image-via-chat protocol doesn't
         # expose a size parameter; the model picks its own resolution.
         del size
-        results: list[GeneratedAsset] = []
-        for _ in range(n):
-            results.append(await self._generate_one(model_slug, prompt, images=[]))
-        return results
+        return await run_all([lambda: self._generate_one(model_slug, prompt, images=[])] * n)
 
     async def edit_image(
         self,
@@ -162,10 +161,7 @@ class OpenRouterBackend(Backend):
             f"data:{img.content_type};base64,{base64.b64encode(img.data).decode('ascii')}"
             for img in images
         ]
-        results: list[GeneratedAsset] = []
-        for _ in range(n):
-            results.append(await self._generate_one(model_slug, prompt, images=data_urls))
-        return results
+        return await run_all([lambda: self._generate_one(model_slug, prompt, images=data_urls)] * n)
 
     # --- internal helper -------------------------------------------------
 
