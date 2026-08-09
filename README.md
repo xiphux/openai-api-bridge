@@ -169,6 +169,58 @@ rules, display-name disambiguation, retention mechanics, and video job handling.
   batch.** Not currently in scope; could be added per the same pattern if
   needed.
 
+## Security model
+
+The bridge assumes a **trusted network**. It is an aggregation layer for your
+own generation backends, not a multi-tenant gateway, and the design reflects
+that — read this before putting it anywhere reachable from the internet.
+
+**One shared credential, all or nothing.** `BRIDGE_API_KEY` is a single bearer
+token with no scopes, no per-client keys, and no per-caller isolation. Anyone
+holding it can use every configured provider (spending whatever those
+providers bill), read every cached asset, and cancel any video job. There is
+no notion of "your" files versus someone else's — asset ids are unguessable
+128-bit random values, and that is the only thing separating one caller's
+generations from another's.
+
+What the bridge does enforce:
+
+- Every route requires the bearer token, compared in constant time. The
+  interactive docs are off by default (`BRIDGE_ENABLE_DOCS`) because FastAPI
+  mounts them outside that check, and the process refuses to start on an
+  empty, trivial, or placeholder key.
+- Request bodies are capped (`BRIDGE_MAX_REQUEST_MB`) before being buffered,
+  and downloaded assets are capped (`max_asset_mb`) as they stream.
+- Stored assets are served `nosniff` + `Content-Disposition: attachment`, with
+  media types narrowed to a known-good set.
+- Provider secrets live in environment variables referenced *by name* from
+  `config.toml`, are read at point of use, and are never copied into
+  application state or written to the config file. Asset downloads go out on a
+  separate unauthenticated client, so an upstream token can never be attached
+  to a CDN request or survive a redirect.
+- An upstream's `401`/`403` response body is never echoed to clients — some
+  providers quote the offending token back.
+
+What it does **not** do, by design or by omission:
+
+- **No rate limiting and no lockout** on failed authentication. A strong key
+  plus constant-time comparison is what stands between the bridge and a brute
+  force; there is nothing to slow an attacker who can reach the port.
+- **No audit log.** Failed auth attempts are not recorded, so probing is
+  invisible.
+- **No TLS.** Terminate it at a reverse proxy in front of the bridge.
+- **Prompts are persisted in the clear.** `video_jobs.prompt` is kept
+  indefinitely (see [Storage & retention](#storage--retention)) and
+  `generated_files.prompt_excerpt` holds the first 500 characters of every
+  image prompt until that file is evicted. The SQLite database is not
+  encrypted; treat it as sensitive and back it up accordingly.
+
+Deployment guidance: bind to loopback and front the bridge with a reverse
+proxy (`BRIDGE_HOST=127.0.0.1`) unless it genuinely needs to answer on other
+interfaces. The default is `0.0.0.0` because the Docker image needs it to be
+reachable outside the container; on a bare-metal or systemd install that
+default puts the bridge on every interface the host has.
+
 ## API surface
 
 | Method | Path | Notes |

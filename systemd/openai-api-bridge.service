@@ -17,6 +17,12 @@ WorkingDirectory=/opt/openai-api-bridge
 EnvironmentFile=/etc/openai-api-bridge.env
 
 # Pinned defaults. Override in the EnvironmentFile if needed.
+#
+# BRIDGE_HOST defaults to 0.0.0.0 — the Docker image needs that to be
+# reachable outside its container, but here it means every interface the host
+# has. Uncomment to bind loopback only, which is what you want when a reverse
+# proxy fronts the bridge (and it should, since the bridge speaks no TLS).
+# Environment="BRIDGE_HOST=127.0.0.1"
 Environment="BRIDGE_CONFIG_PATH=/etc/openai-api-bridge/config.toml"
 Environment="FILES_DIR=/var/lib/openai-api-bridge/files"
 Environment="SQLITE_PATH=/var/lib/openai-api-bridge/state.db"
