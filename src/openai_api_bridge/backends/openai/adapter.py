@@ -130,10 +130,10 @@ class OpenAIPassthroughBackend(Backend):
         body: dict[str, Any],
         *,
         stream: bool,
-    ) -> dict[str, Any] | AsyncIterator[bytes]:
+    ) -> bytes | AsyncIterator[bytes]:
         if stream:
             return await self.client.chat_completion_stream(body)
         return await self.client.chat_completion(body)
 
-    async def create_embedding(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def create_embedding(self, body: dict[str, Any]) -> bytes:
         return await self.client.create_embedding(body)

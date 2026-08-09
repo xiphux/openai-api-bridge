@@ -5,14 +5,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
 
 from ..auth import require_api_key
 from ..backends.base import Backend
 from ..config import parse_model_id
 from ..dispatcher import BackendDispatcher
-from ..errors import InvalidRequest, UnsupportedOperation
+from ..errors import InvalidRequest, UnsupportedOperation, UpstreamError
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -22,11 +22,11 @@ router = APIRouter()
     "/v1/chat/completions",
     dependencies=[Depends(require_api_key)],
     # Disable FastAPI's auto-derived response model: this endpoint returns
-    # either a JSONResponse (sync) or a StreamingResponse (SSE), and the
+    # either a plain Response (sync) or a StreamingResponse (SSE), and the
     # union confuses Pydantic's field-builder.
     response_model=None,
 )
-async def chat_completions(request: Request) -> JSONResponse | StreamingResponse:
+async def chat_completions(request: Request) -> Response | StreamingResponse:
     """Forward a chat-completions request to the right backend.
 
     Body parsing is intentionally minimal — we extract `model` to dispatch and
@@ -59,6 +59,16 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
 
     if stream_requested:
         sse_iterator = await backend.chat_completion(forwarded_body, stream=True)
+        if isinstance(sse_iterator, bytes):
+            # A backend that answered stream=True with a whole body. Worth
+            # naming rather than forwarding: StreamingResponse would iterate
+            # the bytes and emit one SSE frame per *byte*. Previously this
+            # couldn't be caught — the non-streaming return type was a dict,
+            # which satisfies Iterable[str], so the same mistake type-checked
+            # and only showed up as a mangled stream at the client.
+            raise UpstreamError(
+                f"Provider {provider_id!r} returned a non-streaming body for a streaming request"
+            )
         # The upstream's SSE stream is forwarded byte-for-byte. Setting
         # X-Accel-Buffering disables nginx-style proxy buffering so tokens
         # don't get coalesced if there's a reverse proxy in front of us.
@@ -71,8 +81,11 @@ async def chat_completions(request: Request) -> JSONResponse | StreamingResponse
             },
         )
 
+    # The upstream's bytes, forwarded as-is. Decoding the body into Python
+    # objects and re-encoding them would burn CPU on the single event loop —
+    # blocking every other client — to reproduce exactly what we received.
     result = await backend.chat_completion(forwarded_body, stream=False)
-    return JSONResponse(content=result)
+    return Response(content=result, media_type="application/json")
 
 
 def _backend_supports_chat(backend: Backend) -> bool:

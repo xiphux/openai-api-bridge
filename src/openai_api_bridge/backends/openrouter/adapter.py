@@ -17,11 +17,13 @@ to ``/v1/chat/completions``, no model catalog duplication, no surprises.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
 from ...config import OpenRouterProviderConfig
+from ...errors import UpstreamError
 from ...util.cache import AsyncTTLCache
 from ...util.concurrency import run_all
 from ..base import (
@@ -115,12 +117,12 @@ class OpenRouterBackend(Backend):
         body: dict[str, Any],
         *,
         stream: bool,
-    ) -> dict[str, Any] | AsyncIterator[bytes]:
+    ) -> bytes | AsyncIterator[bytes]:
         if stream:
             return await self._client.chat_completion_stream(body)
         return await self._client.chat_completion(body)
 
-    async def create_embedding(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def create_embedding(self, body: dict[str, Any]) -> bytes:
         return await self._client.create_embedding(body)
 
     # --- image generation (translated via chat completions) --------------
@@ -188,7 +190,19 @@ class OpenRouterBackend(Backend):
             # clean UpstreamError if the user picked a non-image model).
             "modalities": ["image", "text"],
         }
-        response = await self._client.chat_completion(body)
+        # The one caller that does need the response as an object: image
+        # generation rides on chat completions here, and the URLs live in a
+        # non-standard `message.images` array we have to read. The passthrough
+        # endpoints forward the same bytes unexamined.
+        raw = await self._client.chat_completion(body)
+        try:
+            response = json.loads(raw)
+        except ValueError as e:
+            raise UpstreamError(
+                f"OpenRouter returned non-JSON on the image path: {raw[:200]!r}"
+            ) from e
+        if not isinstance(response, dict):
+            raise UpstreamError(f"OpenRouter returned a non-object body: {str(response)[:200]}")
         urls = extract_image_data_urls(response)
         # OpenRouter occasionally returns multiple images per response (some
         # models do n>1 internally). We pick the first one — n>1 is handled

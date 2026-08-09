@@ -10,6 +10,11 @@ the bridge can forward them straight to the client. We never parse the SSE
 stream — function calls, tool use, vision, and JSON mode all flow through
 unchanged because their payloads are inside opaque ``data:`` lines we don't
 crack open.
+
+The non-streaming responses are bytes for the same reason. Passthrough means
+the bridge has no opinion about the body, so decoding it into Python objects
+only to re-encode them is CPU spent on the single event loop to reproduce
+what the upstream already sent.
 """
 
 from __future__ import annotations
@@ -79,13 +84,20 @@ class OpenAIClient:
         body = parse_json(response, "Upstream /v1/models")
         return list(body.get("data", []))
 
-    async def chat_completion(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Non-streaming chat completion. Returns the parsed JSON response."""
+    async def chat_completion(self, body: dict[str, Any]) -> bytes:
+        """Non-streaming chat completion. Returns the raw JSON response body.
+
+        Bytes rather than a parsed dict because nothing on the passthrough
+        path reads the response — decoding it only to re-encode it byte-for-
+        byte is CPU spent on the single event loop for no result. A caller
+        that genuinely needs the object (OpenRouter's image-via-chat
+        translation) parses it itself.
+        """
         try:
             response = await self._client.post(f"{self.base_url}/v1/chat/completions", json=body)
         except httpx.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/chat/completions failed: {e}") from e
-        return self._parse_response(response, "/v1/chat/completions")
+        return self._raw_body(response, "/v1/chat/completions")
 
     async def chat_completion_stream(self, body: dict[str, Any]) -> AsyncIterator[bytes]:
         """Streaming chat completion. Yields raw SSE byte chunks until the
@@ -123,23 +135,31 @@ class OpenAIClient:
 
         return iterator()
 
-    async def create_embedding(self, body: dict[str, Any]) -> dict[str, Any]:
+    async def create_embedding(self, body: dict[str, Any]) -> bytes:
+        """Embeddings passthrough. Returns the raw JSON response body.
+
+        The same argument as ``chat_completion``, but this is where it bites:
+        a RAG ingestion batch is megabytes of float arrays, and parsing then
+        re-serialising one measured 53ms of event-loop block — time every
+        other client of the bridge spends waiting, for a byte-identical
+        result.
+        """
         try:
             response = await self._client.post(f"{self.base_url}/v1/embeddings", json=body)
         except httpx.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/embeddings failed: {e}") from e
-        return self._parse_response(response, "/v1/embeddings")
+        return self._raw_body(response, "/v1/embeddings")
 
     # --- helpers ----------------------------------------------------------
 
-    def _parse_response(self, response: httpx.Response, endpoint: str) -> dict[str, Any]:
+    def _raw_body(self, response: httpx.Response, endpoint: str) -> bytes:
+        """The upstream's 200 body, unexamined; a typed error otherwise.
+
+        A non-200 is still decoded — the error path needs the text to build a
+        useful message, and an error body is small.
+        """
         if response.status_code == 200:
-            try:
-                return dict(response.json())
-            except ValueError as e:
-                raise UpstreamError(
-                    f"Upstream {endpoint} returned non-JSON 200: {response.text[:200]!r}"
-                ) from e
+            return response.content
         self._raise_for_status(response.status_code, response.text[:500], endpoint)
         # Unreachable, but mypy needs it
         raise UpstreamError(f"unreachable: {endpoint} status={response.status_code}")

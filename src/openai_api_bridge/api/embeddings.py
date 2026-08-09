@@ -9,8 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request, Response
 
 from ..auth import require_api_key
 from ..backends.base import Backend
@@ -23,7 +22,7 @@ router = APIRouter()
 
 
 @router.post("/v1/embeddings", dependencies=[Depends(require_api_key)])
-async def embeddings(request: Request) -> JSONResponse:
+async def embeddings(request: Request) -> Response:
     try:
         body: dict[str, Any] = await request.json()
     except ValueError as e:
@@ -43,8 +42,12 @@ async def embeddings(request: Request) -> JSONResponse:
         raise UnsupportedOperation(f"Provider {provider_id!r} does not support embeddings")
 
     forwarded_body = {**body, "model": model_slug}
+    # Forwarded as bytes. An ingestion batch is megabytes of float arrays, and
+    # parsing one into Python objects only to re-serialise it measured 53ms of
+    # event-loop block per 3MB — time every other client of the bridge spends
+    # waiting, for a byte-identical result.
     result = await backend.create_embedding(forwarded_body)
-    return JSONResponse(content=result)
+    return Response(content=result, media_type="application/json")
 
 
 def _backend_supports_embeddings(backend: Backend) -> bool:

@@ -361,26 +361,33 @@ class Backend(ABC):
         body: dict[str, Any],
         *,
         stream: bool,
-    ) -> dict[str, Any] | AsyncIterator[bytes]:
+    ) -> bytes | AsyncIterator[bytes]:
         """Forward an OpenAI-shaped chat completion request to the backend.
 
         Default: not supported. Override in OpenAI-passthrough backends.
 
-        When ``stream=False``, returns the upstream's parsed JSON response.
+        When ``stream=False``, returns the upstream's JSON response body.
         When ``stream=True``, returns an async iterator of raw SSE byte chunks
         the bridge will pipe straight to the client without re-parsing — so a
         client's typewriter UI sees tokens land as the upstream emits them.
-        The opaque-bytes shape on the streaming path is deliberate: chat
-        completions chunks include vendor extensions (function calls, vision,
-        tool outputs, JSON mode) we don't need to understand to forward.
+
+        Bytes on both paths, deliberately: chat completions carry vendor
+        extensions (function calls, vision, tool outputs, JSON mode) the
+        bridge doesn't need to understand in order to forward, and decoding a
+        body only to re-encode it is CPU spent on the shared event loop for a
+        byte-identical result.
         """
         raise UnsupportedOperation("Chat completions are not supported by this provider")
 
     async def create_embedding(
         self,
         body: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Forward an OpenAI-shaped embeddings request. Default: not supported."""
+    ) -> bytes:
+        """Forward an OpenAI-shaped embeddings request. Default: not supported.
+
+        Returns the upstream's JSON response body verbatim; see
+        :meth:`chat_completion` for why this is bytes.
+        """
         raise UnsupportedOperation("Embeddings are not supported by this provider")
 
     # --- lifecycle -------------------------------------------------------

@@ -352,3 +352,50 @@ def test_upstream_4xx_propagates_as_400(
         json={"model": "llama/foo", "messages": [{"role": "user", "content": "x"}]},
     )
     assert r.status_code == 400
+
+
+@respx.mock
+def test_embeddings_body_is_forwarded_byte_for_byte(
+    client_with_openai: TestClient,
+) -> None:
+    """Passthrough means passthrough.
+
+    Parsing an ingestion batch into Python objects only to re-serialise it is
+    event-loop time every other client waits through, for a byte-identical
+    result — and a round trip through Python floats is not guaranteed to be
+    byte-identical anyway.
+    """
+    # Formatting a real upstream would never produce, and float spellings that
+    # a parse-then-dump round trip would normalise away.
+    raw = b'{ "object":"list",\n  "data":[{"embedding":[1.0000000000000002,1e-9,-0.0]}] }'
+    respx.post(f"{UPSTREAM}/v1/embeddings").mock(
+        return_value=httpx.Response(200, content=raw, headers={"content-type": "application/json"})
+    )
+
+    r = client_with_openai.post(
+        "/v1/embeddings", headers=HEADERS, json={"model": "llama/embed", "input": "hi"}
+    )
+
+    assert r.status_code == 200
+    assert r.content == raw
+    assert r.headers["content-type"].startswith("application/json")
+
+
+@respx.mock
+def test_chat_completion_body_is_forwarded_byte_for_byte(
+    client_with_openai: TestClient,
+) -> None:
+    raw = b'{"id":"c1",\n "choices":[{"message":{"content":"hi","role":"assistant"}}]}'
+    respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=raw, headers={"content-type": "application/json"})
+    )
+
+    r = client_with_openai.post(
+        "/v1/chat/completions",
+        headers=HEADERS,
+        json={"model": "llama/m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert r.status_code == 200
+    assert r.content == raw
+    assert r.json()["choices"][0]["message"]["content"] == "hi"
