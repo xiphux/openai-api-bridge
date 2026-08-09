@@ -9,6 +9,7 @@ Stubs the upstream Venice HTTP surface with respx and verifies:
 from __future__ import annotations
 
 import asyncio
+import json
 import textwrap
 from collections.abc import Iterator
 from pathlib import Path
@@ -52,6 +53,38 @@ def client_with_venice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
 
 
 HEADERS = {"Authorization": "Bearer test-bridge-api-key"}
+
+
+@respx.mock
+@pytest.mark.parametrize("size", ["-1x100", "1024x0", "garbage", "auto"])
+def test_malformed_size_falls_back_to_configured_defaults(
+    client_with_venice: TestClient,
+    size: str,
+) -> None:
+    """Venice applies its default per dimension with ``w or default``, and
+    ``-1`` is truthy — so a negative width used to arrive upstream as a real
+    request parameter rather than being replaced. fal and ComfyUI both guard
+    with ``> 0``; this backend was the one that didn't, which is why the fix
+    belongs in ``parse_size`` rather than at each call site.
+    """
+    sent: dict[str, object] = {}
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(200, json={"images": ["aGk="]})
+
+    respx.post(f"{UPSTREAM}/api/v1/image/generate").mock(side_effect=responder)
+
+    r = client_with_venice.post(
+        "/v1/images/generations",
+        headers=HEADERS,
+        json={"model": "vn/flux", "prompt": "a cat", "size": size, "response_format": "b64_json"},
+    )
+    assert r.status_code == 200
+    # The provider's configured defaults, never a number derived from the
+    # malformed string.
+    assert sent["width"] == 1024
+    assert sent["height"] == 1024
 
 
 @respx.mock
