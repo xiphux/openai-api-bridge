@@ -36,6 +36,7 @@ import httpx
 
 from ...errors import UpstreamError
 from ...util.http import fetch_asset_with_retry, parse_json, raise_for_upstream_status
+from ...util.media import image_filename
 from ..base import InputImage
 
 log = logging.getLogger(__name__)
@@ -279,15 +280,4 @@ def _filename_for(content_type: str) -> str:
     """Filename component for multipart uploads. ImageRouter uses the
     extension to infer the format when the content-type header is generic;
     keeping it accurate avoids spurious "unsupported format" errors."""
-    ct = content_type.lower()
-    if ct == "image/png":
-        return "image.png"
-    if ct in ("image/jpeg", "image/jpg"):
-        return "image.jpg"
-    if ct == "image/webp":
-        return "image.webp"
-    if ct == "image/gif":
-        return "image.gif"
-    if ct == "image/avif":
-        return "image.avif"
-    return "image"
+    return image_filename(content_type, fallback="image")

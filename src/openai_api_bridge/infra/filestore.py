@@ -31,6 +31,7 @@ from pathlib import Path
 
 import aiosqlite
 
+from ..util.media import asset_extension, sanitize_content_type
 from .db import Database
 
 log = logging.getLogger(__name__)
@@ -75,67 +76,6 @@ _TOUCH_INTERVAL_S = 300
 _DELETE_CHUNK = 400
 
 
-_EXT_BY_TYPE: dict[str, str] = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "video/mp4": ".mp4",
-    "video/webm": ".webm",
-    "video/quicktime": ".mov",
-}
-
-# Media types this store will repeat back to a client verbatim. The stored
-# content type is whatever the upstream's `content-type` header claimed when
-# the asset was fetched, and it is served back as the response's media type —
-# so an upstream, CDN error page or WAF interstitial answering with markup
-# would otherwise decide what a browser does with bytes served from the
-# bridge's own origin.
-#
-# Wider than _EXT_BY_TYPE above, which only needs an entry where there is a
-# file extension worth using: avif and heic are real outputs from these
-# providers and belong here even though the bridge has no extension for them.
-#
-# image/svg+xml is deliberately absent. It is a document format that carries
-# script, none of these providers emit it, and admitting it would undo the
-# point of the list.
-_SERVEABLE_TYPES: frozenset[str] = frozenset(
-    {
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/webp",
-        "image/gif",
-        "image/avif",
-        "image/apng",
-        "image/bmp",
-        "image/tiff",
-        "image/heic",
-        "image/heif",
-        "video/mp4",
-        "video/webm",
-        "video/quicktime",
-        "video/x-matroska",
-        "video/mpeg",
-        "video/ogg",
-    }
-)
-
-# What an unrecognised type is recorded as. Not a rejection: the bytes are a
-# generation the caller has already paid for, and the store's job is to keep
-# them. It only declines to vouch for what they are.
-_OPAQUE_TYPE = "application/octet-stream"
-
-
-def sanitize_content_type(content_type: str) -> str:
-    """Normalise an upstream-declared media type to one safe to serve back."""
-    normalized = content_type.split(";", 1)[0].strip().lower()
-    if normalized in _SERVEABLE_TYPES:
-        return normalized
-    return _OPAQUE_TYPE
-
-
 @dataclass(slots=True, frozen=True)
 class FileMetadata:
     id: str
@@ -165,9 +105,6 @@ class FileStore:
         self.files_dir = files_dir
 
     # --- internals ---------------------------------------------------------
-
-    def _ext_for(self, content_type: str) -> str:
-        return _EXT_BY_TYPE.get(content_type.lower(), "")
 
     def _disk_path(self, file_id: str, ext: str) -> Path:
         return self.files_dir / file_id[0:2] / file_id[2:4] / f"{file_id}{ext}"
@@ -225,7 +162,7 @@ class FileStore:
 
         content_type = sanitize_content_type(content_type)
         file_id = secrets.token_hex(16)
-        ext = self._ext_for(content_type)
+        ext = asset_extension(content_type)
         abs_path = self._disk_path(file_id, ext)
         tmp_path = abs_path.with_suffix(abs_path.suffix + ".tmp")
 

@@ -352,9 +352,9 @@ def test_video_endpoint_rejects_image_workflow(
     ],
 )
 def test_upload_extension_maps_known_image_types(content_type: str, expected: str) -> None:
-    from openai_api_bridge.backends.comfyui.client import _upload_extension
+    from openai_api_bridge.util.media import image_extension
 
-    assert _upload_extension(content_type) == expected
+    assert image_extension(content_type) == expected
 
 
 @pytest.mark.parametrize(
@@ -365,6 +365,20 @@ def test_upload_extension_refuses_a_caller_chosen_extension(hostile: str) -> Non
     """The content type comes from the client's own multipart part, so
     guess_extension let the caller pick what got written into ComfyUI's input
     directory — .sh, .py, .html. ComfyUI only needs it to look like an image."""
-    from openai_api_bridge.backends.comfyui.client import _upload_extension
+    from openai_api_bridge.util.media import image_extension
 
-    assert _upload_extension(hostile) == ".png"
+    assert image_extension(hostile) == ".png"
+
+
+@pytest.mark.parametrize("video_type", ["video/mp4", "video/webm", "video/quicktime"])
+def test_upload_extension_does_not_reach_video_types(video_type: str) -> None:
+    """The extension tables are shared with the file store, which *does* name
+    videos. The upload path must not inherit that: it writes into ComfyUI's
+    input directory from a caller-supplied content type, so its allowlist stays
+    image-only even though the two maps now live in the same module."""
+    from openai_api_bridge.util.media import asset_extension, image_extension
+
+    assert image_extension(video_type) == ".png"
+    # ...while the store, whose input is a fetched asset rather than a caller,
+    # still names them.
+    assert asset_extension(video_type) != ""

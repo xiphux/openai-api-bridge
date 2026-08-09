@@ -26,6 +26,7 @@ import httpx
 
 from ...errors import UpstreamError
 from ...util.http import parse_json, raise_for_upstream_status
+from ...util.media import image_filename
 
 log = logging.getLogger(__name__)
 
@@ -159,11 +160,4 @@ class VeniceClient:
 def _filename_for(content_type: str) -> str:
     """Filename component for the multipart upload. Venice infers the input
     format from the extension when the content-type is generic."""
-    ct = content_type.lower()
-    if ct in ("image/jpeg", "image/jpg"):
-        return "image.jpg"
-    if ct == "image/webp":
-        return "image.webp"
-    if ct == "image/gif":
-        return "image.gif"
-    return "image.png"
+    return image_filename(content_type, fallback="image.png")

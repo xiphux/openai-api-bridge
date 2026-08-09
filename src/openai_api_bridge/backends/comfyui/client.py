@@ -19,6 +19,7 @@ import httpx
 
 from ...errors import GenerationTimeout, UpstreamAuthError, UpstreamError, WorkflowInvalid
 from ...util.http import parse_json
+from ...util.media import image_extension
 
 log = logging.getLogger(__name__)
 
@@ -53,43 +54,6 @@ MAX_POLL_INTERVAL = 5.0
 QUEUE_MISS_THRESHOLD = 3
 
 
-# Extensions the bridge is willing to write into ComfyUI's input directory,
-# keyed by the content type of the upload.
-#
-# This used to be `mimetypes.guess_extension(content_type)`, and the content
-# type traces straight back to the client's own multipart part (see
-# `api/images.py`, which takes `upload.content_type` at face value). So the
-# caller chose the extension: `application/x-sh` -> `.sh`, `text/x-python` ->
-# `.py`, `text/html` -> `.html`. The stem is a UUID, so there was no traversal
-# and nothing executes it — but it handed an authenticated caller an
-# arbitrary-bytes-with-chosen-extension write into the input directory of an
-# upstream that is very often unauthenticated itself, for no benefit. ComfyUI
-# only needs to recognise the file as an image.
-_UPLOAD_EXT_BY_TYPE: dict[str, str] = {
-    "image/png": ".png",
-    "image/jpeg": ".jpg",
-    "image/jpg": ".jpg",
-    "image/webp": ".webp",
-    "image/gif": ".gif",
-    "image/bmp": ".bmp",
-    "image/tiff": ".tiff",
-    "image/avif": ".avif",
-}
-_DEFAULT_UPLOAD_EXT = ".png"
-
-
-def _upload_extension(content_type: str) -> str:
-    """The extension to give an uploaded reference image.
-
-    Falls back to ``.png`` for anything unrecognised, which is what the old
-    ``guess_extension`` call did when it drew a blank anyway — ComfyUI sniffs
-    the actual format on load, so the extension is a label, not a decision.
-    """
-    return _UPLOAD_EXT_BY_TYPE.get(
-        content_type.split(";", 1)[0].strip().lower(), _DEFAULT_UPLOAD_EXT
-    )
-
-
 class ComfyUIClient:
     def __init__(
         self,
@@ -120,7 +84,10 @@ class ComfyUIClient:
 
     async def upload_image(self, image_data: bytes, content_type: str) -> str:
         """Upload an image; return ComfyUI's assigned filename."""
-        filename = f"bridge_{uuid.uuid4().hex[:12]}{_upload_extension(content_type)}"
+        # image_extension, not a general media map: the content type traces
+        # back to the caller's own multipart part, and this names a file
+        # written into ComfyUI's input directory. See util.media.
+        filename = f"bridge_{uuid.uuid4().hex[:12]}{image_extension(content_type)}"
         try:
             response = await self._client.post(
                 f"{self.base_url}/upload/image",
