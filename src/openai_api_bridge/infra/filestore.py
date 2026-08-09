@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import secrets
+import stat
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -43,6 +45,25 @@ def _unlink_all(paths: list[Path]) -> None:
     for path in paths:
         with contextlib.suppress(FileNotFoundError, OSError):
             path.unlink()
+
+
+def _stat_regular(path: Path) -> os.stat_result | None:
+    """Stat ``path``, or ``None`` if it isn't there or isn't a regular file.
+
+    Runs in a worker thread. Returning the stat rather than a bool is what
+    lets the caller skip a second trip to storage.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st if stat.S_ISREG(st.st_mode) else None
+
+
+# How stale an access timestamp may get before a read bothers to refresh it.
+# See FileStore._touch: eviction ordering is a day-scale concern, so buying
+# precision here with a write and a commit on every download is a bad trade.
+_TOUCH_INTERVAL_S = 300
 
 
 # SQLite's default parameter ceiling is 999; stay well under it so a large
@@ -75,6 +96,15 @@ class FileMetadata:
     created_at: int
     last_accessed_at: int
     pinned: bool
+
+
+@dataclass(slots=True, frozen=True)
+class OpenedFile:
+    """A stored file resolved for serving: where it is, what it is, and its stat."""
+
+    path: Path
+    meta: FileMetadata
+    stat: os.stat_result
 
 
 class FileStore:
@@ -167,11 +197,11 @@ class FileStore:
         row = await self.db.fetchone("SELECT * FROM generated_files WHERE id = ?", (file_id,))
         return self._row_to_metadata(row) if row else None
 
-    async def open_for_read(self, file_id: str) -> tuple[Path, FileMetadata] | None:
-        """Return (absolute_path, metadata) and bump ``last_accessed_at``.
+    async def open_for_read(self, file_id: str) -> OpenedFile | None:
+        """Return the path, metadata and stat for a stored file.
 
         Returns ``None`` when the row exists but its bytes don't. The caller
-        opens the path *after* we return it (``FileResponse`` stats it at send
+        opens the path *after* we return it (``FileResponse`` reads it at send
         time), so handing back a path to a missing file surfaces as a
         ``RuntimeError`` and a 500 rather than the 404 the caller expects.
         Three ways a row outlives its file: ``FILES_DIR`` wiped while the DB
@@ -182,12 +212,20 @@ class FileStore:
         The orphan row is dropped on the way out — it describes bytes that no
         longer exist, and leaving it would keep its ``byte_size`` in the
         eviction sweeper's total.
+
+        The ``stat`` travels with the result so the caller can hand it to
+        ``FileResponse`` instead of making it stat the same file again: this
+        existence check and Starlette's own were two round trips to storage per
+        download, which is the difference that shows on a network-backed
+        ``FILES_DIR``. It runs in a worker thread for the same reason — a stat
+        that blocks is a stall for every other request on the loop.
         """
         meta = await self.get_metadata(file_id)
         if meta is None:
             return None
         abs_path = self._absolute(meta.storage_path)
-        if not abs_path.is_file():
+        st = await asyncio.to_thread(_stat_regular, abs_path)
+        if st is None:
             log.warning(
                 "File %s has a metadata row but no bytes at %s; reaping the row",
                 file_id,
@@ -195,11 +233,30 @@ class FileStore:
             )
             await self.db.execute("DELETE FROM generated_files WHERE id = ?", (file_id,))
             return None
+        await self._touch(file_id, meta)
+        return OpenedFile(path=abs_path, meta=meta, stat=st)
+
+    async def _touch(self, file_id: str, meta: FileMetadata) -> None:
+        """Record an access, but not on every single read.
+
+        Every download used to add a write and a commit to the queue on the
+        one shared sqlite connection, ahead of the first byte going out. The
+        value it protects is eviction ordering, which is measured in days
+        (``RETENTION_DAYS``) — so a timestamp up to ``_TOUCH_INTERVAL_S``
+        stale cannot change which file gets retired.
+
+        This is most of the win on a freshly generated asset: :meth:`put`
+        stamps ``last_accessed_at`` at write time, so the client fetching the
+        image it just generated — the common case, and the one a gallery does
+        N times at once — skips the write entirely.
+        """
+        now = int(time.time())
+        if now - meta.last_accessed_at < _TOUCH_INTERVAL_S:
+            return
         await self.db.execute(
             "UPDATE generated_files SET last_accessed_at = ? WHERE id = ?",
-            (int(time.time()), file_id),
+            (now, file_id),
         )
-        return abs_path, meta
 
     async def set_pinned(self, file_id: str, pinned: bool) -> None:
         await self.db.execute(

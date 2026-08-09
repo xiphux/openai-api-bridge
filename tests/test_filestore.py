@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ async def test_put_and_get_roundtrip(filestore: FileStore) -> None:
     assert meta.pinned is False
 
 
-async def test_open_for_read_returns_real_path_and_bumps_atime(
+async def test_open_for_read_returns_the_real_path_and_its_stat(
     filestore: FileStore,
     files_dir: Path,
 ) -> None:
@@ -43,25 +44,15 @@ async def test_open_for_read_returns_real_path_and_bumps_atime(
         source_backend="comfyui",
         source_model="m",
     )
-    before = await filestore.get_metadata(file_id)
-    assert before is not None
-    initial_atime = before.last_accessed_at
-
-    # Sleep guard: timestamps are second-resolution
-    import time
-
-    time.sleep(1.05)
-
     result = await filestore.open_for_read(file_id)
     assert result is not None
-    abs_path, _meta = result
+    abs_path = result.path
     assert abs_path.exists()
     assert abs_path.read_bytes() == b"abc"
     assert files_dir in abs_path.parents
-
-    after = await filestore.get_metadata(file_id)
-    assert after is not None
-    assert after.last_accessed_at > initial_atime
+    # The stat travels with the result so the caller doesn't have to take its
+    # own — FileResponse would otherwise hit storage a second time per download.
+    assert result.stat.st_size == 3
 
 
 async def test_open_for_read_missing_returns_none(filestore: FileStore) -> None:
@@ -174,9 +165,8 @@ async def test_open_for_read_returns_none_when_bytes_are_gone(filestore: FileSto
     )
     found = await filestore.open_for_read(fid)
     assert found is not None
-    abs_path, _ = found
 
-    abs_path.unlink()
+    found.path.unlink()
 
     assert await filestore.open_for_read(fid) is None
 
@@ -192,7 +182,7 @@ async def test_open_for_read_reaps_the_orphan_row(filestore: FileStore) -> None:
     )
     found = await filestore.open_for_read(fid)
     assert found is not None
-    found[0].unlink()
+    found.path.unlink()
 
     await filestore.open_for_read(fid)
 
@@ -215,7 +205,7 @@ async def test_delete_many_removes_rows_and_files(filestore: FileStore) -> None:
     for fid in ids:
         found = await filestore.open_for_read(fid)
         assert found is not None
-        paths.append(found[0])
+        paths.append(found.path)
 
     removed = await filestore.delete_many(ids)
 
@@ -248,3 +238,57 @@ async def test_delete_many_chunks_past_the_sqlite_parameter_limit(
 async def test_delete_many_tolerates_unknown_and_empty_input(filestore: FileStore) -> None:
     assert await filestore.delete_many([]) == 0
     assert await filestore.delete_many(["deadbeef"]) == 0
+
+
+async def test_a_fresh_read_does_not_rewrite_the_access_time(filestore: FileStore) -> None:
+    """The common case — fetching the asset you just generated — costs no write.
+
+    ``put`` stamps last_accessed_at at write time, so the read that follows
+    has nothing to correct. Doing it anyway put an UPDATE and a commit on the
+    one shared sqlite connection ahead of the first byte of every download,
+    which a gallery pays N times at once.
+    """
+    fid = await filestore.put(
+        b"x", content_type="image/png", kind="image", source_backend="p", source_model="m"
+    )
+    before = await filestore.get_metadata(fid)
+    assert before is not None
+
+    assert await filestore.open_for_read(fid) is not None
+
+    after = await filestore.get_metadata(fid)
+    assert after is not None
+    assert after.last_accessed_at == before.last_accessed_at
+
+
+async def test_a_stale_access_time_is_still_refreshed(filestore: FileStore) -> None:
+    """Throttling the write must not stop LRU ordering from tracking real use."""
+    fid = await filestore.put(
+        b"x", content_type="image/png", kind="image", source_backend="p", source_model="m"
+    )
+    stale = int(time.time()) - 86400
+    await filestore.db.execute(
+        "UPDATE generated_files SET last_accessed_at = ? WHERE id = ?", (stale, fid)
+    )
+
+    assert await filestore.open_for_read(fid) is not None
+
+    after = await filestore.get_metadata(fid)
+    assert after is not None
+    assert after.last_accessed_at > stale
+
+
+async def test_a_directory_in_place_of_a_file_reads_as_absent(
+    filestore: FileStore, files_dir: Path
+) -> None:
+    """Only a regular file counts. FileResponse would raise at send time on
+    anything else, surfacing as a 500 rather than the 404 the caller expects."""
+    fid = await filestore.put(
+        b"x", content_type="image/png", kind="image", source_backend="p", source_model="m"
+    )
+    found = await filestore.open_for_read(fid)
+    assert found is not None
+    found.path.unlink()
+    found.path.mkdir()
+
+    assert await filestore.open_for_read(fid) is None

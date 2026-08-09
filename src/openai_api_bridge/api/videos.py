@@ -172,10 +172,9 @@ async def videos_get_content(
     if not job.file_id:
         raise UpstreamError("Job marked completed but has no file_id")
 
-    result = await filestore.open_for_read(job.file_id)
-    if result is None:
+    opened = await filestore.open_for_read(job.file_id)
+    if opened is None:
         # The file was evicted before the client fetched it. We could re-pin
         # at completion time to prevent this, but for v1 we accept it.
         raise JobNotFound("Video file no longer available (evicted from cache)")
-    abs_path, meta = result
-    return asset_response(abs_path, meta, if_none_match=if_none_match)
+    return asset_response(opened, if_none_match=if_none_match)

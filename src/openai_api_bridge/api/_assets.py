@@ -13,12 +13,10 @@ half has to happen here.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import Response
 from fastapi.responses import FileResponse
 
-from ..infra.filestore import FileMetadata
+from ..infra.filestore import OpenedFile
 
 # A generated asset is addressed by a 32-hex random id and its bytes never
 # change, so the entity really is immutable and a year is not an overstatement.
@@ -61,14 +59,13 @@ def _matches(if_none_match: str | None, etag: str) -> bool:
 
 
 def asset_response(
-    path: Path,
-    meta: FileMetadata,
+    opened: OpenedFile,
     *,
     if_none_match: str | None,
     filename: str | None = None,
 ) -> Response:
     """A cacheable response for a stored asset, or 304 if the client has it."""
-    etag = _etag_for(meta.id)
+    etag = _etag_for(opened.meta.id)
     if _matches(if_none_match, etag):
         # Cache-Control repeated on the 304: RFC 9110 §15.4.5 asks for the
         # headers that would have been sent on a 200, and a client that drops
@@ -78,10 +75,14 @@ def asset_response(
             headers={"etag": etag, "cache-control": _CACHE_CONTROL},
         )
     return FileResponse(
-        path,
-        media_type=meta.content_type,
+        opened.path,
+        media_type=opened.meta.content_type,
         # setdefault semantics inside FileResponse mean these win over the
         # stat-derived ETag it would otherwise generate.
         headers={"etag": etag, "cache-control": _CACHE_CONTROL},
         filename=filename,
+        # Handing over the stat the store already took: without it Starlette
+        # runs its own os.stat at send time, so each download hit storage
+        # twice for the same answer.
+        stat_result=opened.stat,
     )

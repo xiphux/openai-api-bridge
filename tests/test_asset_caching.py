@@ -14,7 +14,7 @@ import pytest
 from fastapi.responses import FileResponse
 
 from openai_api_bridge.api._assets import _etag_for, _matches, asset_response
-from openai_api_bridge.infra.filestore import FileMetadata
+from openai_api_bridge.infra.filestore import FileMetadata, OpenedFile
 
 FILE_ID = "0123456789abcdef0123456789abcdef"
 
@@ -36,38 +36,39 @@ def _meta(file_id: str = FILE_ID) -> FileMetadata:
 
 
 @pytest.fixture
-def stored(tmp_path: Path) -> Path:
+def stored(tmp_path: Path) -> OpenedFile:
     path = tmp_path / f"{FILE_ID}.png"
     path.write_bytes(b"\x89PNG\r\n\x1a\n")
-    return path
+    return OpenedFile(path=path, meta=_meta(), stat=path.stat())
 
 
-def test_first_fetch_is_cacheable_and_carries_a_validator(stored: Path) -> None:
-    response = asset_response(stored, _meta(), if_none_match=None)
+def test_first_fetch_is_cacheable_and_carries_a_validator(stored: OpenedFile) -> None:
+    response = asset_response(stored, if_none_match=None)
 
     assert isinstance(response, FileResponse)
     assert response.headers["etag"] == f'"{FILE_ID}"'
     assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
 
 
-def test_validator_comes_from_the_id_not_the_stat(stored: Path, tmp_path: Path) -> None:
+def test_validator_comes_from_the_id_not_the_stat(stored: OpenedFile, tmp_path: Path) -> None:
     """Starlette derives its ETag from mtime+size, which a restore invalidates.
 
     Re-copying the bytes — restoring a backup, recreating a volume — must not
     tell every client its cached copy is stale when the content is identical.
     """
-    response = asset_response(stored, _meta(), if_none_match=None)
+    response = asset_response(stored, if_none_match=None)
     etag_before = response.headers["etag"]
 
     moved = tmp_path / "restored.png"
-    moved.write_bytes(stored.read_bytes())
-    response_after = asset_response(moved, _meta(), if_none_match=None)
+    moved.write_bytes(stored.path.read_bytes())
+    restored = OpenedFile(path=moved, meta=_meta(), stat=moved.stat())
+    response_after = asset_response(restored, if_none_match=None)
 
     assert response_after.headers["etag"] == etag_before
 
 
-def test_matching_validator_returns_304_without_a_body(stored: Path) -> None:
-    response = asset_response(stored, _meta(), if_none_match=f'"{FILE_ID}"')
+def test_matching_validator_returns_304_without_a_body(stored: OpenedFile) -> None:
+    response = asset_response(stored, if_none_match=f'"{FILE_ID}"')
 
     assert response.status_code == 304
     assert response.body == b""
@@ -76,8 +77,8 @@ def test_matching_validator_returns_304_without_a_body(stored: Path) -> None:
     assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
 
 
-def test_stale_validator_still_sends_the_body(stored: Path) -> None:
-    response = asset_response(stored, _meta(), if_none_match='"some-other-asset"')
+def test_stale_validator_still_sends_the_body(stored: OpenedFile) -> None:
+    response = asset_response(stored, if_none_match='"some-other-asset"')
 
     assert isinstance(response, FileResponse)
     assert response.status_code == 200

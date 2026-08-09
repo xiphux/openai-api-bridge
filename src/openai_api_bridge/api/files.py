@@ -27,14 +27,12 @@ async def get_file_content(
     if_none_match: Annotated[str | None, Header()] = None,
 ) -> Response:
     filestore: FileStore = request.app.state.filestore
-    result = await filestore.open_for_read(file_id)
-    if result is None:
+    opened = await filestore.open_for_read(file_id)
+    if opened is None:
         raise JobNotFound(f"File {file_id!r} not found")
-    abs_path, meta = result
     return asset_response(
-        abs_path,
-        meta,
+        opened,
         if_none_match=if_none_match,
         # Set a stable filename so curl -O / browser downloads name the file sensibly.
-        filename=f"{file_id}{abs_path.suffix}",
+        filename=f"{file_id}{opened.path.suffix}",
     )
