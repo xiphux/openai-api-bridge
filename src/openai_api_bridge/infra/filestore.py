@@ -7,10 +7,13 @@ Atomicity guarantees:
   * Writes go to ``<path>.tmp`` and are renamed with ``Path.replace`` (atomic on
     the same filesystem). The DB row is inserted *after* the rename completes,
     so a row never points at a partial file.
-  * Reads update ``last_accessed_at`` and return an absolute path. Because the
-    caller (``FileResponse``) opens the path *later*, a row whose bytes are
-    gone must be reported as absent rather than handed out: see
-    :meth:`FileStore.open_for_read`.
+  * Reads bump ``last_accessed_at`` — throttled to once per
+    ``_TOUCH_INTERVAL_S``, see :meth:`FileStore._touch` — and return an
+    ``OpenedFile`` carrying the resolved path and its metadata. An existence
+    stat is taken to catch a row whose bytes are gone, but deliberately not
+    returned; see :meth:`FileStore.open_for_read`. Because the caller
+    (``FileResponse``) opens the path *later*, such a row must be reported as
+    absent rather than handed out.
 """
 
 from __future__ import annotations
@@ -50,8 +53,9 @@ def _unlink_all(paths: list[Path]) -> None:
 def _stat_regular(path: Path) -> os.stat_result | None:
     """Stat ``path``, or ``None`` if it isn't there or isn't a regular file.
 
-    Runs in a worker thread. Returning the stat rather than a bool is what
-    lets the caller skip a second trip to storage.
+    Runs in a worker thread. Only a regular file counts: a directory left in a
+    file's place would otherwise pass an ``exists()``-style check and fail at
+    send time as a 500 instead of the 404 the caller expects.
     """
     try:
         st = os.stat(path)
@@ -100,11 +104,10 @@ class FileMetadata:
 
 @dataclass(slots=True, frozen=True)
 class OpenedFile:
-    """A stored file resolved for serving: where it is, what it is, and its stat."""
+    """A stored file resolved for serving: where it is and what it is."""
 
     path: Path
     meta: FileMetadata
-    stat: os.stat_result
 
 
 class FileStore:
@@ -198,12 +201,12 @@ class FileStore:
         return self._row_to_metadata(row) if row else None
 
     async def open_for_read(self, file_id: str) -> OpenedFile | None:
-        """Return the path, metadata and stat for a stored file.
+        """Return the path and metadata for a stored file.
 
         Returns ``None`` when the row exists but its bytes don't. The caller
-        opens the path *after* we return it (``FileResponse`` reads it at send
-        time), so handing back a path to a missing file surfaces as a
-        ``RuntimeError`` and a 500 rather than the 404 the caller expects.
+        opens the path *after* we return it (``FileResponse`` stats and reads
+        it at send time), so handing back a path to a missing file surfaces as
+        a ``RuntimeError`` and a 500 rather than the 404 the caller expects.
         Three ways a row outlives its file: ``FILES_DIR`` wiped while the DB
         persists (tmpfs, a recreated volume), a crash between the row DELETE
         and the unlink in :meth:`delete`, and an eviction pass landing between
@@ -213,12 +216,11 @@ class FileStore:
         longer exist, and leaving it would keep its ``byte_size`` in the
         eviction sweeper's total.
 
-        The ``stat`` travels with the result so the caller can hand it to
-        ``FileResponse`` instead of making it stat the same file again: this
-        existence check and Starlette's own were two round trips to storage per
-        download, which is the difference that shows on a network-backed
-        ``FILES_DIR``. It runs in a worker thread for the same reason — a stat
-        that blocks is a stall for every other request on the loop.
+        The check runs in a worker thread: a stat that blocks — and on a
+        network-backed ``FILES_DIR`` it can — stalls every other request on the
+        loop. It deliberately does not hand its result to ``FileResponse``;
+        see :func:`~openai_api_bridge.api._assets.asset_response` for why
+        letting Starlette take its own stat is worth the second call.
         """
         meta = await self.get_metadata(file_id)
         if meta is None:
@@ -234,7 +236,7 @@ class FileStore:
             await self.db.execute("DELETE FROM generated_files WHERE id = ?", (file_id,))
             return None
         await self._touch(file_id, meta)
-        return OpenedFile(path=abs_path, meta=meta, stat=st)
+        return OpenedFile(path=abs_path, meta=meta)
 
     async def _touch(self, file_id: str, meta: FileMetadata) -> None:
         """Record an access, but not on every single read.

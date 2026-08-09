@@ -64,9 +64,17 @@ queried concurrently, so without it the endpoint's latency is the slowest
 upstream's read timeout — a wedged upstream stalls the whole listing, healthy
 providers included. A provider that misses the budget is left out of *that*
 listing only: its fetch is deliberately not cancelled, so its own catalogue
-cache still fills and it reappears on a later request. A cold fal catalogue
-(10–13 paginated round trips) usually takes the first request after boot to
-warm up this way.
+cache still fills and it reappears on a later request, and a request arriving
+while that fetch is still running joins it rather than starting a second. A
+cold fal catalogue (10–13 paginated round trips) warms up this way on the
+first request after boot.
+
+Note this recurs rather than happening only at startup: the catalogue is
+re-fetched whenever `catalog_ttl_seconds` lapses, so a provider whose cold
+fetch is slower than the budget drops out of the listing once per TTL window
+until the refresh lands. Raise `MODELS_TIMEOUT_SECONDS` past that provider's
+cold-fetch time, or raise `catalog_ttl_seconds`, if a consumer treats the
+listing as authoritative and doesn't merge across refreshes.
 
 Concurrent requests collapse into the fetch already in flight rather than each
 starting their own. A **failed** fetch is remembered for `catalog_retry_seconds`
@@ -165,16 +173,16 @@ rules, display-name disambiguation, retention mechanics, and video job handling.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET    | `/v1/models`                       | Aggregate listing across all providers |
+| GET    | `/v1/models`                       | Aggregate listing across all providers, best-effort per provider — one that fails or exceeds `MODELS_TIMEOUT_SECONDS` is omitted from that response rather than failing it (see [Model catalogue caching](#model-catalogue-caching)) |
 | POST   | `/v1/chat/completions`             | Sync + SSE streaming passthrough to openai-compat upstreams |
 | POST   | `/v1/embeddings`                   | Sync passthrough to openai-compat upstreams |
 | POST   | `/v1/images/generations`           | Sync; JSON body |
 | POST   | `/v1/images/edits`                 | Sync; multipart (`image` + `prompt` + `model`). Send multiple reference images by repeating `image` or using `image[]` (up to 16); backends that can't use all of them error rather than silently drop |
 | POST   | `/v1/videos`                       | Async; multipart; returns `{id, status: "queued"}` |
 | GET    | `/v1/videos/{id}`                  | Poll job status |
-| GET    | `/v1/videos/{id}/content`          | Stream final mp4 once `status: "completed"` |
+| GET    | `/v1/videos/{id}/content`          | Stream final mp4 once `status: "completed"`; supports conditional GET (see [Conditional requests](#conditional-requests)) |
 | DELETE | `/v1/videos/{id}`                  | Cancel a queued/in-progress job; releases the runner slot |
-| GET    | `/v1/files/{id}/content`           | Bridge-internal asset URLs returned in responses |
+| GET    | `/v1/files/{id}/content`           | Bridge-internal asset URLs returned in responses; supports conditional GET (see [Conditional requests](#conditional-requests)) |
 
 Auth: `Authorization: Bearer ${BRIDGE_API_KEY}`.
 
@@ -355,6 +363,26 @@ Files referenced by an in-flight video job are pinned and never evicted
 mid-job. Clients that want to keep generated media should download and
 persist it on their side — [GlyphStream][glyphstream] does exactly this,
 pulling each asset into its own media store on first generation.
+
+### Conditional requests
+
+A generated asset is addressed by a random id and its bytes never change, so
+both content endpoints (`/v1/files/{id}/content` and
+`/v1/videos/{id}/content`) serve it as an immutable resource:
+
+- `ETag` — the asset's file id. Derived from the id rather than the file's
+  mtime and size, so re-copying the bytes (restoring a backup, recreating a
+  volume) doesn't invalidate a client's cached copy.
+- `Cache-Control: private, max-age=31536000, immutable` — `private` because
+  these endpoints sit behind the bridge's bearer token and a shared cache must
+  not hand the response to a caller that never presented one. `Vary:
+  Authorization` is sent for the same reason.
+- `If-None-Match` → `304 Not Modified`, so a client that already holds the
+  asset skips the transfer entirely.
+
+The cache window deliberately outlives the eviction window above: a client
+that kept the bytes is still holding a correct copy after the bridge has
+retired its own. Range requests (video seeking) are unaffected.
 
 Completed/failed rows in the video-jobs table are kept as history; they're
 metadata-sized and have no eviction policy today.

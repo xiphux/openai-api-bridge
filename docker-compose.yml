@@ -19,6 +19,11 @@ services:
       RETENTION_DAYS: ${RETENTION_DAYS:-30}
       MAX_CACHE_GB: ${MAX_CACHE_GB:-50}
       MAX_CONCURRENT_VIDEO_JOBS: ${MAX_CONCURRENT_VIDEO_JOBS:-2}
+      # Per-provider budget for GET /v1/models. Listed explicitly because this
+      # block is an allowlist, not env_file — a value set in .env alone would
+      # never reach the container, and this is the knob that decides whether a
+      # slow provider is omitted from a listing.
+      MODELS_TIMEOUT_SECONDS: ${MODELS_TIMEOUT_SECONDS:-5}
       BRIDGE_PUBLIC_BASE_URL: ${BRIDGE_PUBLIC_BASE_URL:-}
     volumes:
       # Provider definitions. Bind-mount because they're hand-edited.

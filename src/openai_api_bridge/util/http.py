@@ -20,14 +20,31 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_FETCH_TIMEOUT_S = 120.0
 
-# One unauthenticated client for every asset fetch in the process, so a
-# generation doesn't pay a DNS lookup, TCP connect and TLS handshake per image
-# on top of the download itself. Built per running event loop: a pool's
-# connections belong to the loop that opened them, and the bridge has exactly
-# one — but the test suite runs each case in a fresh loop, and a client
-# carried across would hand out connections attached to a closed one.
+# One unauthenticated client for every asset fetch in the process. Built per
+# running event loop: a pool's connections belong to the loop that opened them,
+# and the bridge has exactly one — but the test suite runs each case in a fresh
+# loop, and a client carried across would hand out connections attached to a
+# closed one.
 _asset_client: httpx.AsyncClient | None = None
 _asset_client_loop: asyncio.AbstractEventLoop | None = None
+
+# httpx defaults to a 5s keepalive expiry, which is shorter than the gap
+# between almost every pair of asset fetches this bridge makes: image
+# generations are seconds to a minute apart, video minutes. At the default,
+# measurement showed a second connection opened after a 6s idle gap — i.e. the
+# pool existed but never actually got reused, so the handshake was still paid
+# every time. Five minutes covers the realistic spacing.
+#
+# Two honest caveats. This does nothing for a `run_all` batch: n concurrent
+# fetches open n connections whatever the expiry. And it was never the only
+# win from sharing a client — building one costs ~2.5ms of blocking event-loop
+# time to construct an SSLContext and load the certifi bundle, which the
+# previous client-per-attempt paid on every fetch and every retry.
+_ASSET_LIMITS = httpx.Limits(
+    max_connections=100,
+    max_keepalive_connections=20,
+    keepalive_expiry=300.0,
+)
 
 
 def _asset_fetch_client() -> httpx.AsyncClient:
@@ -43,7 +60,7 @@ def _asset_fetch_client() -> httpx.AsyncClient:
     global _asset_client, _asset_client_loop
     loop = asyncio.get_running_loop()
     if _asset_client is None or _asset_client_loop is not loop or _asset_client.is_closed:
-        _asset_client = httpx.AsyncClient(follow_redirects=True)
+        _asset_client = httpx.AsyncClient(follow_redirects=True, limits=_ASSET_LIMITS)
         _asset_client_loop = loop
     return _asset_client
 
@@ -170,9 +187,8 @@ async def fetch_asset_with_retry(
 
     for attempt in range(max_attempts):
         try:
-            # Reused, not built per attempt: a fresh client per fetch meant a
-            # DNS lookup, TCP connect and TLS handshake for every single image,
-            # on the critical path of every generation that returns URLs.
+            # Reused, not built per attempt. See _ASSET_LIMITS for what that
+            # actually buys and what it doesn't.
             resp = await _asset_fetch_client().get(url, timeout=timeout)
             if (
                 resp is not None

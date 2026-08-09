@@ -33,7 +33,7 @@ async def test_put_and_get_roundtrip(filestore: FileStore) -> None:
     assert meta.pinned is False
 
 
-async def test_open_for_read_returns_the_real_path_and_its_stat(
+async def test_open_for_read_returns_the_real_path(
     filestore: FileStore,
     files_dir: Path,
 ) -> None:
@@ -50,9 +50,6 @@ async def test_open_for_read_returns_the_real_path_and_its_stat(
     assert abs_path.exists()
     assert abs_path.read_bytes() == b"abc"
     assert files_dir in abs_path.parents
-    # The stat travels with the result so the caller doesn't have to take its
-    # own — FileResponse would otherwise hit storage a second time per download.
-    assert result.stat.st_size == 3
 
 
 async def test_open_for_read_missing_returns_none(filestore: FileStore) -> None:

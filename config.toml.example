@@ -23,12 +23,22 @@ id = "comfyui"
 backend = "comfyui"
 url = "http://127.0.0.1:8188"
 workflows_dir = "/var/lib/openai-api-bridge/workflows"
-# Completion polling starts here and eases out to max_poll_interval_seconds,
-# so a fast image workflow is collected almost as soon as it finishes while a
-# long video doesn't spend 15 minutes hammering ComfyUI's web thread (which is
-# CPU-starved during generation — polling hard slows the render itself).
+# Completion polling starts at poll_interval_seconds and eases out to the
+# ceiling for the workflow's output type. The two differ on purpose: an image
+# is collected inside the caller's synchronous POST /v1/images/generations, so
+# detection lag is latency they sit through, while a video is collected by a
+# background job they poll themselves — there the lag is free, and what
+# matters is not spending 15 minutes hammering ComfyUI's web thread (which is
+# CPU-starved during generation, so polling hard slows the render itself).
+#
+# Upgrading with poll_interval_seconds already pinned? It used to be a flat
+# cadence and is now the start of a ramp. Images are unaffected if you pinned
+# 1.0 (that is the image ceiling, so the schedule is unchanged), but video
+# will ease out to 5.0. Set max_poll_interval_video_seconds to your pinned
+# value to keep video polling flat as well.
 poll_interval_seconds = 0.25
-max_poll_interval_seconds = 5.0
+max_poll_interval_image_seconds = 1.0
+max_poll_interval_video_seconds = 5.0
 poll_timeout_image_seconds = 300
 poll_timeout_video_seconds = 900
 
@@ -118,6 +128,21 @@ api_token_env = "VENICE_API_TOKEN"
 # backend = "openai"
 # base_url = "http://192.168.1.10:8080"
 # # api_token_env omitted -> no Authorization header sent upstream
+# #
+# # The model listing is cached for catalog_ttl_seconds (default 300). On a
+# # setup that loads and unloads models at runtime — llama-swap, llama.cpp
+# # router mode, Ollama — that means a model you just started can take up to
+# # five minutes to appear in /v1/models, and one you just stopped lingers
+# # just as long. Lower it if that matters.
+# #
+# # Prefer a small value over 0. With caching off entirely, nothing a
+# # background fetch produces is ever stored — so if this upstream is
+# # occasionally slower than MODELS_TIMEOUT_SECONDS (5s), it is omitted from
+# # the listing on every single request rather than reappearing on the next
+# # one. A short TTL keeps that self-healing behaviour.
+# # catalog_ttl_seconds = 15.0
+# # catalog_retry_seconds = 30.0  # after a failed fetch, wait this long
+# #                               # before trying again
 
 # Example: a second llama-server, addressed as "llama-fast/<model-id>".
 # [[providers]]

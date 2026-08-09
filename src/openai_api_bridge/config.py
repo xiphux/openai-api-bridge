@@ -91,14 +91,32 @@ class ComfyUIProviderConfig(BaseModel):
     id: str
     url: str = "http://127.0.0.1:8188"
     workflows_dir: Path
-    # Where completion polling *starts*. It eases out towards
-    # max_poll_interval_seconds as a generation runs on, so this governs how
+    # Where completion polling *starts*. It eases out towards the ceiling for
+    # the workflow's output type as a generation runs on, so this governs how
     # quickly a fast workflow is collected rather than the steady-state load a
     # long one puts on the box.
     poll_interval_seconds: float = 0.25
-    # Ceiling the interval climbs to. Clamped up to poll_interval_seconds, so
-    # setting only the start still slows polling down as intended.
-    max_poll_interval_seconds: float = 5.0
+    # Ceilings the interval climbs to, split by output type for the same
+    # reason the timeouts below are: the two paths have opposite needs.
+    #
+    # An image is generated inside a synchronous POST /v1/images/generations,
+    # so every second between "ComfyUI finished" and "the bridge noticed" is a
+    # second the caller sits there — a tight ceiling keeps that invisible, and
+    # a 30s image render is only ~30 polls anyway, which was never the load
+    # problem. Video is collected by a background job the client polls on its
+    # own cadence, so detection lag costs nobody anything, while a 15-minute
+    # render at a tight interval is ~900 requests at a web thread that is
+    # CPU-starved during generation — polling that hard slows the render it is
+    # waiting on.
+    #
+    # Each ceiling is clamped up to poll_interval_seconds, so a start value
+    # *above* a ceiling wins and polling stays flat at that value. Note what
+    # that does not cover: a start value *below* a ceiling still ramps up to
+    # it. Pinning poll_interval_seconds = 1.0 keeps images flat at 1.0 (the
+    # image ceiling matches), but video eases out to 5.0 regardless — set
+    # max_poll_interval_video_seconds to the same value to hold it flat.
+    max_poll_interval_image_seconds: float = 1.0
+    max_poll_interval_video_seconds: float = 5.0
     poll_timeout_image_seconds: float = 300.0
     poll_timeout_video_seconds: float = 900.0
     cache_workflows: bool = True

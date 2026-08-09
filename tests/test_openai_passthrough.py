@@ -399,3 +399,177 @@ def test_chat_completion_body_is_forwarded_byte_for_byte(
     assert r.status_code == 200
     assert r.content == raw
     assert r.json()["choices"][0]["message"]["content"] == "hi"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [
+        (b"<html><head><title>502 Bad Gateway</title></head><body>cf</body></html>", "text/html"),
+        (b"", "application/json"),
+        (b"   \n", "application/json"),
+        (b"[1, 2, 3]", "application/json"),
+    ],
+    ids=["html-interstitial", "empty", "whitespace-only", "json-array"],
+)
+def test_non_json_200_surfaces_as_an_upstream_error(
+    client_with_openai: TestClient, body: bytes, content_type: str
+) -> None:
+    """Forwarding the body unexamined is not the same as forwarding it unchecked.
+
+    A captive portal, CDN error page or WAF interstitial answering 200 with
+    HTML — or a proxy that committed the status line and sent nothing — would
+    otherwise reach the client as a 200 labelled application/json: the SDK
+    raises an opaque decode error naming no provider, retry-on-5xx never
+    fires, and an empty body reads as a successful zero-length result.
+    """
+    respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=body, headers={"content-type": content_type})
+    )
+
+    r = client_with_openai.post(
+        "/v1/chat/completions",
+        headers=HEADERS,
+        json={"model": "llama/m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert r.status_code == 502
+    assert "non-JSON 200" in r.json()["error"]["message"]
+
+
+@respx.mock
+def test_non_json_200_on_embeddings_surfaces_as_an_upstream_error(
+    client_with_openai: TestClient,
+) -> None:
+    """The ingestion path especially: an empty 200 must not read as success."""
+    respx.post(f"{UPSTREAM}/v1/embeddings").mock(
+        return_value=httpx.Response(200, content=b"", headers={"content-type": "application/json"})
+    )
+
+    r = client_with_openai.post(
+        "/v1/embeddings", headers=HEADERS, json={"model": "llama/e", "input": "hi"}
+    )
+
+    assert r.status_code == 502
+    assert "non-JSON 200" in r.json()["error"]["message"]
+
+
+@respx.mock
+def test_leading_whitespace_before_a_json_object_is_still_accepted(
+    client_with_openai: TestClient,
+) -> None:
+    """The check is a shape sniff, not a parse — it must not reject valid JSON."""
+    raw = b'\n  {"id":"c1","choices":[]}'
+    respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=raw, headers={"content-type": "application/json"})
+    )
+
+    r = client_with_openai.post(
+        "/v1/chat/completions",
+        headers=HEADERS,
+        json={"model": "llama/m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert r.status_code == 200
+    assert r.content == raw
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("body", "label"),
+    [
+        (b'\xef\xbb\xbf{"id":"c1"}', "utf-8-sig"),
+        ('{"id":"c1"}'.encode("utf-16"), "utf-16"),
+        ('{"id":"c1"}'.encode("utf-32"), "utf-32"),
+    ],
+    ids=["utf-8-bom", "utf-16", "utf-32"],
+)
+def test_an_encoding_preamble_is_not_mistaken_for_a_non_json_body(
+    client_with_openai: TestClient, body: bytes, label: str
+) -> None:
+    """A BOM means "text in a declared encoding", not "an HTML error page".
+
+    json.loads on bytes sniffs the encoding, so these parsed fine before the
+    shape check existed — and the client's own parser handles them too.
+    Rejecting them would turn a working upstream into a 502 whose message
+    claims the body isn't JSON when it demonstrably is.
+    """
+    # Guard the premise: these really are JSON as far as a parser is concerned.
+    assert json.loads(body)["id"] == "c1"
+
+    respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=body, headers={"content-type": "application/json"})
+    )
+
+    r = client_with_openai.post(
+        "/v1/chat/completions",
+        headers=HEADERS,
+        json={"model": "llama/m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert r.status_code == 200, f"{label} body rejected: {r.text[:200]}"
+    assert r.content == body
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        (b'{"id": "abc", "choices": [', "truncated mid-array"),
+        (b'{"id": "abc"}{"id": "def"}', "two concatenated objects"),
+        (b"\xef\xbb\xbf<html><body>WAF</body></html>", "BOM-prefixed HTML"),
+        (b"\xef\xbb\xbf", "bare BOM, no payload"),
+        (b'[{"id": "abc"}]', "a JSON array, not an object"),
+        (b'{"id": "abc",}', "trailing comma"),
+    ],
+    ids=["truncated", "concatenated", "bom-html", "bare-bom", "array", "trailing-comma"],
+)
+def test_a_200_that_is_not_a_json_object_is_rejected(
+    client_with_openai: TestClient, body: bytes, why: str
+) -> None:
+    """A first-byte sniff cannot tell these from valid JSON; a parse can.
+
+    Every one of these starts with `{` or a BOM, so a shape check waves them
+    through — and each then reaches the client as a 200 labelled
+    application/json, which is the exact failure this guard exists to stop.
+    """
+    respx.post(f"{UPSTREAM}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, content=body, headers={"content-type": "application/json"})
+    )
+
+    r = client_with_openai.post(
+        "/v1/chat/completions",
+        headers=HEADERS,
+        json={"model": "llama/m", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert r.status_code == 502, f"{why} was accepted"
+    assert "non-JSON 200" in r.json()["error"]["message"]
+
+
+@respx.mock
+def test_a_body_past_the_validation_gate_skips_the_parse(
+    client_with_openai: TestClient,
+) -> None:
+    """The gate is what keeps a multi-MB embedding batch off the event loop.
+
+    Past it the body is only shape-checked, so a large malformed one is
+    forwarded — a deliberate, documented gap, pinned here so it can't change
+    silently.
+    """
+    from openai_api_bridge.backends.openai.client import _MAX_VALIDATED_BODY
+
+    oversized = b'{"data": [' + b"0" * (_MAX_VALIDATED_BODY + 1)
+    assert len(oversized) > _MAX_VALIDATED_BODY
+    respx.post(f"{UPSTREAM}/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200, content=oversized, headers={"content-type": "application/json"}
+        )
+    )
+
+    r = client_with_openai.post(
+        "/v1/embeddings", headers=HEADERS, json={"model": "llama/e", "input": "hi"}
+    )
+
+    assert r.status_code == 200
+    assert r.content == oversized

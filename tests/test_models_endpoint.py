@@ -9,13 +9,14 @@ doesn't either.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
-from openai_api_bridge.api.models import list_models
+from openai_api_bridge.api.models import _entries_for, list_models
 from openai_api_bridge.backends.base import Backend, ModelEntry
 from openai_api_bridge.errors import UpstreamError
 
@@ -182,3 +183,136 @@ async def test_kind_is_surfaced(kind: str) -> None:
     body = await list_models(_request_with(providers))
 
     assert body["data"][0]["kind"] == kind
+
+
+def _fresh_lingering(monkeypatch: Any) -> Any:
+    """Swap in an empty registry so cases don't inherit each other's tasks."""
+    from openai_api_bridge.api import models as models_api
+    from openai_api_bridge.infra.tasks import SingleFlight
+
+    registry: SingleFlight[list[ModelEntry]] = SingleFlight()
+    monkeypatch.setattr(models_api, "_lingering", registry)
+    return registry
+
+
+def _live_fetch_tasks() -> list[asyncio.Task[Any]]:
+    return [
+        t
+        for t in asyncio.all_tasks()
+        if (t.get_name() or "").startswith("list-models-") and not t.done()
+    ]
+
+
+async def test_concurrent_requests_share_one_fetch(monkeypatch: Any) -> None:
+    """The registry must be authoritative from the task's birth, not from the
+    moment the first caller gives up.
+
+    Registering only after the budget expires leaves the whole budget window
+    open: every concurrent request sees an empty registry and starts its own
+    fetch. The survivors look fine, which is what makes it subtle — it's the
+    *untracked* task that ends up holding the upstream request, so a shutdown
+    drain awaits the wrong one.
+    """
+    registry = _fresh_lingering(monkeypatch)
+    slow = _SlowBackend([ModelEntry(id="slow", kind="image")])
+    providers: list[tuple[str, Backend]] = [("slow", slow)]
+
+    bodies = await asyncio.gather(
+        list_models(_request_with(providers, budget=0.05)),
+        list_models(_request_with(providers, budget=0.05)),
+        list_models(_request_with(providers, budget=0.05)),
+    )
+
+    assert all(b["data"] == [] for b in bodies)
+    live = _live_fetch_tasks()
+    assert len(live) == 1, f"{len(live)} concurrent fetches started; expected 1"
+    assert registry.keys() == ["slow"]
+    assert live[0] is registry.join_or_start("slow", lambda: _entries_for("slow", slow))
+
+    slow.release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+async def test_a_finished_fetch_does_not_evict_its_successor(monkeypatch: Any) -> None:
+    """Removal is by identity, not by key.
+
+    A key outlives the task occupying it. Popping by key lets a finishing task
+    delete whatever is in the slot now — untracking a live fetch, which is the
+    one thing this registry exists to prevent.
+    """
+    from openai_api_bridge.infra.tasks import SingleFlight
+
+    registry: SingleFlight[str] = SingleFlight()
+    first_done = asyncio.Event()
+    second_done = asyncio.Event()
+
+    async def first() -> str:
+        await first_done.wait()
+        return "first"
+
+    async def second() -> str:
+        await second_done.wait()
+        return "second"
+
+    task_one = registry.join_or_start("p", first)
+    # Force the successor into the slot, as an overwrite would have done.
+    registry._tasks["p"] = task_two = asyncio.create_task(second())
+
+    first_done.set()
+    await task_one
+    await asyncio.sleep(0)
+
+    assert registry.keys() == ["p"], "a finished task evicted its live successor"
+    assert registry._tasks["p"] is task_two
+
+    second_done.set()
+    await task_two
+
+
+async def test_a_cancelled_request_leaves_its_fetch_tracked(monkeypatch: Any) -> None:
+    """`shield` keeps the fetch alive, so the registry must still hold it."""
+    from openai_api_bridge.api import models as models_api
+
+    registry = _fresh_lingering(monkeypatch)
+    slow = _SlowBackend([ModelEntry(id="slow", kind="image")])
+
+    task = asyncio.create_task(models_api._entries_within("slow", slow, 30.0))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert registry.keys() == ["slow"], "the shielded fetch lost its only reference"
+
+    slow.release.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+
+async def test_drain_cancels_immediately_rather_than_waiting(monkeypatch: Any) -> None:
+    """Everything in the registry is work a request already gave up on, warming
+    a cache inside a backend about to be closed. Waiting first would add its
+    grace period to every restart for a result that is discarded."""
+    from openai_api_bridge.api import models as models_api
+
+    registry = _fresh_lingering(monkeypatch)
+    slow = _SlowBackend([ModelEntry(id="slow", kind="image")])
+
+    await list_models(_request_with([("slow", slow)], budget=0.05))
+    assert registry.keys() == ["slow"]
+
+    started = time.monotonic()
+    await models_api.drain_lingering()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, f"drain waited {elapsed:.2f}s on a fetch nobody needs"
+    assert registry.keys() == []
+    assert _live_fetch_tasks() == []
+
+
+async def test_drain_is_a_no_op_when_nothing_is_lingering(monkeypatch: Any) -> None:
+    from openai_api_bridge.api import models as models_api
+
+    _fresh_lingering(monkeypatch)
+    await models_api.drain_lingering()

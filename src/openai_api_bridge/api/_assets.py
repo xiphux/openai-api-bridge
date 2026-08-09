@@ -40,6 +40,23 @@ def _etag_for(file_id: str) -> str:
     return f'"{file_id}"'
 
 
+def _validator_headers(etag: str) -> dict[str, str]:
+    """Caching headers shared by the 200 and the 304.
+
+    ``Vary: Authorization`` because these endpoints sit behind a bearer token
+    and the response is cacheable. ``private`` already tells a well-behaved
+    shared cache to keep out; ``Vary`` is what stops one that stores the
+    response anyway from serving it to a request bearing a different
+    credential. Both, because the cost is a header and the failure is handing
+    someone else's asset to the wrong caller.
+    """
+    return {
+        "etag": etag,
+        "cache-control": _CACHE_CONTROL,
+        "vary": "Authorization",
+    }
+
+
 def _matches(if_none_match: str | None, etag: str) -> bool:
     """Whether the client's ``If-None-Match`` covers this entity.
 
@@ -72,17 +89,21 @@ def asset_response(
         # the directive on revalidation would revalidate again next time.
         return Response(
             status_code=304,
-            headers={"etag": etag, "cache-control": _CACHE_CONTROL},
+            headers=_validator_headers(etag),
         )
     return FileResponse(
         opened.path,
         media_type=opened.meta.content_type,
         # setdefault semantics inside FileResponse mean these win over the
         # stat-derived ETag it would otherwise generate.
-        headers={"etag": etag, "cache-control": _CACHE_CONTROL},
+        headers=_validator_headers(etag),
         filename=filename,
-        # Handing over the stat the store already took: without it Starlette
-        # runs its own os.stat at send time, so each download hit storage
-        # twice for the same answer.
-        stat_result=opened.stat,
+        # Deliberately NOT passing stat_result, even though FileStore already
+        # took one and Starlette is about to take another. Supplying it makes
+        # FileResponse skip its own stat — and that stat is also its existence
+        # check: without it, a file that vanishes between the store's stat and
+        # the send (the eviction race FileStore.open_for_read documents) is
+        # answered as 200 with a Content-Length from the stale stat and a
+        # truncated body, instead of failing loudly. A silent short read is a
+        # worse answer than an error, and one stat is not worth it.
     )

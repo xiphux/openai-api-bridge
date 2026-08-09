@@ -12,13 +12,17 @@ unchanged because their payloads are inside opaque ``data:`` lines we don't
 crack open.
 
 The non-streaming responses are bytes for the same reason. Passthrough means
-the bridge has no opinion about the body, so decoding it into Python objects
-only to re-encode them is CPU spent on the single event loop to reproduce
-what the upstream already sent.
+the bridge has no opinion about the *contents* of the body, so decoding it
+into Python objects only to re-encode them is CPU spent on the single event
+loop to reproduce what the upstream already sent. It still checks that a 200
+looks like a JSON object before forwarding it — see :meth:`OpenAIClient._raw_body`
+for why an unexamined 200 is the one thing this shortcut must not become.
 """
 
 from __future__ import annotations
 
+import codecs
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -29,6 +33,27 @@ from ...errors import UpstreamError
 from ...util.http import parse_json, raise_for_upstream_status
 
 log = logging.getLogger(__name__)
+
+# Encoding preambles that mean "this is text in a declared encoding", not
+# "this is HTML". ``json.loads`` on bytes runs ``detect_encoding`` and handles
+# every one of them, so a body opening with a BOM is JSON as far as any client
+# that parses it is concerned — including the OpenAI SDK, which decodes via
+# httpx's ``.json()``. Listed rather than stripped because the big-endian
+# forms put a NUL before the ``{``, so stripping and re-testing for ``{``
+# would reject exactly the payloads this exists to admit.
+_UTF_BOMS = (
+    codecs.BOM_UTF8,
+    codecs.BOM_UTF32_LE,
+    codecs.BOM_UTF32_BE,
+    codecs.BOM_UTF16_LE,
+    codecs.BOM_UTF16_BE,
+)
+
+# Bodies at or under this are validated by an actual parse; larger ones get a
+# first-byte check instead. See OpenAIClient._raw_body for where the number
+# comes from — it sits above every chat completion and every proxy error page,
+# and below the embedding batches the byte path exists to keep cheap.
+_MAX_VALIDATED_BODY = 256 * 1024
 
 
 class OpenAIClient:
@@ -153,13 +178,69 @@ class OpenAIClient:
     # --- helpers ----------------------------------------------------------
 
     def _raw_body(self, response: httpx.Response, endpoint: str) -> bytes:
-        """The upstream's 200 body, unexamined; a typed error otherwise.
+        """The upstream's 200 body, forwarded whole; a typed error otherwise.
 
-        A non-200 is still decoded — the error path needs the text to build a
+        Forwarding without decoding is the point — see the module docstring —
+        but "don't decode it" must not become "don't look at it". A 200 whose
+        body isn't real JSON is the failure this bridge has been bitten by
+        before: a captive portal, a CDN error page or a WAF interstitial
+        answering 200 with HTML, or a proxy that committed the status line and
+        then truncated. Passed through, that reaches the client as a 200
+        labelled ``application/json``, so an OpenAI SDK raises an opaque decode
+        error naming nothing, retry-on-5xx never fires, and an empty body looks
+        like a successful zero-length result — which a RAG ingestion run will
+        happily store.
+
+        The body is therefore **validated by parsing** and then forwarded as
+        the original bytes. The parse result is discarded; only its success
+        matters. That restores exactly the guarantee ``dict(response.json())``
+        used to give, without the re-serialisation that motivated the byte
+        path in the first place — the expensive half was always the *encode*,
+        not the decode.
+
+        Above ``_MAX_VALIDATED_BODY`` the parse is skipped for a first-byte
+        check instead. Measured on this codebase: a typical chat completion is
+        ~2KB and parses in under 0.01ms, a verbose n=4 one 32KB in 0.03ms, but
+        a 100 x 1536 embedding batch is 3MB and costs 18ms of event-loop block
+        — time every other client of the bridge spends waiting. The gate lands
+        between them by design. Note which cases that leaves unvalidated: an
+        HTML interstitial or a truncated small response is always well under
+        the threshold and is still caught; what slips through is only a
+        multi-megabyte body that begins with ``{`` and is malformed later on.
+
+        ``{`` specifically, not any JSON value — both endpoints return an
+        object, and the parse this replaced rejected arrays and scalars too.
+        A leading BOM counts as a JSON start above the threshold, since
+        ``json.loads`` sniffs the encoding and would have accepted it.
+
+        A non-200 is still decoded: the error path needs the text to build a
         useful message, and an error body is small.
         """
         if response.status_code == 200:
-            return response.content
+            body = response.content
+            if len(body) <= _MAX_VALIDATED_BODY:
+                try:
+                    parsed = json.loads(body)
+                except ValueError as e:
+                    raise UpstreamError(
+                        f"Upstream {endpoint} returned non-JSON 200: {body[:200]!r}"
+                    ) from e
+                # An object, matching the check above the threshold. The parse
+                # this replaced expressed the same requirement as
+                # ``dict(response.json())``, but a JSON array raised an
+                # *uncaught* TypeError there and surfaced as a 500; this is
+                # the same verdict delivered as a 502 that names the provider.
+                if not isinstance(parsed, dict):
+                    raise UpstreamError(
+                        f"Upstream {endpoint} returned non-JSON 200: {body[:200]!r}"
+                    )
+            else:
+                probe = body.lstrip()
+                if not (probe.startswith(b"{") or probe.startswith(_UTF_BOMS)):
+                    raise UpstreamError(
+                        f"Upstream {endpoint} returned non-JSON 200: {body[:200]!r}"
+                    )
+            return body
         self._raise_for_status(response.status_code, response.text[:500], endpoint)
         # Unreachable, but mypy needs it
         raise UpstreamError(f"unreachable: {endpoint} status={response.status_code}")

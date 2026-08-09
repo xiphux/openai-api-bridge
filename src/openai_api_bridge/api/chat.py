@@ -61,11 +61,17 @@ async def chat_completions(request: Request) -> Response | StreamingResponse:
         sse_iterator = await backend.chat_completion(forwarded_body, stream=True)
         if isinstance(sse_iterator, bytes):
             # A backend that answered stream=True with a whole body. Worth
-            # naming rather than forwarding: StreamingResponse would iterate
-            # the bytes and emit one SSE frame per *byte*. Previously this
-            # couldn't be caught — the non-streaming return type was a dict,
-            # which satisfies Iterable[str], so the same mistake type-checked
-            # and only showed up as a mangled stream at the client.
+            # naming rather than forwarding: iterating ``bytes`` yields ints,
+            # and StreamingResponse encodes anything that isn't bytes or
+            # memoryview — so this raises AttributeError mid-response, after
+            # the headers have already gone out, and the client sees an
+            # aborted connection rather than an error.
+            #
+            # Previously this couldn't be caught at all. The non-streaming
+            # return type was a dict, which satisfies Iterable[str] because
+            # iterating a dict yields its keys, so the same mistake
+            # type-checked and degraded silently instead: SSE frames
+            # containing the JSON key names, and no failure anywhere.
             raise UpstreamError(
                 f"Provider {provider_id!r} returned a non-streaming body for a streaming request"
             )

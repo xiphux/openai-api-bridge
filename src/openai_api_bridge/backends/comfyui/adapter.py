@@ -74,7 +74,9 @@ class ComfyUIBackend(Backend):
         self.client = ComfyUIClient(
             base_url=cfg.url,
             poll_interval_seconds=cfg.poll_interval_seconds,
-            max_poll_interval_seconds=cfg.max_poll_interval_seconds,
+            # Client-level fallback only; _collect_one passes the ceiling for
+            # the workflow's actual output type on every call.
+            max_poll_interval_seconds=cfg.max_poll_interval_video_seconds,
         )
         self._workflows: dict[str, WorkflowRecord] | None = None
         self._stamp: tuple[tuple[str, int, int], ...] | None = None
@@ -209,6 +211,21 @@ class ComfyUIBackend(Backend):
             else self.cfg.poll_timeout_image_seconds
         )
 
+    def _max_poll_interval_for(self, record: WorkflowRecord) -> float:
+        """How slowly polling may ease out, by output type.
+
+        An image is collected inside the caller's synchronous request, so the
+        gap between "ComfyUI finished" and "we noticed" is latency they sit
+        through; a video is collected by a background job they poll on their
+        own cadence, where the same gap is free and the request volume over a
+        15-minute render is what actually matters.
+        """
+        return (
+            self.cfg.max_poll_interval_video_seconds
+            if record.output_type == "video"
+            else self.cfg.max_poll_interval_image_seconds
+        )
+
     async def _collect_one(
         self,
         record: WorkflowRecord,
@@ -218,7 +235,11 @@ class ComfyUIBackend(Backend):
     ) -> GeneratedAsset:
         """Wait for a queued run to finish and download its output."""
         timeout = self._poll_timeout_for(record) if timeout_seconds is None else timeout_seconds
-        history = await self.client.poll_completion(prompt_id, timeout_seconds=timeout)
+        history = await self.client.poll_completion(
+            prompt_id,
+            timeout_seconds=timeout,
+            max_interval=self._max_poll_interval_for(record),
+        )
         data, content_type = await self.client.retrieve_media(
             history, output_type=record.output_type
         )

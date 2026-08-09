@@ -1,20 +1,31 @@
-"""Bounded asyncio task pool.
+"""Background work that outlives the request which started it.
 
-We avoid FastAPI's BackgroundTasks because those are tied to a single request's
-response lifecycle and can be cancelled if the client disconnects mid-response.
-Video jobs need to outlive the HTTP request that kicks them off.
+Two shapes, both here because they share the same hazard: a task nobody holds a
+reference to can be garbage-collected mid-flight, and a task nobody drains is
+still pending when the loop is torn down.
 
-The pool keeps a strong reference to every spawned task in a module-level set so
-the task isn't garbage-collected before it completes (a known asyncio footgun).
-A secondary index by ``name`` enables external cancellation (used by the
-``DELETE /v1/videos/{id}`` endpoint).
+* :class:`TaskScheduler` — a bounded pool for video jobs. We avoid FastAPI's
+  BackgroundTasks because those are tied to a single request's response
+  lifecycle and can be cancelled if the client disconnects mid-response.
+  Video jobs need to outlive the HTTP request that kicks them off. A secondary
+  index by ``name`` enables external cancellation (used by
+  ``DELETE /v1/videos/{id}``).
+* :class:`SingleFlight` — at most one live task per key, for work a request
+  starts, stops waiting on, and wants the *next* request to join rather than
+  duplicate.
+
+Both remove entries with an identity check rather than by key. That is not
+incidental: a key can be reused while the previous task is still running, and
+an unconditional delete lets a finishing task evict its live successor —
+leaving that successor untracked, undrained, and holding the very resource the
+map exists to protect.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -119,3 +130,74 @@ class TaskScheduler:
             for t in list(self._tasks):
                 t.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
+
+
+class SingleFlight[T]:
+    """At most one live task per key; later callers join it rather than duplicate it.
+
+    For work a request starts but may stop waiting on — the model-catalogue
+    fetches behind ``GET /v1/models``, where a slow provider is dropped from
+    one listing while its fetch keeps running to warm that backend's cache.
+
+    The entry is created *with* the task, not after the starter gives up.
+    Registering later leaves a window — the whole time the starter is waiting —
+    in which every concurrent caller sees an empty map, starts its own task,
+    and then overwrites the previous entry on the way out. What made that
+    subtle rather than obvious is that the survivors are fine: it is the
+    *untracked* task that ends up holding the upstream request, so a drain
+    awaits the wrong one and the connection it needs is closed underneath it.
+    """
+
+    def __init__(self) -> None:
+        self._tasks: dict[str, asyncio.Task[T]] = {}
+
+    def join_or_start(
+        self,
+        key: str,
+        factory: Callable[[], Coroutine[Any, Any, T]],
+        *,
+        name: str | None = None,
+    ) -> asyncio.Task[T]:
+        """The live task for ``key``, starting one from ``factory`` if there isn't one.
+
+        A factory rather than a coroutine so nothing is constructed when an
+        existing task is joined — an un-awaited coroutine would warn.
+        """
+        existing = self._tasks.get(key)
+        if existing is not None:
+            return existing
+        task = asyncio.create_task(factory(), name=name)
+        self._tasks[key] = task
+
+        def _forget(finished: asyncio.Task[T]) -> None:
+            # Identity, not key: by the time this fires the slot may hold a
+            # newer task, and removing that one would untrack a live fetch.
+            if self._tasks.get(key) is finished:
+                del self._tasks[key]
+
+        task.add_done_callback(_forget)
+        return task
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    def keys(self) -> list[str]:
+        return list(self._tasks)
+
+    async def cancel_all(self) -> None:
+        """Cancel every live task and wait for the cancellations to land.
+
+        Cancel rather than wait-then-cancel. Everything in here is by
+        construction work some request already gave up on, and what it would
+        finish for — a cache inside a backend the process is about to close —
+        does not survive the shutdown either. Waiting first only adds its
+        grace period to every restart.
+        """
+        tasks = list(self._tasks.values())
+        if not tasks:
+            return
+        log.info("Cancelling %d in-flight background fetch(es)", len(tasks))
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()

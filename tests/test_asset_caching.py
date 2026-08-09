@@ -39,7 +39,7 @@ def _meta(file_id: str = FILE_ID) -> FileMetadata:
 def stored(tmp_path: Path) -> OpenedFile:
     path = tmp_path / f"{FILE_ID}.png"
     path.write_bytes(b"\x89PNG\r\n\x1a\n")
-    return OpenedFile(path=path, meta=_meta(), stat=path.stat())
+    return OpenedFile(path=path, meta=_meta())
 
 
 def test_first_fetch_is_cacheable_and_carries_a_validator(stored: OpenedFile) -> None:
@@ -61,7 +61,7 @@ def test_validator_comes_from_the_id_not_the_stat(stored: OpenedFile, tmp_path: 
 
     moved = tmp_path / "restored.png"
     moved.write_bytes(stored.path.read_bytes())
-    restored = OpenedFile(path=moved, meta=_meta(), stat=moved.stat())
+    restored = OpenedFile(path=moved, meta=_meta())
     response_after = asset_response(restored, if_none_match=None)
 
     assert response_after.headers["etag"] == etag_before
@@ -107,3 +107,31 @@ def test_if_none_match_forms_that_should_match(header: str) -> None:
 )
 def test_if_none_match_forms_that_should_not_match(header: str | None) -> None:
     assert not _matches(header, _etag_for(FILE_ID))
+
+
+def test_responses_vary_on_authorization(stored: OpenedFile) -> None:
+    """These endpoints are cacheable AND behind a bearer token.
+
+    `private` tells a well-behaved shared cache to keep out; Vary is what
+    stops one that stored the response anyway from serving it to a request
+    bearing a different credential.
+    """
+    served = asset_response(stored, if_none_match=None)
+    not_modified = asset_response(stored, if_none_match=f'"{FILE_ID}"')
+
+    assert served.headers["vary"] == "Authorization"
+    assert not_modified.headers["vary"] == "Authorization"
+
+
+def test_stat_is_not_handed_to_starlette(stored: OpenedFile) -> None:
+    """FileResponse's own stat is also its existence check.
+
+    Supplying stat_result makes it skip that stat, so a file evicted between
+    the store's check and the send is answered as 200 with a Content-Length
+    from the stale stat and a truncated body — a silent short read where
+    there should be a loud failure.
+    """
+    response = asset_response(stored, if_none_match=None)
+
+    assert isinstance(response, FileResponse)
+    assert response.stat_result is None

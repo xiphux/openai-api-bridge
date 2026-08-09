@@ -14,16 +14,27 @@ from ..backends.base import Backend, ModelEntry
 from ..config import BridgeSettings
 from ..dispatcher import BackendDispatcher
 from ..errors import BridgeError
+from ..infra.tasks import SingleFlight
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Strong refs to fetches that outlived the request that started them. A task
-# with no live reference can be garbage-collected mid-flight (the same asyncio
-# footgun TaskScheduler guards against), which would defeat the whole point of
-# letting a slow fetch finish.
-_lingering: set[asyncio.Task[list[ModelEntry]]] = set()
+# Catalogue fetches that outlive the request that started them, one per
+# provider. See SingleFlight for why the entry is created with the task rather
+# than when the starter gives up, and why removal is identity-checked.
+_lingering: SingleFlight[list[ModelEntry]] = SingleFlight()
+
+
+async def drain_lingering() -> None:
+    """Stop orphaned catalogue fetches. Called from the app's shutdown path.
+
+    Ordered *before* the dispatcher closes its backends: these tasks are
+    awaiting on an httpx client ``BackendDispatcher.aclose`` is about to close
+    underneath them, which fails silently since ``_entries_for`` swallows
+    everything — and the loop would otherwise be torn down with them pending.
+    """
+    await _lingering.cancel_all()
 
 
 async def _entries_for(provider_id: str, backend: Backend) -> list[ModelEntry]:
@@ -58,21 +69,29 @@ async def _entries_within(provider_id: str, backend: Backend, budget: float) -> 
     have made the next one fast. Left running, it fills the backend's own
     cache and the provider reappears on a subsequent request.
 
+    A request arriving while a previous one's fetch is still running **joins**
+    that fetch rather than starting a second one. Joining rather than declining
+    outright is the useful choice: the wait is bounded by this request's own
+    budget either way, so joining costs nothing extra and returns real data
+    whenever the in-flight fetch happens to land inside it — where declining
+    guarantees the provider stays missing for as long as the fetch runs.
+
     A non-positive budget disables the bound, for an operator who would rather
     wait than see a provider omitted.
     """
     if budget <= 0:
         return await _entries_for(provider_id, backend)
-    task = asyncio.create_task(
-        _entries_for(provider_id, backend), name=f"list-models-{provider_id}"
+    task = _lingering.join_or_start(
+        provider_id,
+        lambda: _entries_for(provider_id, backend),
+        name=f"list-models-{provider_id}",
     )
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=budget)
     except TimeoutError:
-        # _entries_for swallows every exception, so the orphan can only
-        # resolve to a list — there is no pending exception to retrieve.
-        _lingering.add(task)
-        task.add_done_callback(_lingering.discard)
+        # No bookkeeping on the way out: the task has been tracked since it was
+        # created, so it is already held and already drainable — including when
+        # this request is cancelled rather than timing out.
         log.warning(
             "Provider %r did not return its catalogue within %.1fs; omitting it from "
             "this listing while the fetch continues in the background",

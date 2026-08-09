@@ -52,7 +52,13 @@ class _RecordingClient:
         self.calls.append(f"submit:{prompt_id}")
         return prompt_id
 
-    async def poll_completion(self, prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll_completion(
+        self,
+        prompt_id: str,
+        *,
+        timeout_seconds: float,
+        max_interval: float | None = None,
+    ) -> dict[str, Any]:
         self.calls.append(f"poll:{prompt_id}")
         return {"outputs": {}}
 
@@ -224,7 +230,9 @@ async def test_batch_budgets_the_whole_queue_not_a_single_run(workflows_dir: Pat
     recorder = _RecordingClient()
     seen: list[float] = []
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         seen.append(timeout_seconds)
         return {"outputs": {}}
 
@@ -247,7 +255,9 @@ async def test_single_run_keeps_the_plain_per_run_budget(workflows_dir: Path) ->
     recorder = _RecordingClient()
     seen: list[float] = []
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         seen.append(timeout_seconds)
         return {"outputs": {}}
 
@@ -271,7 +281,9 @@ async def test_one_failing_collector_cancels_its_siblings(workflows_dir: Path) -
     backend, recorder = _backend(workflows_dir)
     finished: list[str] = []
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         if prompt_id == "p2":
             raise UpstreamError("ComfyUI dropped the prompt")
         await asyncio.sleep(5.0)  # a sibling still mid-poll
@@ -322,7 +334,9 @@ async def test_cancelled_siblings_have_their_prompts_recalled(workflows_dir: Pat
     """
     backend, recorder = _backend(workflows_dir)
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         if prompt_id == "p2":
             raise UpstreamError("ComfyUI dropped the prompt")
         await asyncio.sleep(5.0)
@@ -345,7 +359,9 @@ async def test_successfully_collected_prompts_are_not_recalled(workflows_dir: Pa
     backend, recorder = _backend(workflows_dir)
     done = asyncio.Event()
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         if prompt_id == "p1":
             done.set()
             return {"outputs": {}}
@@ -369,7 +385,9 @@ async def test_cancelling_a_single_run_recalls_its_prompt(workflows_dir: Path) -
     backend, recorder = _backend(workflows_dir)
     polling = asyncio.Event()
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         polling.set()
         await asyncio.sleep(30.0)
         return {"outputs": {}}
@@ -396,7 +414,9 @@ async def test_discard_is_bounded_when_comfyui_hangs(workflows_dir: Path) -> Non
     async def hanging_delete(prompt_ids: list[str]) -> None:
         await asyncio.sleep(30.0)
 
-    async def poll(prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
         raise UpstreamError("ComfyUI dropped the prompt")
 
     recorder.delete_queued = hanging_delete  # type: ignore[assignment]
@@ -506,3 +526,46 @@ async def test_edited_workflow_takes_effect_on_the_next_generation(
     )
     await backend.generate_image(model_slug="wf", prompt="a cat", n=1)
     assert "9" in submitted[1]
+
+
+@pytest.mark.parametrize(
+    ("output_type", "expected"),
+    [("image", 1.0), ("video", 5.0)],
+)
+async def test_poll_ceiling_differs_by_output_type(
+    workflows_dir: Path, output_type: str, expected: float
+) -> None:
+    """One ceiling cannot serve both paths.
+
+    An image is collected inside the caller's synchronous
+    POST /v1/images/generations, so every second the ramp adds between
+    "ComfyUI finished" and "we noticed" is a second they sit through. A video
+    is collected by a background job the client polls on its own cadence,
+    where that lag is free and the request volume over a 15-minute render is
+    what actually matters.
+    """
+    (workflows_dir / "wf.meta.json").write_text(
+        json.dumps({"positive_prompt_node": "3", "output_type": output_type})
+    )
+    backend, _ = _backend(workflows_dir)
+    record = (await backend._ensure_workflows())["wf"]
+
+    assert backend._max_poll_interval_for(record) == expected
+
+
+async def test_image_polling_never_eases_out_past_its_ceiling(workflows_dir: Path) -> None:
+    """The ceiling the adapter picks is the one the client actually applies."""
+    backend, recorder = _backend(workflows_dir)
+    seen: dict[str, float | None] = {}
+
+    async def capture(
+        prompt_id: str, *, timeout_seconds: float, max_interval: float | None = None
+    ) -> dict[str, Any]:
+        seen["max_interval"] = max_interval
+        return {"outputs": {}}
+
+    recorder.poll_completion = capture  # type: ignore[assignment]
+
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=1)
+
+    assert seen["max_interval"] == 1.0

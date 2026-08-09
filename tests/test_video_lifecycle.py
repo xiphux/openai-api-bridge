@@ -383,13 +383,9 @@ async def test_poll_interval_ramps_instead_of_staying_flat(
         )
     )
 
-    client = ComfyUIClient(
-        base_url="http://comfy",
-        poll_interval_seconds=0.25,
-        max_poll_interval_seconds=5.0,
-    )
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=0.25)
     try:
-        await client.poll_completion("ramp-id", timeout_seconds=600.0)
+        await client.poll_completion("ramp-id", timeout_seconds=600.0, max_interval=5.0)
     finally:
         await client.aclose()
 
@@ -424,13 +420,9 @@ async def test_poll_interval_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
         )
     )
 
-    client = ComfyUIClient(
-        base_url="http://comfy",
-        poll_interval_seconds=0.25,
-        max_poll_interval_seconds=5.0,
-    )
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=0.25)
     try:
-        await client.poll_completion("capped-id", timeout_seconds=600.0)
+        await client.poll_completion("capped-id", timeout_seconds=600.0, max_interval=5.0)
     finally:
         await client.aclose()
 

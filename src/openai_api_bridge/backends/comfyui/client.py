@@ -29,20 +29,17 @@ log = logging.getLogger(__name__)
 # poll_timeout_video_seconds (default 900s).
 QUEUE_RECHECK_INTERVAL = 30.0
 
-# Growth applied to the poll interval after each unproductive check, and the
-# ceiling it climbs to. A flat interval is wrong at both ends of ComfyUI's
-# range: fast enough for a 3-second SDXL render is far too fast for a
-# 15-minute video, where it means ~900 requests at a web thread this module
-# already notes is CPU-starved during generation — polling that hard slows the
-# very generation it waits on. Slow enough for the video adds most of a second
-# of dead time to every image.
+# Growth applied to the poll interval after each unproductive check. A flat
+# interval is wrong at both ends of ComfyUI's range: fast enough for a
+# 3-second SDXL render is far too fast for a 15-minute video, where it means
+# ~900 requests at a web thread this module already notes is CPU-starved
+# during generation — polling that hard slows the very generation it waits on.
 #
-# Ramping serves both. From the default 0.25s start, the interval reaches the
-# 5s ceiling after ~12s and eight polls, so an image is collected almost
-# immediately while a long video settles into one poll per 5s (~190 requests
-# over 15 minutes rather than 900). The ceiling stays well inside
-# QUEUE_RECHECK_INTERVAL so the dropped-prompt detection below keeps its
-# cadence.
+# Ramping fixes the volume; the *ceiling* is what decides the cost, and it is
+# passed per call because the two output types disagree about it. See
+# poll_completion. The default below is the video-shaped one, used only when a
+# caller doesn't pass its own; ceilings must stay well inside
+# QUEUE_RECHECK_INTERVAL so the dropped-prompt detection keeps its cadence.
 POLL_BACKOFF_FACTOR = 1.5
 MAX_POLL_INTERVAL = 5.0
 
@@ -164,13 +161,27 @@ class ComfyUIClient:
         )
         response.raise_for_status()
 
-    async def poll_completion(self, prompt_id: str, *, timeout_seconds: float) -> dict[str, Any]:
+    async def poll_completion(
+        self,
+        prompt_id: str,
+        *,
+        timeout_seconds: float,
+        max_interval: float | None = None,
+    ) -> dict[str, Any]:
         """Poll ``/history/{prompt_id}`` until the entry appears or we time out.
 
         The interval starts at ``poll_interval_seconds`` and eases out towards
-        ``max_poll_interval_seconds`` (see ``POLL_BACKOFF_FACTOR``), so a fast
-        image workflow is collected almost as soon as it finishes while a long
-        video stops hammering the upstream for its whole duration.
+        ``max_interval`` (see ``POLL_BACKOFF_FACTOR``), so a fast workflow is
+        collected almost as soon as it finishes while a long one stops
+        hammering the upstream for its whole duration.
+
+        ``max_interval`` is per call rather than per client because one ceiling
+        cannot serve both output types: an image is collected inside the
+        caller's synchronous request, where detection lag is latency the user
+        feels, while a video is collected by a background job where the same
+        lag costs nobody anything and the request volume is what matters. The
+        adapter picks it from the workflow; ``None`` falls back to the
+        client-level default.
 
         Per-request timeout is generous (30s) because ComfyUI's web thread can
         be CPU-starved during heavy generation. Transient network failures are
@@ -193,6 +204,13 @@ class ComfyUIClient:
         start = time.time()
         last_queue_check = 0.0
         queue_miss_streak = 0
+        # Never below the starting interval: an operator who deliberately
+        # slows polling down shouldn't have a ceiling speed it back up.
+        ceiling = (
+            self.max_poll_interval
+            if max_interval is None
+            else max(max_interval, self.poll_interval)
+        )
         interval = self.poll_interval
         per_request_timeout = 30.0
         history_url = f"{self.base_url}/history/{prompt_id}"
@@ -256,7 +274,7 @@ class ComfyUIClient:
                             )
 
             await asyncio.sleep(interval)
-            interval = min(interval * POLL_BACKOFF_FACTOR, self.max_poll_interval)
+            interval = min(interval * POLL_BACKOFF_FACTOR, ceiling)
 
     async def _is_prompt_tracked(self, queue_url: str, prompt_id: str, timeout: float) -> bool:
         """Return True if ``prompt_id`` is in ComfyUI's running or pending queue.
