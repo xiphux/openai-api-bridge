@@ -21,12 +21,6 @@ from ...util.http import fetch_asset_with_retry
 log = logging.getLogger(__name__)
 
 
-# Modest ceiling; OpenRouter's data URLs are typically <2MB even for
-# high-quality outputs. If an OpenRouter image model ever exceeds this, the
-# bound trims a runaway payload without affecting normal use.
-_MAX_IMAGE_BYTES = 50 * 1024 * 1024
-
-
 def extract_image_data_urls(response: dict[str, Any]) -> list[str]:
     """Pull the data: URLs (or hosted URLs) out of an OpenRouter chat
     completion response.
@@ -71,12 +65,16 @@ def extract_image_data_urls(response: dict[str, Any]) -> list[str]:
     return urls
 
 
-async def fetch_image_bytes(url: str) -> tuple[bytes, str]:
+async def fetch_image_bytes(url: str, *, max_bytes: int | None) -> tuple[bytes, str]:
     """Resolve a URL from extract_image_data_urls into raw bytes.
 
     Data URLs are decoded inline; HTTP(S) URLs are fetched. Returns
     ``(bytes, content_type)`` where content_type defaults to
     ``application/octet-stream`` if the upstream doesn't hint otherwise.
+
+    ``max_bytes`` of ``None`` means unbounded (the provider's
+    ``max_asset_mb = 0``); it used to be a module constant, so the one cap that
+    a deployment might actually need to raise was the one it couldn't.
     """
     if url.startswith("data:"):
         # Format: ``data:image/png;base64,<base64>``
@@ -92,9 +90,9 @@ async def fetch_image_bytes(url: str) -> tuple[bytes, str]:
             data = base64.b64decode(payload, validate=True)
         except (ValueError, binascii.Error) as e:
             raise UpstreamError(f"OpenRouter data URL contained undecodable base64: {e}") from e
-        if len(data) > _MAX_IMAGE_BYTES:
+        if max_bytes is not None and len(data) > max_bytes:
             raise UpstreamError(
-                f"OpenRouter image exceeded size cap ({len(data)} > {_MAX_IMAGE_BYTES} bytes)"
+                f"OpenRouter image exceeded size cap ({len(data)} > {max_bytes} bytes)"
             )
         return data, media_type
 
@@ -103,9 +101,7 @@ async def fetch_image_bytes(url: str) -> tuple[bytes, str]:
     # this path had no retry of its own, so a just-minted asset URL that
     # briefly 401/404s while storage catches up — the exact race the helper
     # exists for — failed the whole request here but was shrugged off there.
-    return await fetch_asset_with_retry(
-        url, provider_label="OpenRouter", max_bytes=_MAX_IMAGE_BYTES
-    )
+    return await fetch_asset_with_retry(url, provider_label="OpenRouter", max_bytes=max_bytes)
 
 
 def classify_kind(model: dict[str, Any]) -> str | None:

@@ -326,6 +326,14 @@ class OpenRouterProviderConfig(_TokenAuthProvider, _CachedCatalogProvider):
     backend: Literal["openrouter"]
     base_url: str = "https://openrouter.ai/api"
     request_timeout_seconds: float = 120.0
+    # Ceiling on a single generated image, in MB — same knob as ImageRouter and
+    # fal, but a much lower default on purpose. Theirs is 512 because they
+    # serve video, which legitimately runs to hundreds of MB; this backend has
+    # no video path, and OpenRouter inlines images as base64 data URLs that are
+    # typically under 2MB. A data URL is decoded whole before it can be
+    # measured, so the bound also has to stay small enough that the decode
+    # itself is affordable on a single-worker process. 0 disables it.
+    max_asset_mb: int = Field(default=50, ge=0)
 
 
 # Below this, a generated asset would plausibly expire before the bridge could

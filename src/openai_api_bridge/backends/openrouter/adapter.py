@@ -55,6 +55,8 @@ class OpenRouterBackend(Backend):
         self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
             cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
         )
+        # 0 is the documented "no bound"; anything else is MB.
+        self._max_asset_bytes = (cfg.max_asset_mb * 1024**2) if cfg.max_asset_mb > 0 else None
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -208,5 +210,5 @@ class OpenRouterBackend(Backend):
         # models do n>1 internally). We pick the first one — n>1 is handled
         # by the caller invoking _generate_one multiple times. The extras
         # are dropped on the floor; in practice OpenRouter returns one.
-        data, content_type = await fetch_image_bytes(urls[0])
+        data, content_type = await fetch_image_bytes(urls[0], max_bytes=self._max_asset_bytes)
         return GeneratedAsset(data=data, content_type=content_type, kind="image")

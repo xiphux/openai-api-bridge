@@ -191,6 +191,11 @@ api_token_env = "VENICE_API_TOKEN"
 # #                               # (0 = re-fetch on every /v1/models)
 # # catalog_retry_seconds = 30.0  # after a failed fetch, fail fast for this
 # #                               # long instead of each caller retrying
+# # max_asset_mb = 50             # ceiling on one generated image (0 = no
+# #                               # bound). Lower than ImageRouter's and fal's
+# #                               # 512 on purpose: no video path here, and
+# #                               # OpenRouter inlines images as base64 data
+# #                               # URLs that are typically under 2MB
 
 
 # --- fal.ai -----------------------------------------------------------------
