@@ -20,6 +20,41 @@ log = logging.getLogger(__name__)
 
 _DEFAULT_FETCH_TIMEOUT_S = 120.0
 
+# One unauthenticated client for every asset fetch in the process, so a
+# generation doesn't pay a DNS lookup, TCP connect and TLS handshake per image
+# on top of the download itself. Built per running event loop: a pool's
+# connections belong to the loop that opened them, and the bridge has exactly
+# one — but the test suite runs each case in a fresh loop, and a client
+# carried across would hand out connections attached to a closed one.
+_asset_client: httpx.AsyncClient | None = None
+_asset_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _asset_fetch_client() -> httpx.AsyncClient:
+    """The shared client used to download generated assets.
+
+    Deliberately built with **no default headers**. Asset URLs point at public
+    CDNs (fal.media, storage.imagerouter.io, OpenRouter's host), and the
+    bridge's upstream ``Authorization`` header has no business being attached
+    to them — some providers would log it. Keeping the client unauthenticated
+    is also what makes httpx's cross-origin header stripping on redirects a
+    non-question rather than something to reason about per provider.
+    """
+    global _asset_client, _asset_client_loop
+    loop = asyncio.get_running_loop()
+    if _asset_client is None or _asset_client_loop is not loop or _asset_client.is_closed:
+        _asset_client = httpx.AsyncClient(follow_redirects=True)
+        _asset_client_loop = loop
+    return _asset_client
+
+
+async def aclose_asset_client() -> None:
+    """Close the shared asset client. Called from the app's shutdown path."""
+    global _asset_client, _asset_client_loop
+    client, _asset_client, _asset_client_loop = _asset_client, None, None
+    if client is not None and not client.is_closed:
+        await client.aclose()
+
 
 def raise_for_upstream_status(*, status: int, body: str, provider: str, endpoint: str) -> NoReturn:
     """Map an upstream error status onto the bridge's typed errors.
@@ -114,10 +149,10 @@ async def fetch_asset_with_retry(
     a public CDN and expect the caller to fetch the bytes separately. Two shared
     concerns this centralises:
 
-    * **No auth leakage.** A fresh unauthenticated client is used per attempt so
-      the bridge's upstream ``Authorization`` header is never attached to a CDN
-      request, and so httpx's cross-origin header-stripping on redirects can't
-      surprise us.
+    * **No auth leakage.** The shared client is unauthenticated, so the
+      bridge's upstream ``Authorization`` header is never attached to a CDN
+      request, and httpx's cross-origin header-stripping on redirects can't
+      surprise us. See :func:`_asset_fetch_client`.
     * **Transient conditions.** A just-minted asset URL can briefly 401/404
       before storage catches up, CDNs occasionally 5xx or drop the connection,
       and a throttled fetch answers 429. Retries with exponential backoff
@@ -135,8 +170,10 @@ async def fetch_asset_with_retry(
 
     for attempt in range(max_attempts):
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(url, timeout=timeout, follow_redirects=True)
+            # Reused, not built per attempt: a fresh client per fetch meant a
+            # DNS lookup, TCP connect and TLS handshake for every single image,
+            # on the critical path of every generation that returns URLs.
+            resp = await _asset_fetch_client().get(url, timeout=timeout)
             if (
                 resp is not None
                 and _is_retriable_fetch_status(resp.status_code)

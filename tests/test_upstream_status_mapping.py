@@ -482,3 +482,52 @@ async def test_fal_does_not_blame_expiry_for_a_throttled_fetch() -> None:
         await backend.aclose()
 
     assert "output_expiration_seconds" not in exc.value.message
+
+
+async def test_asset_fetches_share_one_connection_pool() -> None:
+    """A client per fetch meant a TLS handshake per image.
+
+    The shared client is what turns n concurrent asset downloads into n
+    requests on one pool rather than n pools of one request.
+    """
+    import respx
+
+    from openai_api_bridge.util.http import _asset_fetch_client, fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/a.png").mock(
+            return_value=httpx.Response(200, content=b"a", headers={"content-type": "image/png"})
+        )
+        await fetch_asset_with_retry("https://cdn.example/a.png", provider_label="Test")
+        first = _asset_fetch_client()
+        await fetch_asset_with_retry("https://cdn.example/a.png", provider_label="Test")
+        assert _asset_fetch_client() is first
+
+
+async def test_asset_client_carries_no_authorization_header() -> None:
+    """Asset URLs are public CDNs; the bridge's upstream credential must not ride along."""
+    from openai_api_bridge.util.http import _asset_fetch_client
+
+    assert "authorization" not in {k.lower() for k in _asset_fetch_client().headers}
+
+
+async def test_asset_client_is_rebuilt_for_a_new_event_loop() -> None:
+    """A pool's connections belong to the loop that opened them.
+
+    The bridge has exactly one loop, so in production this caches a single
+    client for the process — but a client carried into a different loop would
+    hand out connections attached to a closed one.
+    """
+    import asyncio
+
+    from openai_api_bridge.util.http import _asset_fetch_client
+
+    outer = _asset_fetch_client()
+    inner = await asyncio.to_thread(lambda: asyncio.run(_in_fresh_loop()))
+    assert inner is not outer
+
+
+async def _in_fresh_loop() -> object:
+    from openai_api_bridge.util.http import _asset_fetch_client
+
+    return _asset_fetch_client()

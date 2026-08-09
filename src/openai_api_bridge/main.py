@@ -4,7 +4,8 @@ The lifespan context manages the bridge's resource graph in well-defined order:
 
   startup:  settings -> providers -> db -> migrations -> file/job stores ->
             mark stale jobs failed -> dispatcher -> scheduler -> eviction loop
-  shutdown: eviction loop -> scheduler drain -> dispatcher (closes httpx) -> db
+  shutdown: eviction loop -> scheduler drain -> dispatcher (closes httpx) ->
+            shared asset client -> db
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from .infra.eviction import EvictionLoop
 from .infra.filestore import FileStore
 from .infra.jobstore import JobStore
 from .infra.tasks import TaskScheduler
+from .util.http import aclose_asset_client
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +106,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await eviction.stop()
         await scheduler.shutdown(timeout=30.0)
         await dispatcher.aclose()
+        # After the scheduler drains: a video job still unwinding may be
+        # mid-download of its finished asset.
+        await aclose_asset_client()
         await db.close()
         log.info("Shutdown complete")
 
