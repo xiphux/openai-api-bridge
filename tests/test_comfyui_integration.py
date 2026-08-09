@@ -339,6 +339,45 @@ def test_video_endpoint_rejects_image_workflow(
     raise AssertionError("Runner never moved job to failed state")
 
 
+# --- proxy auth rejection ----------------------------------------------------
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("endpoint", ["/upload/image", "/prompt"])
+async def test_proxy_auth_rejection_is_typed_the_same_on_either_call(
+    status: int,
+    endpoint: str,
+) -> None:
+    """ComfyUI is unauthenticated itself but is routinely behind a proxy that
+    isn't, so both calls an edit makes can hit the same rejection. They used to
+    report it differently — /prompt as upstream_auth_error, /upload/image as a
+    generic upstream_error — so which code a client saw depended on which call
+    tripped first. The credential must not appear in the message either way.
+    """
+    from openai_api_bridge.backends.comfyui.client import ComfyUIClient
+    from openai_api_bridge.errors import UpstreamAuthError
+
+    base = "http://comfy.test"
+    respx.post(f"{base}{endpoint}").mock(
+        return_value=httpx.Response(status, text="denied: token sk-leaked-secret")
+    )
+
+    client = ComfyUIClient(base_url=base)
+    try:
+        with pytest.raises(UpstreamAuthError) as exc:
+            if endpoint == "/upload/image":
+                await client.upload_image(b"\x89PNG", "image/png")
+            else:
+                await client.submit_prompt({"1": {"class_type": "X", "inputs": {}}})
+    finally:
+        await client.aclose()
+
+    assert exc.value.code == "upstream_auth_error"
+    assert str(status) in exc.value.message
+    assert "sk-leaked-secret" not in exc.value.message
+
+
 # --- reference-image upload naming ------------------------------------------
 
 

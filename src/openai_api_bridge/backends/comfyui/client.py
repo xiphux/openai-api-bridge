@@ -98,7 +98,25 @@ class ComfyUIClient:
             result = parse_json(response, "ComfyUI image upload")
             return str(result.get("name", filename))
         except httpx.HTTPStatusError as e:
-            raise UpstreamError(f"ComfyUI image upload returned {e.response.status_code}") from e
+            status = e.response.status_code
+            if status in (401, 403):
+                # The same rule submit_prompt already applied, on the same
+                # client and against the same deployment: ComfyUI is
+                # unauthenticated itself but is commonly fronted by a reverse
+                # proxy that isn't, so a rejected credential here is the same
+                # non-transient condition — and one an edit request hits
+                # *before* it ever reaches /prompt. Collapsing it into a
+                # generic UpstreamError meant the identical proxy rejection
+                # was reported two different ways depending on which call
+                # tripped it first.
+                #
+                # Body stays out of the client-facing message; a proxy can
+                # quote the credential back. Available at DEBUG.
+                log.debug("ComfyUI auth failure on /upload/image: %s", e.response.text[:300])
+                raise UpstreamAuthError(
+                    f"ComfyUI rejected our credentials ({status}) on /upload/image"
+                ) from e
+            raise UpstreamError(f"ComfyUI image upload returned {status}") from e
         except httpx.HTTPError as e:
             raise UpstreamError(f"ComfyUI image upload failed: {e}") from e
 
