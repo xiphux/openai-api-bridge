@@ -369,7 +369,7 @@ class FalModelConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-class FalProviderConfig(_TokenAuthProvider):
+class FalProviderConfig(_TokenAuthProvider, _CachedCatalogProvider):
     """fal.ai (https://fal.ai) — model-hosting broker for tier-1 image models
     (Seedream, Nano Banana / Gemini image, GPT Image, FLUX, …).
 
@@ -472,6 +472,10 @@ class FalProviderConfig(_TokenAuthProvider):
     # trip per window rather than one per request — but it heals on its own
     # instead of staying degraded until the process restarts. 0 retries on the
     # very next request.
+    #
+    # Per-model schema introspection only. The *catalogue* has its own pair of
+    # knobs (catalog_ttl_seconds / catalog_retry_seconds, inherited); this one
+    # governed both until they were split apart.
     introspect_retry_seconds: float = 300.0
 
 

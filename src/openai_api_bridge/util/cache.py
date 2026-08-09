@@ -17,8 +17,12 @@ only briefly so the missing half is re-attempted soon. An override may only
 shorten the window, never create or extend one, so ``ttl_seconds = 0`` always
 means "no caching".
 
-:attr:`lock`, :meth:`fresh` and :meth:`store` are exposed for a caller that
-needs to drive the sequence itself; nothing does today.
+:attr:`lock`, :meth:`fresh`, :meth:`store` and :meth:`note_failure` are exposed
+for a caller that needs to drive the sequence itself. The fal backend does:
+a failed catalogue fetch there degrades to the explicitly configured models
+rather than raising, which :meth:`get` can't express — but the TTL, the failure
+cooldown and the single-flight lock are the same concerns, and were hand-rolled
+there before.
 
 A failure is remembered for ``failure_cooldown_seconds`` and re-raised to
 callers arriving inside that window. That matters because the fetch runs *under

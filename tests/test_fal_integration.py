@@ -614,7 +614,12 @@ async def _safety(backend: FalBackend, mcfg: FalModelConfig) -> dict:
     return await backend._safety_params(mcfg, mcfg.id)
 
 
-def _direct_backend(retry_seconds: float, model_ids: list[str]) -> FalBackend:
+def _direct_backend(
+    retry_seconds: float,
+    model_ids: list[str],
+    *,
+    catalog_ttl_seconds: float = 300.0,
+) -> FalBackend:
     """A FalBackend built straight from config, for tests that need to poke
     introspection behaviour without going through the HTTP layer."""
     cfg = FalProviderConfig(
@@ -623,6 +628,7 @@ def _direct_backend(retry_seconds: float, model_ids: list[str]) -> FalBackend:
         api_token_env="TEST_FAL_TOKEN",
         models=[FalModelConfig(id=m) for m in model_ids],
         introspect_retry_seconds=retry_seconds,
+        catalog_ttl_seconds=catalog_ttl_seconds,
     )
     return FalBackend(cfg)
 
@@ -956,6 +962,62 @@ def test_catalog_is_cached(discovering_client: TestClient) -> None:
     assert route.call_count == len(SUPPORTED_CATEGORIES)
 
 
+@respx.mock
+async def test_catalog_cache_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TTL rather than a permanent cache, matching every other backend. It
+    used to be cached for the life of the process, so a model fal added — or a
+    variant pairing that moved with it — only appeared after a restart."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+
+    # A *stable* responder, unlike _stub_catalog, whose per-category cursor
+    # advances across calls and so can only serve one listing pass.
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("category") == "text-to-image":
+            return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    route = respx.get(MODELS_API).mock(side_effect=responder)
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.05)
+    try:
+        assert len(await backend.list_models()) == 1
+        assert route.call_count == len(SUPPORTED_CATEGORIES)
+        await asyncio.sleep(0.1)
+        assert len(await backend.list_models()) == 1
+    finally:
+        await backend.aclose()
+    assert route.call_count == 2 * len(SUPPORTED_CATEGORIES), (
+        "the catalogue should be re-read once the TTL lapses"
+    )
+
+
+@respx.mock
+async def test_catalog_failure_uses_the_catalogue_retry_knob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalogue cooldown is `catalog_retry_seconds`, not the schema
+    introspection knob it used to borrow. A long introspect cooldown must not
+    hold the catalogue back once its own (here: zero) window has passed."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = respx.get(MODELS_API).mock(return_value=httpx.Response(503, json={"error": "down"}))
+
+    cfg = FalProviderConfig(
+        backend="fal",
+        id="fal",
+        api_token_env="TEST_FAL_TOKEN",
+        introspect_retry_seconds=3600.0,
+        catalog_retry_seconds=0.0,
+    )
+    backend = FalBackend(cfg)
+    try:
+        assert await backend.list_models() == []
+        first = route.call_count
+        assert await backend.list_models() == []
+    finally:
+        await backend.aclose()
+    assert route.call_count > first, "a zero catalogue cooldown must retry immediately"
+
+
 # --- rejected credentials --------------------------------------------------
 #
 # A missing key already fails at startup (api_token_env is required and
@@ -1127,9 +1189,9 @@ async def test_cancelled_catalog_fetch_does_not_arm_the_cooldown(
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        assert backend._catalog_failed_at is None, "cancellation must not arm the cooldown"
-        assert backend._catalog_cache is None, "no partial catalogue may be cached"
-        assert not backend._catalog_lock.locked(), "the lock must be released"
+        assert backend._catalog.pending_failure() is None, "cancellation must not arm the cooldown"
+        assert backend._catalog.fresh() is None, "no partial catalogue may be cached"
+        assert not backend._catalog.lock.locked(), "the lock must be released"
 
         # And a subsequent request still works — not stuck behind a cooldown.
         assert len(await backend.list_models()) == 1

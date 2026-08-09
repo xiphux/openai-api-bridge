@@ -279,8 +279,16 @@ api_token_env = "VENICE_API_TOKEN"
 #                               # the built-in fallback map (the bridge also
 #                               # falls back automatically if fal's API is down)
 #   introspect_retry_seconds = 300.0   # (default) cooldown before retrying a
-#                               # failed lookup; until then the fallback map
-#                               # applies, so an outage heals without a restart
+#                               # failed *per-model schema* lookup; until then
+#                               # the fallback map applies, so an outage heals
+#                               # without a restart. Schema lookups only — the
+#                               # model listing has its own pair below
+#   catalog_ttl_seconds = 300.0   # (default) reuse the discovered model listing
+#                               # for this long; 0 disables caching. A cold fal
+#                               # catalogue is 10-13 paginated round trips
+#   catalog_retry_seconds = 30.0  # (default) after a failed listing, serve only
+#                               # the explicitly configured models for this long
+#                               # before trying again
 #
 # Per-model escape hatches:
 #   disable_safety = false   # (default: true — moderation IS loosened) leave

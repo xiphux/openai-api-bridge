@@ -52,8 +52,8 @@ see `src/openai_api_bridge/backends/` for the existing implementations.
 
 `GET /v1/models` fans out to every configured provider, so an uncached backend
 pays an upstream round trip each time a client refreshes its model picker.
-ImageRouter, OpenRouter, Venice and OpenAI passthrough cache their listing for
-`catalog_ttl_seconds` (default 300; `0` disables). It's a TTL rather than a
+ImageRouter, OpenRouter, Venice, fal and OpenAI passthrough cache their listing
+for `catalog_ttl_seconds` (default 300; `0` disables). It's a TTL rather than a
 permanent cache so a model added upstream appears without restarting the
 bridge. (ComfyUI is separate — it scans workflow files from disk, governed by
 `cache_workflows`.)
@@ -82,6 +82,13 @@ starting their own. A **failed** fetch is remembered for `catalog_retry_seconds`
 that window, so an upstream hang costs one timeout rather than one per caller.
 It's remembered, not latched — once the window closes the provider is retried
 and recovers on its own.
+
+fal is the exception to the re-raise: a failed listing degrades to whatever
+`[[providers.models]]` entries are configured rather than erroring, so the
+provider keeps serving its explicitly named models while discovery is down.
+Its `catalog_retry_seconds` governs how long that degraded state lasts.
+(`introspect_retry_seconds` is a separate knob, for the per-model schema
+lookups that derive moderation settings.)
 
 A fetch rejected for **credentials** (upstream 401/403) is held for at least
 300s instead, since provider tokens are read from the environment at startup

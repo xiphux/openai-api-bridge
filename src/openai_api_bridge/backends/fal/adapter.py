@@ -40,6 +40,7 @@ from ...errors import (
     UpstreamAuthError,
     UpstreamError,
 )
+from ...util.cache import AsyncTTLCache
 from ...util.sizes import parse_size
 from ..base import (
     Backend,
@@ -206,10 +207,14 @@ class FalBackend(Backend):
         # retry cooldown so an outage degrades temporarily rather than for the
         # life of the process.
         self._introspect_failed_at: OrderedDict[str, float] = OrderedDict()
-        # Discovered catalog, with its own cooldown on failure.
-        self._catalog_cache: list[ModelEntry] | None = None
-        self._catalog_lock = asyncio.Lock()
-        self._catalog_failed_at: float | None = None
+        # Discovered catalog. Driven through AsyncTTLCache's lock/fresh/store
+        # primitives rather than its `get`, because this backend degrades to
+        # the configured models on a failed fetch where `get` re-raises — but
+        # the TTL, the failure cooldown and the single-flight lock are the same
+        # concerns every other backend has, and were hand-rolled here.
+        self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
+            cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
+        )
         # text-driven id -> the sibling that accepts a reference image, filled
         # in alongside the catalogue. Empty when collapsing or discovery is off.
         self._variant_routes: dict[str, str] = {}
@@ -265,16 +270,22 @@ class FalBackend(Backend):
         If the catalogue can't be fetched we fall back to whatever is
         explicitly configured rather than dropping the provider's models from
         ``/v1/models`` entirely.
+
+        The listing is cached for ``catalog_ttl_seconds``, as on every other
+        backend. It used to be cached for the life of the process, so a model
+        fal added — or a variant pairing that changed with it — only appeared
+        after a bridge restart.
         """
         if not self.cfg.discover_models or self._auth_failed:
             return self._configured_entries()
-        async with self._catalog_lock:
-            if self._catalog_cache is not None:
-                return self._catalog_cache
-            if self._catalog_failed_at is not None:
-                elapsed = time.monotonic() - self._catalog_failed_at
-                if elapsed < self.cfg.introspect_retry_seconds:
-                    return self._configured_entries()
+        async with self._catalog.lock:
+            cached = self._catalog.fresh()
+            if cached is not None:
+                return cached
+            if self._catalog.pending_failure() is not None:
+                # Inside the retry cooldown. Serve what's configured rather
+                # than re-raising, which is what `AsyncTTLCache.get` would do.
+                return self._configured_entries()
             try:
                 raw = await self.client.fetch_catalog(self._categories)
             except UpstreamAuthError as e:
@@ -287,24 +298,28 @@ class FalBackend(Backend):
             # window because one client hung up. Cancellation leaves no partial
             # state and releases the lock, so the next request simply retries;
             # the only cost is discarded work, and only until the first
-            # successful fetch caches the catalogue for the process.
+            # successful fetch caches the catalogue for the window.
             except Exception as e:  # never 500 /v1/models over a catalogue blip
-                self._catalog_failed_at = time.monotonic()
+                self._catalog.note_failure(e)
                 log.warning(
                     "fal: could not list models (%s); serving only explicitly "
                     "configured models, retrying in %.0fs",
                     e,
-                    self.cfg.introspect_retry_seconds,
+                    self.cfg.catalog_retry_seconds,
                 )
                 return self._configured_entries()
             entries = self._entries_from_catalog(raw)
             if not entries:
-                self._catalog_failed_at = time.monotonic()
+                self._catalog.note_failure(
+                    UpstreamError(
+                        f"fal model API returned no models for categories {self._categories}"
+                    )
+                )
                 log.warning(
                     "fal: model API returned no models for categories %s; serving "
                     "only explicitly configured models, retrying in %.0fs",
                     self._categories,
-                    self.cfg.introspect_retry_seconds,
+                    self.cfg.catalog_retry_seconds,
                 )
                 return self._configured_entries()
             # Union, not projection: an explicitly configured model the
@@ -325,8 +340,7 @@ class FalBackend(Backend):
             # the wrong modality.
             listed = {e.id for e in entries} | set(self._variant_routes.values())
             entries += [e for e in self._configured_entries() if e.id not in listed]
-            self._catalog_failed_at = None
-            self._catalog_cache = entries
+            self._catalog.store(entries)
             return entries
 
     def _entries_from_catalog(self, raw: list[dict[str, Any]]) -> list[ModelEntry]:
@@ -434,12 +448,12 @@ class FalBackend(Backend):
         Pairing comes from the catalogue, so this makes sure it's loaded rather
         than letting routing depend on whether some earlier request happened to
         populate it — that would make the same call behave differently based on
-        unrelated traffic.
+        unrelated traffic. ``list_models`` is a lock acquisition and a freshness
+        check when the catalogue is cached, which is the common case.
         """
         if not self.cfg.collapse_variants or not self.cfg.discover_models:
             return model_slug
-        if self._catalog_cache is None:
-            await self.list_models()
+        await self.list_models()
         return self._variant_routes.get(model_slug, model_slug)
 
     # --- moderation settings ---------------------------------------------

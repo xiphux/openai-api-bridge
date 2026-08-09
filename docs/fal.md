@@ -9,9 +9,9 @@ are enough to configure it.
 
 `/v1/models` is populated from fal's model API, filtered to the categories this
 backend serves — `text-to-image`, `image-to-image`, `text-to-video` and
-`image-to-video`, ~886 models. The listing is fetched once and cached, and
-excludes deprecated models. Each model's `kind` comes from its catalogue
-category.
+`image-to-video`, ~886 models. The listing is cached for `catalog_ttl_seconds`
+(default 300), and excludes deprecated models. Each model's `kind` comes from
+its catalogue category.
 
 fal's audio and 3D categories are deliberately not listed — there's no code path
 for them, so listing them would advertise models every request would fail on.
@@ -29,7 +29,8 @@ is then a 404.
 
 If the catalogue can't be fetched, the provider degrades to whatever is
 explicitly configured (rather than serving nothing) and retries after
-`introspect_retry_seconds`.
+`catalog_retry_seconds` (default 30). That's separate from
+`introspect_retry_seconds`, which covers the per-model schema lookups below.
 
 ### Display names
 
