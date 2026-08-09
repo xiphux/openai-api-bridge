@@ -65,7 +65,7 @@ def client_with_openai(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
     """)
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -80,7 +80,7 @@ def client_with_openai(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
     reset_caches_for_tests()
 
 
-HEADERS = {"Authorization": "Bearer test-bridge-key"}
+HEADERS = {"Authorization": "Bearer test-bridge-api-key"}
 
 
 @respx.mock
@@ -300,7 +300,7 @@ def test_chat_against_comfyui_provider_returns_unsupported(
     """)
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -314,7 +314,7 @@ def test_chat_against_comfyui_provider_returns_unsupported(
         with TestClient(app) as c:
             r = c.post(
                 "/v1/chat/completions",
-                headers={"Authorization": "Bearer test-bridge-key"},
+                headers={"Authorization": "Bearer test-bridge-api-key"},
                 json={"model": "comfyui/anything", "messages": []},
             )
             assert r.status_code == 400

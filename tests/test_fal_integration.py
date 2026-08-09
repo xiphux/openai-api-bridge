@@ -86,7 +86,7 @@ def client_with_fal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator
     """)
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -102,7 +102,7 @@ def client_with_fal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator
     reset_caches_for_tests()
 
 
-HEADERS = {"Authorization": "Bearer test-bridge-key"}
+HEADERS = {"Authorization": "Bearer test-bridge-api-key"}
 
 _PNG = b"\x89PNG\r\n\x1a\nfake-png-bytes"
 
@@ -812,7 +812,7 @@ def discovering_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
         prompt_style = "natural-language"
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -1483,7 +1483,7 @@ def private_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[
         id = "{SEEDREAM_T2I}"
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -1834,7 +1834,7 @@ def test_routed_edit_honours_the_siblings_own_config(
         marker = "from-the-edit-block"
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -1896,7 +1896,7 @@ def test_sibling_block_does_not_revert_an_explicit_safety_opt_out(
         display_name = "Nano (edit)"
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -1948,7 +1948,7 @@ def test_unknown_category_publishes_no_capability(
         categories = ["upscaling"]
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -1997,7 +1997,7 @@ def test_configured_sibling_block_does_not_re_list_the_collapsed_half(
         id = "{t2v}/image-to-video"
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))

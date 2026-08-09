@@ -34,6 +34,24 @@ class ConfigError(BridgeError):
     code = "configuration_error"
 
 
+# Floor on BRIDGE_API_KEY, enforced at startup. The value guards every
+# endpoint, and `Field(...)` alone only rejects the variable being *unset* —
+# an empty string satisfies it, and `hmac.compare_digest(b"", b"")` is True,
+# so `BRIDGE_API_KEY=` (an easy thing to leave behind while editing a .env,
+# and what docker-compose's `${BRIDGE_API_KEY:?}` guard lets through) turned
+# `Authorization: Bearer ` into a valid credential for anyone who could reach
+# the port. Refusing to boot is the only safe answer: a bridge that silently
+# serves unauthenticated looks exactly like one that works.
+#
+# 16 is a floor, not a recommendation — README suggests `openssl rand -hex 24`.
+_MIN_API_KEY_LENGTH = 16
+
+# Shipped in .env.example, so it is the value a deployment inherits by copying
+# the file and never editing it. Long enough to clear the floor above, which
+# is why it needs naming separately.
+_PLACEHOLDER_API_KEYS = frozenset({"replace-me-with-a-strong-random-token"})
+
+
 class BridgeSettings(BaseSettings):
     """Infrastructure & secrets. Read once at startup."""
 
@@ -77,6 +95,30 @@ class BridgeSettings(BaseSettings):
     # exceeds this on the first request after boot and appears on the second.
     models_timeout_seconds: float = Field(default=5.0, alias="MODELS_TIMEOUT_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    @field_validator("api_key")
+    @classmethod
+    def _api_key_must_be_usable(cls, v: str) -> str:
+        """Refuse to start on a key that doesn't actually authenticate anything.
+
+        Measured on the stripped value so whitespace padding can't clear the
+        floor — a key of sixteen spaces is as good as no key at all. The
+        stored value is left untouched, since trimming it would change what an
+        existing working credential compares against.
+        """
+        stripped = v.strip()
+        if stripped in _PLACEHOLDER_API_KEYS:
+            raise ValueError(
+                "BRIDGE_API_KEY is still the placeholder from .env.example. "
+                "Generate a real one, e.g. `openssl rand -hex 24`."
+            )
+        if len(stripped) < _MIN_API_KEY_LENGTH:
+            raise ValueError(
+                f"BRIDGE_API_KEY must be at least {_MIN_API_KEY_LENGTH} characters "
+                f"(got {len(stripped)}). An empty or trivial key authenticates every "
+                "caller that reaches the port. Generate one with `openssl rand -hex 24`."
+            )
+        return v
 
     @property
     def max_cache_bytes(self) -> int:

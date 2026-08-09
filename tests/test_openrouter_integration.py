@@ -40,7 +40,7 @@ def client_with_openrouter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> I
 	""")
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -56,7 +56,7 @@ def client_with_openrouter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> I
     reset_caches_for_tests()
 
 
-HEADERS = {"Authorization": "Bearer test-bridge-key"}
+HEADERS = {"Authorization": "Bearer test-bridge-api-key"}
 
 
 # OpenRouter /v1/models — rich metadata with input/output modalities. The

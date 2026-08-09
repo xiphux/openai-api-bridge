@@ -39,7 +39,7 @@ def client_with_imagerouter(
 	""")
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -55,7 +55,7 @@ def client_with_imagerouter(
     reset_caches_for_tests()
 
 
-HEADERS = {"Authorization": "Bearer test-bridge-key"}
+HEADERS = {"Authorization": "Bearer test-bridge-api-key"}
 
 
 # Realistic v2/models response shape — array of model objects, each with
@@ -416,7 +416,7 @@ def test_failed_catalog_fetch_recovers_after_the_cooldown(
         catalog_retry_seconds = 0
     """)
     )
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))

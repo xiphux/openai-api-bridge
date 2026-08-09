@@ -7,8 +7,10 @@ import textwrap
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from openai_api_bridge.config import (
+    BridgeSettings,
     ComfyUIProviderConfig,
     ConfigError,
     ImageRouterProviderConfig,
@@ -18,6 +20,45 @@ from openai_api_bridge.config import (
 )
 from openai_api_bridge.dispatcher import BackendDispatcher
 from openai_api_bridge.errors import InvalidRequest, ProviderNotFound
+
+# --- BRIDGE_API_KEY validation ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",  # `BRIDGE_API_KEY=` — satisfies Field(...), and compare_digest(b"", b"") is True
+        "   ",
+        " " * 32,  # whitespace can't pad its way over the floor
+        "short",
+        "replace-me-with-a-strong-random-token",  # the .env.example placeholder
+    ],
+)
+def test_bridge_settings_rejects_unusable_api_key(bad: str) -> None:
+    """A key that authenticates everyone must abort startup, not serve.
+
+    An empty BRIDGE_API_KEY used to make `Authorization: Bearer ` a valid
+    credential for any caller that could reach the port, with nothing in the
+    logs to say so.
+    """
+    with pytest.raises(ValidationError):
+        BridgeSettings(BRIDGE_API_KEY=bad)  # type: ignore[call-arg]
+
+
+def test_bridge_settings_accepts_a_real_key() -> None:
+    settings = BridgeSettings(BRIDGE_API_KEY="0123456789abcdef")  # type: ignore[call-arg]
+    assert settings.api_key == "0123456789abcdef"
+
+
+def test_bridge_settings_preserves_key_verbatim() -> None:
+    """Validation measures the stripped value; it must not *store* it stripped.
+
+    Trimming would change what an existing, working credential compares
+    against and lock its holder out on upgrade.
+    """
+    settings = BridgeSettings(BRIDGE_API_KEY=" 0123456789abcdef ")  # type: ignore[call-arg]
+    assert settings.api_key == " 0123456789abcdef "
+
 
 # --- parse_model_id ---------------------------------------------------------
 

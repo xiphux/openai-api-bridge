@@ -235,7 +235,7 @@ def client_with_video(
     """)
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -253,7 +253,7 @@ def client_with_video(
 @respx.mock
 def test_delete_video_cancels_in_progress_job(client_with_video: TestClient) -> None:
     """A queued/in-progress video job should be cancellable via DELETE."""
-    headers = {"Authorization": "Bearer test-bridge-key"}
+    headers = {"Authorization": "Bearer test-bridge-api-key"}
 
     # ComfyUI accepts the prompt — the runner will then poll forever
     # (we never stub /history with a completion).
@@ -304,7 +304,7 @@ def test_delete_video_cancels_in_progress_job(client_with_video: TestClient) -> 
 
 
 def test_delete_video_unknown_returns_404(client_with_video: TestClient) -> None:
-    headers = {"Authorization": "Bearer test-bridge-key"}
+    headers = {"Authorization": "Bearer test-bridge-api-key"}
     r = client_with_video.delete("/v1/videos/does-not-exist", headers=headers)
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"

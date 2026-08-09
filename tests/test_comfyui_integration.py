@@ -70,7 +70,7 @@ def client_with_comfyui(
     """)
     )
 
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(config))
     monkeypatch.setenv("FILES_DIR", str(tmp_path / "files"))
     monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "state.db"))
@@ -93,7 +93,9 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
 def test_models_lists_comfyui_workflow(
     client_with_comfyui: TestClient,
 ) -> None:
-    r = client_with_comfyui.get("/v1/models", headers={"Authorization": "Bearer test-bridge-key"})
+    r = client_with_comfyui.get(
+        "/v1/models", headers={"Authorization": "Bearer test-bridge-api-key"}
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["object"] == "list"
@@ -133,7 +135,9 @@ def test_models_capabilities_follow_declared_image_inputs(
             }
         )
     )
-    r = client_with_comfyui.get("/v1/models", headers={"Authorization": "Bearer test-bridge-key"})
+    r = client_with_comfyui.get(
+        "/v1/models", headers={"Authorization": "Bearer test-bridge-api-key"}
+    )
     by_id = {m["id"]: m for m in r.json()["data"]}
     assert by_id["comfyui/i2i"]["capabilities"] == ["text-to-image", "image-to-image"]
     assert by_id["comfyui/tiny-t2i"]["capabilities"] == ["text-to-image"]
@@ -156,7 +160,9 @@ def test_models_display_name_falls_back_to_slug_when_meta_lacks_one(
     (comfyui_workflows_dir / "no-name.meta.json").write_text(
         json.dumps({"positive_prompt_node": "1"})
     )
-    r = client_with_comfyui.get("/v1/models", headers={"Authorization": "Bearer test-bridge-key"})
+    r = client_with_comfyui.get(
+        "/v1/models", headers={"Authorization": "Bearer test-bridge-api-key"}
+    )
     by_id = {m["id"]: m for m in r.json()["data"]}
     # Without display_name in meta, the bridge falls back to the source filename.
     assert by_id["comfyui/no-name"]["display_name"] == "no-name"
@@ -170,7 +176,7 @@ def test_models_display_name_falls_back_to_slug_when_meta_lacks_one(
 def test_image_generation_full_flow(
     client_with_comfyui: TestClient,
 ) -> None:
-    headers = {"Authorization": "Bearer test-bridge-key"}
+    headers = {"Authorization": "Bearer test-bridge-api-key"}
 
     # ComfyUI accepts the prompt and returns a prompt_id.
     submit_route = respx.post(f"{COMFY}/prompt").mock(
@@ -249,7 +255,7 @@ def test_image_generation_full_flow(
 def test_image_generation_b64_json_response_format(
     client_with_comfyui: TestClient,
 ) -> None:
-    headers = {"Authorization": "Bearer test-bridge-key"}
+    headers = {"Authorization": "Bearer test-bridge-api-key"}
     respx.post(f"{COMFY}/prompt").mock(return_value=httpx.Response(200, json={"prompt_id": "p"}))
     respx.get(f"{COMFY}/history/p").mock(
         return_value=httpx.Response(
@@ -286,7 +292,7 @@ def test_image_generation_b64_json_response_format(
 def test_workflow_invalid_returns_400(
     client_with_comfyui: TestClient,
 ) -> None:
-    headers = {"Authorization": "Bearer test-bridge-key"}
+    headers = {"Authorization": "Bearer test-bridge-api-key"}
     respx.post(f"{COMFY}/prompt").mock(
         return_value=httpx.Response(
             400,
@@ -306,7 +312,7 @@ def test_workflow_invalid_returns_400(
 def test_video_endpoint_rejects_image_workflow(
     client_with_comfyui: TestClient,
 ) -> None:
-    headers = {"Authorization": "Bearer test-bridge-key"}
+    headers = {"Authorization": "Bearer test-bridge-api-key"}
     # The runner runs in the background — we wait on it via a polled GET
     # that flips to 'failed' once the upstream rejects.
     respx.post(f"{COMFY}/prompt")  # not actually called (rejected before submit)

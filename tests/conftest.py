@@ -80,7 +80,7 @@ def client(
     sqlite_path: Path,
 ) -> Iterator[TestClient]:
     # Set required env *before* the app is constructed; clear cached settings.
-    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "test-bridge-api-key")
     monkeypatch.setenv("BRIDGE_CONFIG_PATH", str(empty_config))
     monkeypatch.setenv("FILES_DIR", str(files_dir))
     monkeypatch.setenv("SQLITE_PATH", str(sqlite_path))
@@ -99,7 +99,7 @@ def client(
 
 @pytest.fixture
 def auth_headers() -> dict[str, str]:
-    return {"Authorization": "Bearer test-bridge-key"}
+    return {"Authorization": "Bearer test-bridge-api-key"}
 
 
 # --- Misc -------------------------------------------------------------------
