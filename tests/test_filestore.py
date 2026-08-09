@@ -289,3 +289,79 @@ async def test_a_directory_in_place_of_a_file_reads_as_absent(
     found.path.mkdir()
 
     assert await filestore.open_for_read(fid) is None
+
+
+# --- content-type sanitisation ----------------------------------------------
+
+
+async def test_put_neutralises_a_markup_content_type(filestore: FileStore) -> None:
+    """The stored type is echoed as the response media type, so an upstream (or
+    a CDN error page, or a WAF interstitial) answering with markup would
+    otherwise decide what a browser does with bytes served from the bridge."""
+    file_id = await filestore.put(
+        b"<script>alert(1)</script>",
+        content_type="text/html",
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    meta = await filestore.get_metadata(file_id)
+    assert meta is not None
+    assert meta.content_type == "application/octet-stream"
+
+
+async def test_put_neutralises_svg(filestore: FileStore) -> None:
+    """SVG carries script and no provider here emits it."""
+    file_id = await filestore.put(
+        b"<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+        content_type="image/svg+xml",
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    meta = await filestore.get_metadata(file_id)
+    assert meta is not None
+    assert meta.content_type == "application/octet-stream"
+
+
+async def test_put_keeps_the_bytes_it_will_not_vouch_for(filestore: FileStore) -> None:
+    """Sanitising is not rejecting — the generation was already paid for."""
+    payload = b"<script>alert(1)</script>"
+    file_id = await filestore.put(
+        payload,
+        content_type="text/html",
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    opened = await filestore.open_for_read(file_id)
+    assert opened is not None
+    assert opened.path.read_bytes() == payload
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ("image/png", "image/png"),
+        ("IMAGE/PNG", "image/png"),
+        ("image/jpeg; charset=binary", "image/jpeg"),
+        # Real provider outputs with no extension in _EXT_BY_TYPE — the
+        # serveable set is deliberately wider than the extension map.
+        ("image/avif", "image/avif"),
+        ("image/heic", "image/heic"),
+        ("video/x-matroska", "video/x-matroska"),
+    ],
+)
+async def test_put_preserves_legitimate_media_types(
+    filestore: FileStore, declared: str, expected: str
+) -> None:
+    file_id = await filestore.put(
+        b"data",
+        content_type=declared,
+        kind="image",
+        source_backend="p",
+        source_model="m",
+    )
+    meta = await filestore.get_metadata(file_id)
+    assert meta is not None
+    assert meta.content_type == expected

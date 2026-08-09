@@ -86,6 +86,55 @@ _EXT_BY_TYPE: dict[str, str] = {
     "video/quicktime": ".mov",
 }
 
+# Media types this store will repeat back to a client verbatim. The stored
+# content type is whatever the upstream's `content-type` header claimed when
+# the asset was fetched, and it is served back as the response's media type —
+# so an upstream, CDN error page or WAF interstitial answering with markup
+# would otherwise decide what a browser does with bytes served from the
+# bridge's own origin.
+#
+# Wider than _EXT_BY_TYPE above, which only needs an entry where there is a
+# file extension worth using: avif and heic are real outputs from these
+# providers and belong here even though the bridge has no extension for them.
+#
+# image/svg+xml is deliberately absent. It is a document format that carries
+# script, none of these providers emit it, and admitting it would undo the
+# point of the list.
+_SERVEABLE_TYPES: frozenset[str] = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/gif",
+        "image/avif",
+        "image/apng",
+        "image/bmp",
+        "image/tiff",
+        "image/heic",
+        "image/heif",
+        "video/mp4",
+        "video/webm",
+        "video/quicktime",
+        "video/x-matroska",
+        "video/mpeg",
+        "video/ogg",
+    }
+)
+
+# What an unrecognised type is recorded as. Not a rejection: the bytes are a
+# generation the caller has already paid for, and the store's job is to keep
+# them. It only declines to vouch for what they are.
+_OPAQUE_TYPE = "application/octet-stream"
+
+
+def sanitize_content_type(content_type: str) -> str:
+    """Normalise an upstream-declared media type to one safe to serve back."""
+    normalized = content_type.split(";", 1)[0].strip().lower()
+    if normalized in _SERVEABLE_TYPES:
+        return normalized
+    return _OPAQUE_TYPE
+
 
 @dataclass(slots=True, frozen=True)
 class FileMetadata:
@@ -155,10 +204,17 @@ class FileStore:
         prompt_excerpt: str | None = None,
         pinned: bool = False,
     ) -> str:
-        """Persist bytes + metadata; return the new file_id."""
+        """Persist bytes + metadata; return the new file_id.
+
+        ``content_type`` is normalised on the way in (see
+        :func:`sanitize_content_type`) rather than on the way out, so the row
+        records what the bridge is prepared to serve rather than an upstream
+        claim it would have to re-judge on every read.
+        """
         if kind not in ("image", "video"):
             raise ValueError(f"kind must be 'image' or 'video', got {kind!r}")
 
+        content_type = sanitize_content_type(content_type)
         file_id = secrets.token_hex(16)
         ext = self._ext_for(content_type)
         abs_path = self._disk_path(file_id, ext)

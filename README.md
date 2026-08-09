@@ -381,6 +381,13 @@ both content endpoints (`/v1/files/{id}/content` and
   Authorization` is sent for the same reason.
 - `If-None-Match` → `304 Not Modified`, so a client that already holds the
   asset skips the transfer entirely.
+- `X-Content-Type-Options: nosniff` and `Content-Disposition: attachment` on
+  both endpoints. The served media type is whatever the upstream's
+  `content-type` header claimed when the bytes were fetched, so these stop a
+  browser rendering an unexpected payload at the bridge's own origin. Neither
+  affects `<img>` or `<video>` embedding, which ignores both. Stored types are
+  additionally narrowed to a known-good set at write time — anything else is
+  recorded as `application/octet-stream`, bytes kept, type not vouched for.
 
 The cache window deliberately outlives the eviction window above: a client
 that kept the bytes is still holding a correct copy after the bridge has

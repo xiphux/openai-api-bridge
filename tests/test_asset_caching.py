@@ -135,3 +135,35 @@ def test_stat_is_not_handed_to_starlette(stored: OpenedFile) -> None:
 
     assert isinstance(response, FileResponse)
     assert response.stat_result is None
+
+
+# --- content handling -------------------------------------------------------
+
+
+def test_response_forbids_content_type_sniffing(stored: OpenedFile) -> None:
+    """The media type is whatever the upstream claimed when the bytes were
+    fetched, and it is echoed as the response's own. Sniffing on top of that
+    would let a browser make its own guess about bytes served from the
+    bridge's origin."""
+    response = asset_response(stored, if_none_match=None)
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_304_also_forbids_sniffing(stored: OpenedFile) -> None:
+    response = asset_response(stored, if_none_match=f'"{FILE_ID}"')
+    assert response.status_code == 304
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_disposition_is_set_even_without_an_explicit_filename(stored: OpenedFile) -> None:
+    """The video endpoint passed no filename, so it was the one response here a
+    browser would render inline rather than download."""
+    response = asset_response(stored, if_none_match=None)
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith("attachment")
+    assert FILE_ID in disposition
+
+
+def test_explicit_filename_still_wins(stored: OpenedFile) -> None:
+    response = asset_response(stored, if_none_match=None, filename="chosen.png")
+    assert "chosen.png" in response.headers["content-disposition"]

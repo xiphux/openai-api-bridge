@@ -41,7 +41,7 @@ def _etag_for(file_id: str) -> str:
 
 
 def _validator_headers(etag: str) -> dict[str, str]:
-    """Caching headers shared by the 200 and the 304.
+    """Caching and content-handling headers shared by the 200 and the 304.
 
     ``Vary: Authorization`` because these endpoints sit behind a bearer token
     and the response is cacheable. ``private`` already tells a well-behaved
@@ -49,11 +49,22 @@ def _validator_headers(etag: str) -> dict[str, str]:
     response anyway from serving it to a request bearing a different
     credential. Both, because the cost is a header and the failure is handing
     someone else's asset to the wrong caller.
+
+    ``X-Content-Type-Options: nosniff`` because the media type on these
+    responses is whatever the upstream's ``content-type`` header said when the
+    bytes were fetched. The bridge stores generated media, so that is normally
+    an image or a video — but nothing in the pipeline *guaranteed* it, and a
+    provider or CDN answering with markup would otherwise become content a
+    browser renders at the bridge's own origin. Paired with the
+    ``Content-Disposition`` that :func:`asset_response` now always sets, which
+    is what stops a top-level navigation rendering it inline. Neither affects
+    ``<img>`` or ``<video>`` embedding, which ignores both.
     """
     return {
         "etag": etag,
         "cache-control": _CACHE_CONTROL,
         "vary": "Authorization",
+        "x-content-type-options": "nosniff",
     }
 
 
@@ -81,8 +92,17 @@ def asset_response(
     if_none_match: str | None,
     filename: str | None = None,
 ) -> Response:
-    """A cacheable response for a stored asset, or 304 if the client has it."""
+    """A cacheable response for a stored asset, or 304 if the client has it.
+
+    ``filename`` defaults to the asset's id plus its stored extension rather
+    than to nothing. It sets ``Content-Disposition: attachment``, and the
+    video endpoint — which passed no filename — was consequently the one
+    response here that a browser would render inline at the bridge's origin.
+    A stable name is also what makes ``curl -O`` and a browser download name
+    the file sensibly, which is why the files endpoint always passed one.
+    """
     etag = _etag_for(opened.meta.id)
+    filename = filename or f"{opened.meta.id}{opened.path.suffix}"
     if _matches(if_none_match, etag):
         # Cache-Control repeated on the 304: RFC 9110 §15.4.5 asks for the
         # headers that would have been sent on a 200, and a client that drops
