@@ -110,6 +110,10 @@ api_token_env = "VENICE_API_TOKEN"
 # #                               # (0 = re-fetch on every /v1/models)
 # # catalog_retry_seconds = 30.0  # after a failed fetch, fail fast for this
 # #                               # long instead of each caller retrying
+# # max_asset_mb = 512            # ceiling on one downloaded asset; the fetch
+# #                               # is streamed and abandoned past this, so a
+# #                               # runaway payload can't be buffered whole
+# #                               # into the single worker (0 = no bound)
 
 
 # --- OpenAI passthrough -----------------------------------------------------
@@ -218,6 +222,8 @@ api_token_env = "VENICE_API_TOKEN"
 # api_token_env = "FAL_API_KEY"
 # # base_url defaults to https://fal.run (fal's synchronous endpoint)
 # # request_timeout_seconds = 600.0
+# # max_asset_mb = 512   # ceiling on one downloaded asset; the fetch is
+# #                      # streamed and abandoned past this (0 = no bound)
 #
 #   [[providers.models]]
 #   id = "fal-ai/bytedance/seedream/v4/text-to-image"

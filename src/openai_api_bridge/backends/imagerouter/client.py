@@ -51,8 +51,11 @@ _DEFAULT_VIDEO_READ_TIMEOUT_S = 1800.0
 
 
 class ImageRouterClient:
-    def __init__(self, *, base_url: str, api_token: str) -> None:
+    def __init__(
+        self, *, base_url: str, api_token: str, max_asset_bytes: int | None = None
+    ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.max_asset_bytes = max_asset_bytes
         self._auth_headers = {"Authorization": f"Bearer {api_token}"}
         self._client = httpx.AsyncClient(
             headers=self._auth_headers,
@@ -246,10 +249,13 @@ class ImageRouterClient:
         ``response_format=url`` envelope into the byte payload the FileStore
         expects. ImageRouter's asset URLs (``storage.imagerouter.io/...``) are
         publicly accessible, so the shared helper fetches them unauthenticated
-        with retry/backoff. See
+        with retry/backoff, streaming the body and abandoning it once it passes
+        ``max_asset_bytes``. See
         :func:`~openai_api_bridge.util.http.fetch_asset_with_retry`.
         """
-        return await fetch_asset_with_retry(url, provider_label="ImageRouter")
+        return await fetch_asset_with_retry(
+            url, provider_label="ImageRouter", max_bytes=self.max_asset_bytes
+        )
 
 
 def _extract_first_url(body: Any, label: str) -> str:

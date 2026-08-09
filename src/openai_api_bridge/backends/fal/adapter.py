@@ -186,6 +186,8 @@ class FalBackend(Backend):
             queue_base_url=cfg.queue_base_url,
             store_payloads=cfg.store_payloads,
             output_expiration_seconds=cfg.output_expiration_seconds,
+            # 0 is the documented "no bound"; anything else is MB.
+            max_asset_bytes=(cfg.max_asset_mb * 1024**2) if cfg.max_asset_mb > 0 else None,
         )
         # Schema-derived request settings (moderation, plus the shape of the
         # model's duration field), resolved per model on first use and cached

@@ -7,6 +7,7 @@ the mapping so it can't drift back to being re-decided per adapter.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -235,14 +236,75 @@ async def test_asset_fetch_enforces_the_size_cap() -> None:
                 200, content=b"x" * 5000, headers={"content-type": "image/png"}
             )
         )
-        with pytest.raises(UpstreamError, match="exceeded size cap"):
+        with pytest.raises(UpstreamError, match="exceeded the 1000 byte cap"):
             await fetch_asset_with_retry(
                 "https://cdn.example/big.png", provider_label="Test", max_bytes=1000
             )
 
 
+async def test_asset_fetch_refuses_on_declared_length_without_reading() -> None:
+    """A truthful Content-Length is refused before the body is touched.
+
+    The cap used to be applied to ``response.content`` — after the whole body
+    was already resident, the one moment it could no longer help.
+    """
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/huge.mp4").mock(
+            return_value=httpx.Response(
+                200,
+                content=b"x" * 5000,
+                headers={"content-type": "video/mp4", "content-length": "5000"},
+            )
+        )
+        with pytest.raises(UpstreamError, match=r"exceeded the 1000 byte cap \(5000 bytes\)"):
+            await fetch_asset_with_retry(
+                "https://cdn.example/huge.mp4", provider_label="Test", max_bytes=1000
+            )
+
+
+async def test_asset_fetch_stops_reading_a_body_that_understates_its_length() -> None:
+    """An absent or lying Content-Length leaves the running byte count as the
+    only thing standing between a hostile CDN and the process's memory."""
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    delivered = 0
+
+    async def endless() -> AsyncIterator[bytes]:
+        # Far more than the cap, delivered in chunks. Reaching the end would
+        # mean the counter never fired.
+        nonlocal delivered
+        for _ in range(1000):
+            delivered += 1024
+            yield b"x" * 1024
+
+    async with respx.mock(assert_all_called=False) as mock:
+        # An iterator body: httpx sends it without a Content-Length, so the
+        # declared-length check above cannot fire and the counter must.
+        mock.get("https://cdn.example/lies.mp4").mock(
+            return_value=httpx.Response(
+                200,
+                content=endless(),
+                headers={"content-type": "video/mp4"},
+            )
+        )
+        with pytest.raises(UpstreamError, match="exceeded the 4096 byte cap"):
+            await fetch_asset_with_retry(
+                "https://cdn.example/lies.mp4", provider_label="Test", max_bytes=4096
+            )
+
+    # The point of streaming: it gave up near the cap instead of consuming the
+    # ~1MB the far end was willing to send.
+    assert delivered <= 4096 + 1024
+
+
 async def test_asset_fetch_without_a_cap_allows_large_payloads() -> None:
-    """Video providers stay uncapped — their outputs are legitimately huge."""
+    """``max_bytes=None`` still means unbounded, for a caller that asks."""
     import respx
 
     from openai_api_bridge.util.http import fetch_asset_with_retry
@@ -258,6 +320,25 @@ async def test_asset_fetch_without_a_cap_allows_large_payloads() -> None:
         )
     assert len(data) == 5000
     assert content_type == "video/mp4"
+
+
+async def test_asset_fetch_under_the_cap_is_returned_whole() -> None:
+    import respx
+
+    from openai_api_bridge.util.http import fetch_asset_with_retry
+
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://cdn.example/ok.png").mock(
+            return_value=httpx.Response(
+                200, content=b"x" * 900, headers={"content-type": "image/png; charset=binary"}
+            )
+        )
+        data, content_type = await fetch_asset_with_retry(
+            "https://cdn.example/ok.png", provider_label="Test", max_bytes=1000
+        )
+    assert len(data) == 900
+    # Charset suffix still stripped for clean storage.
+    assert content_type == "image/png"
 
 
 def test_rate_limit_is_retriable_not_a_client_mistake() -> None:

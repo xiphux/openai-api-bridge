@@ -151,6 +151,53 @@ def _is_retriable_fetch_status(status: int) -> bool:
     return status in (401, 404, 408, 425, 429) or (status >= 500 and status != 501)
 
 
+def _asset_too_large(provider_label: str, url: str, size: int, max_bytes: int) -> UpstreamError:
+    return UpstreamError(
+        f"{provider_label} asset exceeded the {max_bytes} byte cap ({size} bytes) for {url}"
+    )
+
+
+async def _read_capped(
+    response: httpx.Response,
+    *,
+    provider_label: str,
+    url: str,
+    max_bytes: int | None,
+) -> bytes:
+    """Buffer a streaming response body, stopping the moment it passes the cap.
+
+    The cap used to be applied to ``response.content`` — i.e. *after* the whole
+    body was already in memory, which is the one moment it could no longer
+    help. The bridge runs a single uvicorn worker, so an oversized asset is
+    felt by every other client on the box, and a hostile or malfunctioning CDN
+    was bounded only by the disk it was streamed onto.
+
+    Raising mid-iteration leaves the ``async with`` to close the response,
+    which drops the connection and stops the remaining bytes arriving.
+    """
+    if max_bytes is None:
+        return await response.aread()
+
+    # A truthful Content-Length lets us refuse before reading anything at all.
+    # Absent or understated, the running count below is what actually binds.
+    declared = response.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError:
+            pass
+        else:
+            if length > max_bytes:
+                raise _asset_too_large(provider_label, url, length, max_bytes)
+
+    buffer = bytearray()
+    async for chunk in response.aiter_bytes():
+        buffer += chunk
+        if len(buffer) > max_bytes:
+            raise _asset_too_large(provider_label, url, len(buffer), max_bytes)
+    return bytes(buffer)
+
+
 async def fetch_asset_with_retry(
     url: str,
     *,
@@ -163,8 +210,8 @@ async def fetch_asset_with_retry(
     """Download a generated asset by URL, returning ``(bytes, content_type)``.
 
     URL-format brokers (ImageRouter, fal) return generation results as links to
-    a public CDN and expect the caller to fetch the bytes separately. Two shared
-    concerns this centralises:
+    a public CDN and expect the caller to fetch the bytes separately. Three
+    shared concerns this centralises:
 
     * **No auth leakage.** The shared client is unauthenticated, so the
       bridge's upstream ``Authorization`` header is never attached to a CDN
@@ -175,56 +222,64 @@ async def fetch_asset_with_retry(
       and a throttled fetch answers 429. Retries with exponential backoff
       smooth these over; see :func:`_is_retriable_fetch_status` for the set.
       Statuses that can never succeed are raised on the first response.
+    * **A bounded payload.** The body is streamed and abandoned as soon as it
+      passes ``max_bytes``; see :func:`_read_capped`.
 
     ``provider_label`` appears only in log/error text (e.g. "fal", "ImageRouter").
 
-    ``max_bytes`` bounds the downloaded payload. Left unset for video-bearing
-    providers, whose outputs are legitimately hundreds of MB and have no
-    natural ceiling to pick without a config knob.
+    ``max_bytes`` of ``None`` means unbounded, which is now only what a caller
+    gets by explicitly asking for it — the video-bearing providers pass their
+    configured ceiling.
     """
     last_error: httpx.HTTPError | None = None
-    resp: httpx.Response | None = None
 
     for attempt in range(max_attempts):
         try:
             # Reused, not built per attempt. See _ASSET_LIMITS for what that
-            # actually buys and what it doesn't.
-            resp = await _asset_fetch_client().get(url, timeout=timeout)
-            if (
-                resp is not None
-                and _is_retriable_fetch_status(resp.status_code)
-                and attempt < max_attempts - 1
-            ):
-                delay = base_delay * (2**attempt)
-                log.warning(
-                    f"{provider_label} asset fetch got {resp.status_code} for {url}, "
-                    f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
+            # actually buys and what it doesn't. Streamed rather than fetched
+            # whole so the cap can be enforced against bytes as they land.
+            async with _asset_fetch_client().stream("GET", url, timeout=timeout) as response:
+                status = response.status_code
+                if status >= 400:
+                    if _is_retriable_fetch_status(status) and attempt < max_attempts - 1:
+                        delay = base_delay * (2**attempt)
+                        log.warning(
+                            f"{provider_label} asset fetch got {status} for {url}, "
+                            f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    # No retry past here. Everything worth re-attempting is
+                    # handled by the branch above (see
+                    # _is_retriable_fetch_status), so reaching this point means
+                    # either a status that can never succeed (400, 403, 410, …)
+                    # or the last attempt for one that could. Retrying
+                    # regardless, as this once did, spent three upstream calls
+                    # and two backoff sleeps to confirm a guaranteed failure.
+                    message = (
+                        f"{provider_label} asset fetch returned {status} for {url} "
+                        f"after {attempt + 1} attempt(s)"
+                    )
+                    # Keep the type: a throttled fetch that outlasts our
+                    # attempts is still a rate limit, and callers branch on
+                    # that — fal's _fetch_asset skips its "did the asset
+                    # expire?" hint for it, which would otherwise be appended
+                    # to a message plainly saying 429. Untyped, that guard
+                    # could never fire.
+                    if status == 429:
+                        raise RateLimited(message)
+                    raise UpstreamError(message)
+
+                content_type = response.headers.get("content-type", "application/octet-stream")
+                # Strip charset / boundary suffixes for clean storage.
+                content_type = content_type.split(";", 1)[0].strip()
+                data = await _read_capped(
+                    response,
+                    provider_label=provider_label,
+                    url=url,
+                    max_bytes=max_bytes,
                 )
-                await asyncio.sleep(delay)
-                continue
-            if resp is not None:
-                resp.raise_for_status()
-            break
-        except httpx.HTTPStatusError as e:
-            # No retry here. Everything worth re-attempting is handled by the
-            # branch above (see _is_retriable_fetch_status), so reaching this
-            # point means either a status that can never succeed (400, 403,
-            # 410, …) or the last attempt for one that could. Retrying
-            # regardless, as this once did, spent three upstream calls and two
-            # backoff sleeps to confirm a guaranteed failure.
-            status = e.response.status_code
-            message = (
-                f"{provider_label} asset fetch returned {status} for {url} "
-                f"after {attempt + 1} attempt(s)"
-            )
-            # Keep the type: a throttled fetch that outlasts our attempts is
-            # still a rate limit, and callers branch on that — fal's
-            # _fetch_asset skips its "did the asset expire?" hint for it,
-            # which would otherwise be appended to a message plainly saying
-            # 429. Untyped, that guard could never fire.
-            if status == 429:
-                raise RateLimited(message) from e
-            raise UpstreamError(message) from e
+                return data, content_type
         except httpx.HTTPError as e:
             last_error = e
             if attempt < max_attempts - 1:
@@ -239,17 +294,6 @@ async def fetch_asset_with_retry(
                 f"{provider_label} asset fetch failed for {url} after {max_attempts} attempts: {e}"
             ) from e
 
-    if resp is None:
-        raise UpstreamError(
-            f"{provider_label} asset fetch failed for {url} after {max_attempts} attempts"
-        ) from last_error
-
-    content_type = resp.headers.get("content-type", "application/octet-stream")
-    # Strip charset / boundary suffixes for clean storage.
-    content_type = content_type.split(";", 1)[0].strip()
-    data = resp.content
-    if max_bytes is not None and len(data) > max_bytes:
-        raise UpstreamError(
-            f"{provider_label} asset exceeded size cap ({len(data)} > {max_bytes} bytes)"
-        )
-    return data, content_type
+    raise UpstreamError(
+        f"{provider_label} asset fetch failed for {url} after {max_attempts} attempts"
+    ) from last_error

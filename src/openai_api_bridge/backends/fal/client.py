@@ -96,10 +96,12 @@ class FalClient:
         queue_base_url: str = "https://queue.fal.run",
         store_payloads: bool = True,
         output_expiration_seconds: int | None = None,
+        max_asset_bytes: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.models_api_url = models_api_url
         self.queue_base_url = queue_base_url.rstrip("/")
+        self.max_asset_bytes = max_asset_bytes
         self._auth_headers = {"Authorization": f"Key {api_token}"}
         # Retention controls ride on the *inference* calls only — they say what
         # fal should do with this job's payload and output, so they're
@@ -363,10 +365,13 @@ class FalClient:
         """Download a generated asset by URL, returning ``(bytes, content_type)``.
 
         fal's output URLs (``*.fal.media``) are publicly accessible; the shared
-        helper fetches them unauthenticated with retry/backoff. See
+        helper fetches them unauthenticated with retry/backoff, streaming the
+        body and abandoning it once it passes ``max_asset_bytes``. See
         :func:`~openai_api_bridge.util.http.fetch_asset_with_retry`.
         """
-        return await fetch_asset_with_retry(url, provider_label="fal")
+        return await fetch_asset_with_retry(
+            url, provider_label="fal", max_bytes=self.max_asset_bytes
+        )
 
 
 # Output keys fal uses for the modalities this backend doesn't implement. A

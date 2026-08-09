@@ -239,6 +239,13 @@ class ImageRouterProviderConfig(BaseModel):
     id: str
     base_url: str = "https://api.imagerouter.io"
     api_token_env: str
+    # Ceiling on a single generated asset the bridge downloads from the
+    # provider's CDN, in MB. The fetch is streamed and abandoned the moment it
+    # passes this, so an asset that is wrong by orders of magnitude costs a
+    # bounded amount of memory on a single-worker process rather than whatever
+    # the far end decides to send. Generous by default because a video
+    # legitimately runs to hundreds of MB; 0 disables the bound.
+    max_asset_mb: int = 512
     # How long the model catalogue is reused before being re-fetched.
     # /v1/models fans out to every provider on every request, so without this
     # each client refresh costs an upstream round trip. A TTL rather than a
@@ -355,6 +362,11 @@ class FalProviderConfig(BaseModel):
     base_url: str = "https://fal.run"
     api_token_env: str
     request_timeout_seconds: float = 600.0
+    # Ceiling on a single generated asset downloaded from fal's CDN, in MB.
+    # Same reasoning as ImageRouter's: the fetch is streamed and abandoned on
+    # crossing this, so a runaway payload can't be buffered whole into a
+    # single-worker process. 0 disables the bound.
+    max_asset_mb: int = 512
     # Per-model overrides (moderation, extra body params, prompt metadata).
     # These do NOT restrict what's served while ``discover_models`` is on — set
     # that false to serve only what's listed here.

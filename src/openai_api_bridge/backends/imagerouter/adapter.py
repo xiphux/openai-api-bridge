@@ -38,6 +38,8 @@ class ImageRouterBackend(Backend):
         self.client = ImageRouterClient(
             base_url=cfg.base_url,
             api_token=cfg.resolve_api_token(),
+            # 0 is the documented "no bound"; anything else is MB.
+            max_asset_bytes=(cfg.max_asset_mb * 1024**2) if cfg.max_asset_mb > 0 else None,
         )
         self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
             cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
