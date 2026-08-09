@@ -22,6 +22,7 @@ from .client import ComfyUIClient
 from .workflows import (
     WorkflowRecord,
     prepare_workflow,
+    read_graph_text,
     scan_workflows,
     seconds_to_frames,
 )
@@ -95,9 +96,9 @@ class ComfyUIBackend(Backend):
 
         A stat-only fingerprint tells us whether anything moved, which is the
         cheap version of the same guarantee, and the scan itself runs off the
-        loop. Note ``prepare_workflow`` already re-reads the graph from disk
-        per generation, so an edited *workflow* takes effect regardless of
-        this cache; what the rescan buys is picking up edited or added
+        loop. Note the graph itself is re-read from disk per generation (see
+        ``read_graph_text``), so an edited *workflow* takes effect regardless
+        of this cache; what the rescan buys is picking up edited or added
         *meta* files.
         """
         if self._workflows is not None:
@@ -147,6 +148,7 @@ class ComfyUIBackend(Backend):
     async def _submit_one(
         self,
         record: WorkflowRecord,
+        graph_text: str,
         *,
         prompt: str,
         size: str | None,
@@ -155,10 +157,16 @@ class ComfyUIBackend(Backend):
         on_upstream_id: UpstreamIdCallback | None = None,
         rng: random.Random | None = None,
     ) -> str:
-        """Queue one run and return ComfyUI's prompt_id."""
+        """Queue one run and return ComfyUI's prompt_id.
+
+        ``graph_text`` is read once per request by the caller (off the event
+        loop) and re-parsed here, so each run in a batch gets its own copy to
+        mutate without a second trip to disk.
+        """
         width, height = parse_size(size)
         workflow = prepare_workflow(
             record,
+            graph_text,
             prompt_text=prompt,
             image_filenames=image_filenames,
             width=width or None,
@@ -227,8 +235,10 @@ class ComfyUIBackend(Backend):
         on_upstream_id: UpstreamIdCallback | None = None,
         rng: random.Random | None = None,
     ) -> GeneratedAsset:
+        graph_text = await asyncio.to_thread(read_graph_text, record)
         prompt_id = await self._submit_one(
             record,
+            graph_text,
             prompt=prompt,
             size=size,
             image_filenames=image_filenames,
@@ -267,12 +277,17 @@ class ComfyUIBackend(Backend):
         what it's built to do. Each submit re-randomises seeds via
         prepare_workflow, so the outputs still differ.
         """
+        # One read for the whole batch, off the event loop. Inline in
+        # prepare_workflow this was a blocking read and parse of the graph per
+        # run, on the loop the whole bridge shares.
+        graph_text = await asyncio.to_thread(read_graph_text, record)
         prompt_ids: list[str] = []
         try:
             for _ in range(n):
                 prompt_ids.append(
                     await self._submit_one(
                         record,
+                        graph_text,
                         prompt=prompt,
                         size=size,
                         image_filenames=image_filenames,

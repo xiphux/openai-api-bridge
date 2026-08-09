@@ -119,8 +119,24 @@ def _autodetect_output_type(json_path: Path) -> str | None:
     return "video" if has_video else "image"
 
 
+def read_graph_text(record: WorkflowRecord) -> str:
+    """Read a workflow's API-format graph off disk. **Blocking** — call via
+    ``asyncio.to_thread``.
+
+    Separate from :func:`prepare_workflow` so the read happens once per
+    request rather than once per submit, and off the event loop the whole
+    bridge shares. It used to be inline, which put a synchronous read plus a
+    parse of a 50-200KB graph on the loop for every run in a batch.
+
+    Still per request, so saving an edited workflow on disk takes effect on
+    the next generation without restarting the bridge.
+    """
+    return record.json_path.read_text(encoding="utf-8")
+
+
 def prepare_workflow(
     record: WorkflowRecord,
+    graph_text: str,
     *,
     prompt_text: str,
     image_filenames: list[str] | None = None,
@@ -129,15 +145,16 @@ def prepare_workflow(
     length: int | None = None,
     rng: random.Random | None = None,
 ) -> dict[str, Any]:
-    """Load the workflow JSON fresh from disk and inject overrides.
+    """Parse a workflow graph and inject this run's overrides.
 
-    The workflow content is re-read on every call (matching the existing pipe's
-    behavior), so saving an edited workflow on disk takes effect on the next
-    generation without restarting the bridge.
+    ``graph_text`` comes from :func:`read_graph_text`. Parsing per call is
+    what gives each run in a batch its own mutable copy — measured at ~0.26ms
+    for a 74KB graph, against ~2.1ms to ``deepcopy`` the parsed result, so
+    re-parsing is both simpler and the faster of the two.
 
     ``rng`` is injectable for deterministic tests.
     """
-    workflow: dict[str, Any] = json.loads(record.json_path.read_text(encoding="utf-8"))
+    workflow: dict[str, Any] = json.loads(graph_text)
     meta = record.meta
     rng = rng or random.Random()
 

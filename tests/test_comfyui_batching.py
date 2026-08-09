@@ -424,3 +424,85 @@ def test_discard_timeout_stays_short() -> None:
     from openai_api_bridge.backends.comfyui import adapter as adapter_module
 
     assert adapter_module._QUEUE_DISCARD_TIMEOUT_S <= 2.0
+
+
+async def test_batch_reads_the_graph_once_not_once_per_run(
+    workflows_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph read used to sit inside prepare_workflow, so a batch did a
+    blocking read and parse of a 50-200KB file per run, on the event loop the
+    whole bridge shares."""
+    from openai_api_bridge.backends.comfyui import adapter as adapter_module
+
+    reads: list[str] = []
+    real = adapter_module.read_graph_text
+
+    def counting(record: Any) -> str:
+        reads.append(record.slug)
+        return real(record)
+
+    monkeypatch.setattr(adapter_module, "read_graph_text", counting)
+
+    backend, _ = _backend(workflows_dir)
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=4)
+
+    assert reads == ["wf"], f"expected one read for the batch, got {len(reads)}"
+
+
+async def test_each_run_in_a_batch_gets_its_own_graph(workflows_dir: Path) -> None:
+    """Sharing one parsed dict across runs would make every submit mutate the
+    same object — the seeds would collapse to whatever the last run rolled,
+    and ComfyUI's execution cache would return identical outputs."""
+    (workflows_dir / "wf.json").write_text(
+        json.dumps(
+            {
+                "3": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                "4": {"class_type": "KSampler", "inputs": {"seed": 0}},
+            }
+        )
+    )
+    backend, _ = _backend(workflows_dir)
+
+    submitted: list[dict[str, Any]] = []
+
+    async def capture(workflow: dict[str, Any]) -> str:
+        submitted.append(workflow)
+        return f"p{len(submitted)}"
+
+    backend.client.submit_prompt = capture  # type: ignore[method-assign]
+
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=4)
+
+    seeds = [w["4"]["inputs"]["seed"] for w in submitted]
+    assert len(set(seeds)) == 4, f"runs shared a graph — seeds collapsed to {seeds}"
+
+
+async def test_edited_workflow_takes_effect_on_the_next_generation(
+    workflows_dir: Path,
+) -> None:
+    """The read moved off the loop, but it must stay per request — the
+    documented behaviour is that saving an edited workflow applies without a
+    restart."""
+    backend, _ = _backend(workflows_dir)
+
+    submitted: list[dict[str, Any]] = []
+
+    async def capture(workflow: dict[str, Any]) -> str:
+        submitted.append(workflow)
+        return "p1"
+
+    backend.client.submit_prompt = capture  # type: ignore[method-assign]
+
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=1)
+    assert "9" not in submitted[0]
+
+    (workflows_dir / "wf.json").write_text(
+        json.dumps(
+            {
+                "3": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                "9": {"class_type": "AddedLater", "inputs": {}},
+            }
+        )
+    )
+    await backend.generate_image(model_slug="wf", prompt="a cat", n=1)
+    assert "9" in submitted[1]

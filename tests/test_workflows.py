@@ -5,15 +5,28 @@ from __future__ import annotations
 import json
 import random
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from openai_api_bridge.backends.comfyui.workflows import (
+    WorkflowRecord,
     prepare_workflow,
+    read_graph_text,
     scan_workflows,
     seconds_to_frames,
 )
 from openai_api_bridge.errors import UnsupportedOperation, WorkflowInvalid
+
+
+def _prepare(rec: WorkflowRecord, **kwargs: Any) -> dict[str, Any]:
+    """Prepare a workflow the way the adapter does: read the graph, then parse.
+
+    The adapter reads once per request (off the event loop) and re-parses per
+    submit; these tests care about the preparation, not the split, so they go
+    through both halves in one step.
+    """
+    return prepare_workflow(rec, read_graph_text(rec), **kwargs)
 
 
 def _write_pair(workflows_dir: Path, name: str, graph: dict, meta: dict) -> Path:
@@ -105,7 +118,7 @@ def test_prepare_injects_prompt_into_named_field(tmp_path: Path) -> None:
         meta={"positive_prompt_node": "10"},
     )
     rec = scan_workflows(tmp_path)["p"]
-    out = prepare_workflow(rec, prompt_text="HELLO")
+    out = _prepare(rec, prompt_text="HELLO")
     assert out["10"]["inputs"]["text"] == "HELLO"
 
 
@@ -117,7 +130,7 @@ def test_prepare_uses_custom_field_name(tmp_path: Path) -> None:
         meta={"positive_prompt_node": "42", "positive_prompt_field": "prompt"},
     )
     rec = scan_workflows(tmp_path)["c"]
-    out = prepare_workflow(rec, prompt_text="X")
+    out = _prepare(rec, prompt_text="X")
     assert out["42"]["inputs"]["prompt"] == "X"
 
 
@@ -130,7 +143,7 @@ def test_prepare_raises_on_missing_prompt_node(tmp_path: Path) -> None:
     )
     rec = scan_workflows(tmp_path)["m"]
     with pytest.raises(WorkflowInvalid):
-        prepare_workflow(rec, prompt_text="X")
+        _prepare(rec, prompt_text="X")
 
 
 def test_prepare_injects_dimensions(tmp_path: Path) -> None:
@@ -147,7 +160,7 @@ def test_prepare_injects_dimensions(tmp_path: Path) -> None:
         },
     )
     rec = scan_workflows(tmp_path)["d"]
-    out = prepare_workflow(rec, prompt_text="x", width=1024, height=768)
+    out = _prepare(rec, prompt_text="x", width=1024, height=768)
     assert out["5"]["inputs"]["width"] == 1024
     assert out["5"]["inputs"]["height"] == 768
 
@@ -168,7 +181,7 @@ def test_prepare_respects_custom_dim_field_names(tmp_path: Path) -> None:
         },
     )
     rec = scan_workflows(tmp_path)["d2"]
-    out = prepare_workflow(rec, prompt_text="x", width=2048, height=1024)
+    out = _prepare(rec, prompt_text="x", width=2048, height=1024)
     assert out["5"]["inputs"]["resW"] == 2048
     assert out["5"]["inputs"]["resH"] == 1024
 
@@ -184,7 +197,7 @@ def test_prepare_zero_or_none_dims_leaves_workflow_default(tmp_path: Path) -> No
         meta={"positive_prompt_node": "1", "dimensions_node": "5"},
     )
     rec = scan_workflows(tmp_path)["d3"]
-    out = prepare_workflow(rec, prompt_text="x", width=None, height=None)
+    out = _prepare(rec, prompt_text="x", width=None, height=None)
     assert out["5"]["inputs"]["width"] == 512  # untouched
     assert out["5"]["inputs"]["height"] == 512
 
@@ -203,7 +216,7 @@ def test_prepare_injects_image_filenames_singular(tmp_path: Path) -> None:
         },
     )
     rec = scan_workflows(tmp_path)["i"]
-    out = prepare_workflow(rec, prompt_text="x", image_filenames=["sub_a.png"])
+    out = _prepare(rec, prompt_text="x", image_filenames=["sub_a.png"])
     assert out["7"]["inputs"]["image"] == "sub_a.png"
 
 
@@ -221,7 +234,7 @@ def test_prepare_image_inputs_multiple_serializes_remaining(tmp_path: Path) -> N
         },
     )
     rec = scan_workflows(tmp_path)["i2"]
-    out = prepare_workflow(rec, prompt_text="x", image_filenames=["a.png", "b.png"])
+    out = _prepare(rec, prompt_text="x", image_filenames=["a.png", "b.png"])
     assert json.loads(out["7"]["inputs"]["images"]) == ["a.png", "b.png"]
 
 
@@ -242,7 +255,7 @@ def test_prepare_raises_when_more_images_than_single_slots(tmp_path: Path) -> No
     )
     rec = scan_workflows(tmp_path)["i3"]
     with pytest.raises(UnsupportedOperation, match="accepts 1 image"):
-        prepare_workflow(rec, prompt_text="x", image_filenames=["a.png", "b.png"])
+        _prepare(rec, prompt_text="x", image_filenames=["a.png", "b.png"])
 
 
 def test_prepare_seeds_only_named_nodes_when_specified(tmp_path: Path) -> None:
@@ -258,7 +271,7 @@ def test_prepare_seeds_only_named_nodes_when_specified(tmp_path: Path) -> None:
     )
     rec = scan_workflows(tmp_path)["s"]
     rng = random.Random(0)
-    out = prepare_workflow(rec, prompt_text="x", rng=rng)
+    out = _prepare(rec, prompt_text="x", rng=rng)
     assert out["11"]["inputs"]["seed"] != 1  # randomized
     assert out["12"]["inputs"]["seed"] == 2  # left alone
 
@@ -276,7 +289,7 @@ def test_prepare_seeds_all_nodes_when_no_seed_nodes_meta(tmp_path: Path) -> None
     )
     rec = scan_workflows(tmp_path)["s2"]
     rng = random.Random(42)
-    out = prepare_workflow(rec, prompt_text="x", rng=rng)
+    out = _prepare(rec, prompt_text="x", rng=rng)
     assert out["11"]["inputs"]["seed"] != 1
     assert out["12"]["inputs"]["noise_seed"] != 2
 
@@ -295,7 +308,7 @@ def test_prepare_injects_length_for_video(tmp_path: Path) -> None:
         },
     )
     rec = scan_workflows(tmp_path)["v"]
-    out = prepare_workflow(rec, prompt_text="x", length=120)
+    out = _prepare(rec, prompt_text="x", length=120)
     assert out["8"]["inputs"]["value"] == 120
 
 
