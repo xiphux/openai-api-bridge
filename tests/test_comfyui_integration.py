@@ -337,3 +337,34 @@ def test_video_endpoint_rejects_image_workflow(
             return
         time.sleep(0.05)
     raise AssertionError("Runner never moved job to failed state")
+
+
+# --- reference-image upload naming ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("content_type", "expected"),
+    [
+        ("image/png", ".png"),
+        ("image/jpeg", ".jpg"),
+        ("IMAGE/WEBP", ".webp"),
+        ("image/gif; charset=binary", ".gif"),
+    ],
+)
+def test_upload_extension_maps_known_image_types(content_type: str, expected: str) -> None:
+    from openai_api_bridge.backends.comfyui.client import _upload_extension
+
+    assert _upload_extension(content_type) == expected
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    ["application/x-sh", "text/x-python", "text/html", "application/octet-stream", ""],
+)
+def test_upload_extension_refuses_a_caller_chosen_extension(hostile: str) -> None:
+    """The content type comes from the client's own multipart part, so
+    guess_extension let the caller pick what got written into ComfyUI's input
+    directory — .sh, .py, .html. ComfyUI only needs it to look like an image."""
+    from openai_api_bridge.backends.comfyui.client import _upload_extension
+
+    assert _upload_extension(hostile) == ".png"
