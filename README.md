@@ -86,7 +86,8 @@ and recovers on its own.
 fal is the exception to the re-raise: a failed listing degrades to whatever
 `[[providers.models]]` entries are configured rather than erroring, so the
 provider keeps serving its explicitly named models while discovery is down.
-Its `catalog_retry_seconds` governs how long that degraded state lasts.
+Its `catalog_retry_seconds` governs how long that degraded state lasts — except
+after a rejected credential, which is a separate case described below.
 (`introspect_retry_seconds` is a separate knob, for the per-model schema
 lookups that derive moderation settings.)
 
@@ -97,6 +98,15 @@ window rather than a permanent one: 403 is often not about the credential at
 all (a WAF interstitial, a geo block, an org quota), so the provider still
 recovers on its own. Setting `catalog_retry_seconds = 0` disables failure
 caching entirely, credentials included.
+
+fal is the exception here too, and in the opposite direction: a rejected
+credential latches for the life of the process rather than for a window. Model
+discovery and moderation introspection switch off until the bridge restarts
+with a working key, and `catalog_retry_seconds` — including `0` — does not
+govern it. The failure is quiet, so it is worth knowing: `/v1/models` keeps
+answering 200 with just the explicitly configured models, and the only other
+signal is a single ERROR log naming the env var to fix. See
+[docs/fal.md](docs/fal.md).
 
 Venice can also return a **partial** listing, its `type=inpaint` half failing
 while text-to-image succeeds. That's served rather than dropped, but held for
