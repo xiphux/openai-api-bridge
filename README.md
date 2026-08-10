@@ -76,6 +76,17 @@ until the refresh lands. Raise `MODELS_TIMEOUT_SECONDS` past that provider's
 cold-fetch time, or raise `catalog_ttl_seconds`, if a consumer treats the
 listing as authoritative and doesn't merge across refreshes.
 
+**fal is exempt**, because it is the one provider that reliably trips that:
+its listing is 10–13 paginated round trips, comfortably past the default 5s
+budget. Rather than let ~886 models vanish from one listing every TTL window,
+fal serves the previous catalogue while the refresh runs in the background —
+stale-while-revalidate. A refresh that fails or comes back empty leaves the
+last good listing (and the edit-routing map derived from it) in place, so an
+upstream blip degrades to a slightly old answer instead of no answer. Only the
+very first listing of the process pays the fetch inline. Setting
+`catalog_ttl_seconds = 0` opts out entirely, as everywhere else: no value is
+retained, so every request fetches live.
+
 Concurrent requests collapse into the fetch already in flight rather than each
 starting their own. A **failed** fetch is remembered for `catalog_retry_seconds`
 (default 30; `0` retries immediately) and re-raised to callers arriving inside

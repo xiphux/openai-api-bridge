@@ -27,10 +27,23 @@ still listed, since generation works for it either way. To serve a fixed set
 instead, set `discover_models = false` and list them; a model outside that list
 is then a 404.
 
-If the catalogue can't be fetched, the provider degrades to whatever is
-explicitly configured (rather than serving nothing) and retries after
+The refresh is **stale-while-revalidate**: once the TTL lapses, the next
+caller gets the previous listing immediately and the refetch runs in the
+background. This matters more here than on the other backends because a fal
+listing is 10–13 paginated round trips — past the `MODELS_TIMEOUT_SECONDS`
+budget `/v1/models` gives each provider, and unbounded on the image-edit path,
+which consults the catalogue to resolve variant routing. Blocking on it meant
+fal dropped out of one listing per TTL window, and could stall a generation.
+Only the first listing of the process pays the fetch inline.
+
+If the catalogue can't be fetched, the provider keeps serving the last good
+listing if it has one, and otherwise degrades to whatever is explicitly
+configured (rather than serving nothing); it retries after
 `catalog_retry_seconds` (default 30). That's separate from
 `introspect_retry_seconds`, which covers the per-model schema lookups below.
+A refresh that returns no usable models is treated as a failure, and
+specifically does not overwrite the variant-routing map — otherwise a
+transient empty response would silently send edits to the text-only endpoint.
 
 ### Display names
 

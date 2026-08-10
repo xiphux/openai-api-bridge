@@ -40,6 +40,7 @@ from ...errors import (
     UpstreamAuthError,
     UpstreamError,
 )
+from ...infra.tasks import SingleFlight
 from ...util.cache import AsyncTTLCache
 from ...util.sizes import parse_size
 from ..base import (
@@ -74,6 +75,11 @@ SUPPORTED_CATEGORIES: tuple[str, ...] = tuple(CATEGORY_KINDS)
 # harmless: a dropped lock only risks a duplicate fetch, which the cache
 # already tolerates, and a dropped cooldown only allows one earlier retry.
 _MAX_TRACKED_MODELS = 1024
+
+# SingleFlight key for the background catalogue refresh. There is only one
+# catalogue per provider, so the key is a constant — the map exists for its
+# at-most-one-live-task-per-key semantics, not to distinguish keys.
+_CATALOG_KEY = "catalog"
 
 # A long video job issues hundreds of status polls; any one of them can blip
 # without the render being in trouble. Tolerate a short run of consecutive
@@ -215,6 +221,10 @@ class FalBackend(Backend):
         self._catalog: AsyncTTLCache[list[ModelEntry]] = AsyncTTLCache(
             cfg.catalog_ttl_seconds, cfg.catalog_retry_seconds
         )
+        # Holds the background refresh started when the catalogue goes stale,
+        # so it can't be garbage-collected mid-flight and is drained at
+        # shutdown. At most one runs at a time; see `list_models`.
+        self._catalog_refresh: SingleFlight[list[ModelEntry]] = SingleFlight()
         # text-driven id -> the sibling that accepts a reference image, filled
         # in alongside the catalogue. Empty when collapsing or discovery is off.
         self._variant_routes: dict[str, str] = {}
@@ -224,6 +234,9 @@ class FalBackend(Backend):
         self._auth_failed = False
 
     async def aclose(self) -> None:
+        # Before the client: a refresh in flight is holding it, and closing
+        # underneath one would fail the fetch on the way out for no reason.
+        await self._catalog_refresh.cancel_all()
         await self.client.aclose()
 
     # --- model catalog ---------------------------------------------------
@@ -275,9 +288,62 @@ class FalBackend(Backend):
         backend. It used to be cached for the life of the process, so a model
         fal added — or a variant pairing that changed with it — only appeared
         after a bridge restart.
+
+        **Stale-while-revalidate**, which the other backends don't need. Once
+        the TTL lapses this serves the previous catalogue and refreshes in the
+        background, rather than making the caller wait for the refetch. fal's
+        listing is 10-13 paginated round trips, comfortably past the
+        ``MODELS_TIMEOUT_SECONDS`` budget ``/v1/models`` gives each provider —
+        so blocking here meant fal's ~886 models dropped out of one listing per
+        TTL window, and dropped out *entirely*, since a caller that times out
+        never reaches the degrade-to-configured path below. It also meant an
+        image edit could land on the refetch, where nothing bounds it at all
+        (see :meth:`_reference_variant`).
+
+        The other backends fetch a single page, so their refresh fits inside
+        the budget and there is nothing to hide.
         """
         if not self.cfg.discover_models or self._auth_failed:
             return self._configured_entries()
+
+        cached = self._catalog.fresh()
+        if cached is not None:
+            return cached
+
+        previous = self._catalog.stale()
+        if previous is not None:
+            # Aged out but we still have the last good listing. Hand that back
+            # now and let the refetch happen off the request.
+            #
+            # Not while a failure cooldown is open: the refresh would return
+            # immediately having done nothing, so starting one per request
+            # would be pure churn. Serving `previous` through the cooldown is
+            # also strictly better than what this used to do, which was to fall
+            # back to the configured models and discard a catalogue that was
+            # merely a few minutes old.
+            if self._catalog.pending_failure() is None:
+                self._catalog_refresh.join_or_start(
+                    _CATALOG_KEY, self._fetch_catalog_entries, name="fal-catalog-refresh"
+                )
+            return previous
+
+        # Nothing cached at all — the first call of the process, or caching is
+        # disabled outright. Someone has to pay for the fetch.
+        return await self._fetch_catalog_entries()
+
+    async def _fetch_catalog_entries(self) -> list[ModelEntry]:
+        """Fetch, translate and cache the catalogue.
+
+        Runs either inline for the first caller or as the background refresh
+        started by :meth:`list_models`. Returns what that caller should serve,
+        which on any failure is the explicitly configured models — the return
+        value is ignored when this runs in the background, where the point is
+        the ``store`` on the way through.
+
+        Raises nothing an upstream fault can produce; ``CancelledError``
+        deliberately still propagates (see the handler below), which as a
+        background task means shutdown can drain it.
+        """
         async with self._catalog.lock:
             cached = self._catalog.fresh()
             if cached is not None:
@@ -308,7 +374,7 @@ class FalBackend(Backend):
                     self.cfg.catalog_retry_seconds,
                 )
                 return self._configured_entries()
-            entries = self._entries_from_catalog(raw)
+            entries, variant_routes = self._entries_from_catalog(raw)
             if not entries:
                 self._catalog.note_failure(
                     UpstreamError(
@@ -338,19 +404,35 @@ class FalBackend(Backend):
             # from config, which carries no capabilities and defaults kind to
             # "image", so a collapsed *video* half would reappear advertising
             # the wrong modality.
-            listed = {e.id for e in entries} | set(self._variant_routes.values())
+            listed = {e.id for e in entries} | set(variant_routes.values())
             entries += [e for e in self._configured_entries() if e.id not in listed]
+            # Publish the routing map and the listing together, and only here:
+            # every path above returns without touching `_variant_routes`, so a
+            # failed or empty refresh leaves the last working one in place
+            # rather than routing edits to the text-only endpoint.
+            self._variant_routes = variant_routes
             self._catalog.store(entries)
             return entries
 
-    def _entries_from_catalog(self, raw: list[dict[str, Any]]) -> list[ModelEntry]:
+    def _entries_from_catalog(
+        self, raw: list[dict[str, Any]]
+    ) -> tuple[list[ModelEntry], dict[str, str]]:
+        """Translate a raw catalogue into entries and the variant routing map.
+
+        Returns the routes rather than assigning them, so the caller can
+        publish both together only once the result is known good. Assigning
+        here meant a fetch that succeeded at the HTTP level but yielded nothing
+        usable — fal answering ``{"models": []}`` during an incident, a
+        category rename — replaced a working routing map with an empty one on
+        its way to reporting failure. Harmless while the catalogue was fetched
+        once per process; not once it refreshes on a TTL.
+        """
         by_id = {
             item["endpoint_id"]: item
             for item in raw
             if isinstance(item.get("endpoint_id"), str) and item["endpoint_id"]
         }
         variant_routes, collapsed = self._pair_variants(by_id)
-        self._variant_routes = variant_routes
 
         entries: list[ModelEntry] = []
         seen: set[str] = set()
@@ -404,7 +486,7 @@ class FalBackend(Backend):
             )
         # fal titles an endpoint after its model family, so multi-endpoint
         # families arrive as a run of identically-named rows.
-        return disambiguate_display_names(entries, pinned=frozenset(pinned))
+        return disambiguate_display_names(entries, pinned=frozenset(pinned)), variant_routes
 
     def _category_of(self, by_id: dict[str, dict[str, Any]], model_id: str) -> str | None:
         meta = by_id.get(model_id, {}).get("metadata")

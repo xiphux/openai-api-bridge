@@ -37,6 +37,8 @@ FAL = "https://fal.run"
 SEEDREAM_T2I = "fal-ai/bytedance/seedream/v4/text-to-image"
 SEEDREAM_EDIT = "fal-ai/bytedance/seedream/v4/edit"
 NANO = "fal-ai/nano-banana-2"
+# The reference-image half NANO collapses with, per `_VARIANT_PAIRS`.
+NANO_VARIANT_EDIT = "fal-ai/nano-banana-2/edit"
 NANO_PRO = "fal-ai/nano-banana-pro"
 GPT_IMAGE = "openai/gpt-image-2"
 PLAIN = "fal-ai/some/plain-model"
@@ -962,33 +964,225 @@ def test_catalog_is_cached(discovering_client: TestClient) -> None:
     assert route.call_count == len(SUPPORTED_CATEGORIES)
 
 
-@respx.mock
-async def test_catalog_cache_expires(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A TTL rather than a permanent cache, matching every other backend. It
-    used to be cached for the life of the process, so a model fal added — or a
-    variant pairing that moved with it — only appeared after a restart."""
-    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+def _stable_catalog(models: list[tuple[str, str]]) -> respx.Route:
+    """A responder that serves the same page every time.
 
-    # A *stable* responder, unlike _stub_catalog, whose per-category cursor
-    # advances across calls and so can only serve one listing pass.
+    Unlike `_stub_catalog`, whose per-category cursor advances across calls and
+    so can only serve one listing pass.
+    """
+
     def responder(request: httpx.Request) -> httpx.Response:
         if request.url.params.get("category") == "text-to-image":
-            return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
+            return httpx.Response(200, json=_catalog_page(models))
         return httpx.Response(200, json={"models": [], "has_more": False})
 
-    route = respx.get(MODELS_API).mock(side_effect=responder)
+    return respx.get(MODELS_API).mock(side_effect=responder)
+
+
+@respx.mock
+async def test_catalog_refreshes_after_the_ttl_without_blocking_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stale-while-revalidate: past the TTL the caller gets the previous
+    listing immediately and the refetch happens off the request.
+
+    A TTL rather than a permanent cache, so a model fal adds — or a variant
+    pairing that moves with it — appears without a restart. But fal's listing
+    is 10-13 paginated round trips, past the budget `/v1/models` allows each
+    provider, so blocking the caller on it dropped fal's whole catalogue from
+    one listing per TTL window.
+    """
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = _stable_catalog([(NANO, "Nano")])
 
     backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.05)
     try:
         assert len(await backend.list_models()) == 1
-        assert route.call_count == len(SUPPORTED_CATEGORIES)
+        first_pass = route.call_count
+        assert first_pass == len(SUPPORTED_CATEGORIES), "the cold fetch is paid inline"
+
+        await asyncio.sleep(0.1)  # let the TTL lapse
+
+        # Served from the stale entry, so no fetch has happened *yet*.
+        assert len(await backend.list_models()) == 1
+        assert route.call_count == first_pass, "the caller must not wait on the refetch"
+
+        # ...but one was started, and it lands on its own.
+        await asyncio.sleep(0.05)
+        assert route.call_count == 2 * first_pass, "the refresh should run in the background"
+
+        # And the refreshed entry is what subsequent callers get.
+        assert len(await backend.list_models()) == 1
+        assert route.call_count == 2 * first_pass, "a fresh catalogue is not re-fetched"
+    finally:
+        await backend.aclose()
+
+
+@respx.mock
+async def test_a_failed_refresh_keeps_serving_the_last_good_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An outage after a successful fetch must not throw away the catalogue.
+
+    Before stale-while-revalidate this degraded to `_configured_entries()` —
+    dropping ~886 discovered models on the floor because a refresh a few
+    minutes later failed, even though the previous listing was still perfectly
+    serviceable.
+    """
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    healthy = True
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if not healthy:
+            return httpx.Response(503, json={"error": "down"})
+        if request.url.params.get("category") == "text-to-image":
+            return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.05)
+    try:
+        assert len(await backend.list_models()) == 1
+        healthy = False
         await asyncio.sleep(0.1)
+
+        # Serves stale and kicks off the refresh, which fails.
+        assert len(await backend.list_models()) == 1
+        await asyncio.sleep(0.05)
+
+        # Still the last good listing, not the (empty) configured set.
         assert len(await backend.list_models()) == 1
     finally:
         await backend.aclose()
-    assert route.call_count == 2 * len(SUPPORTED_CATEGORIES), (
-        "the catalogue should be re-read once the TTL lapses"
-    )
+
+
+@respx.mock
+async def test_an_empty_refresh_does_not_wipe_variant_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 200-with-no-models must leave edit routing alone.
+
+    The routing map used to be published before the empty check, so a
+    transient empty catalogue replaced a working map with `{}` on its way to
+    reporting failure — silently sending edits to the text-only endpoint.
+    Harmless when the catalogue was fetched once per process; not once it
+    refreshes on a TTL.
+    """
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    healthy = True
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        category = request.url.params.get("category")
+        if not healthy:
+            return httpx.Response(200, json={"models": [], "has_more": False})
+        if category == "text-to-image":
+            return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
+        if category == "image-to-image":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "endpoint_id": NANO_VARIANT_EDIT,
+                            "metadata": {"display_name": "Nano Edit", "category": "image-to-image"},
+                        }
+                    ],
+                    "has_more": False,
+                },
+            )
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=responder)
+
+    backend = _direct_backend(retry_seconds=0.0, model_ids=[], catalog_ttl_seconds=0.05)
+    try:
+        await backend.list_models()
+        assert backend._variant_routes.get(NANO) == NANO_VARIANT_EDIT, (
+            "pairing should be established"
+        )
+
+        healthy = False
+        await asyncio.sleep(0.1)
+        await backend.list_models()  # serves stale, starts the empty refresh
+        await asyncio.sleep(0.05)
+
+        assert backend._variant_routes.get(NANO) == NANO_VARIANT_EDIT, (
+            "an empty refresh must not clobber a working routing map"
+        )
+    finally:
+        await backend.aclose()
+
+
+@respx.mock
+async def test_variant_routing_does_not_block_a_generation_on_a_stale_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_reference_variant` runs inside `POST /v1/images/edits`, which has no
+    timeout budget of its own — unlike `/v1/models`, which bounds each provider
+    by MODELS_TIMEOUT_SECONDS. So an expired catalogue must not put a
+    multi-round-trip refetch in front of a generation the client is waiting on.
+    """
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.2)
+        if request.url.params.get("category") == "text-to-image":
+            return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    respx.get(MODELS_API).mock(side_effect=slow)
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.05)
+    try:
+        await backend.list_models()  # warm it once, paying the cold fetch
+        await asyncio.sleep(0.1)  # let the TTL lapse
+
+        started = time.monotonic()
+        target = await backend._reference_variant(NANO)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.1, (
+            f"routing waited {elapsed:.3f}s on the catalogue refetch; it should "
+            "serve the last known routes and refresh in the background"
+        )
+        assert target == NANO, "routing still answers from the last good map"
+    finally:
+        await backend.aclose()
+
+
+@respx.mock
+async def test_catalog_refresh_is_not_started_twice_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every caller arriving while the refresh runs joins it rather than
+    starting its own — otherwise a burst past the TTL would fan out one full
+    paginated catalogue fetch per request."""
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.05)
+        if request.url.params.get("category") == "text-to-image":
+            return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
+        return httpx.Response(200, json={"models": [], "has_more": False})
+
+    route = respx.get(MODELS_API).mock(side_effect=slow)
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.05)
+    try:
+        await backend.list_models()
+        first_pass = route.call_count
+        await asyncio.sleep(0.1)
+
+        # Ten concurrent callers, all past the TTL.
+        results = await asyncio.gather(*(backend.list_models() for _ in range(10)))
+        assert all(len(r) == 1 for r in results), "all callers get the stale listing"
+        await asyncio.sleep(0.15)
+        assert route.call_count == 2 * first_pass, (
+            f"expected one refresh pass, got {route.call_count // first_pass}"
+        )
+    finally:
+        await backend.aclose()
 
 
 @respx.mock
