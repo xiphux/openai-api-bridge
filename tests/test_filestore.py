@@ -345,9 +345,11 @@ async def test_put_keeps_the_bytes_it_will_not_vouch_for(filestore: FileStore) -
         ("image/png", "image/png"),
         ("IMAGE/PNG", "image/png"),
         ("image/jpeg; charset=binary", "image/jpeg"),
-        # Real provider outputs with no extension in _EXT_BY_TYPE — the
-        # serveable set is deliberately wider than the extension map.
         ("image/avif", "image/avif"),
+        # Real provider outputs with no extension in the asset-extension table
+        # (util.media._ASSET_EXTENSIONS) — the serveable set is deliberately
+        # wider than the extension map, since a type can be safe to serve
+        # without there being a filename worth writing for it.
         ("image/heic", "image/heic"),
         ("video/x-matroska", "video/x-matroska"),
     ],
