@@ -36,10 +36,12 @@ _asset_client_loop: asyncio.AbstractEventLoop | None = None
 # every time. Five minutes covers the realistic spacing.
 #
 # Two honest caveats. This does nothing for a `run_all` batch: n concurrent
-# fetches open n connections whatever the expiry. And it was never the only
-# win from sharing a client — building one costs ~2.5ms of blocking event-loop
-# time to construct an SSLContext and load the certifi bundle, which the
-# previous client-per-attempt paid on every fetch and every retry.
+# fetches open n connections whatever the expiry. And the win from sharing a
+# client is now the handshakes it avoids rather than the constructions: under
+# httpx2 building a client is ~0.2ms, but its default truststore-backed
+# SSLContext re-reads the system CA store on *every* handshake (~3ms on the
+# Alpine image, off-loop in an anyio worker thread), and the previous
+# client-per-attempt paid that on every fetch and every retry.
 _ASSET_LIMITS = httpx2.Limits(
     max_connections=100,
     max_keepalive_connections=20,

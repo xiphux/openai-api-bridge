@@ -113,4 +113,6 @@ is documented in the README.
   `httpcore2` to intercept httpx2 traffic — but `return_value=` still type
   checks against `httpx.Response` and rejects an `httpx2.Response`
   (lundberg/respx#324). Rule of thumb: objects handed to **respx** are `httpx`,
-  objects handed to **bridge code** are `httpx2`. Both are dev deps on purpose.
+  objects handed to **bridge code** are `httpx2`. Only `httpx` is a dev dep,
+  kept purely so respx has something to build mocks with; `httpx2` is a
+  production dependency in `[project.dependencies]` that every backend imports.

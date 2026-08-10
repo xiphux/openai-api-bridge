@@ -38,9 +38,10 @@ log = logging.getLogger(__name__)
 # "this is HTML". ``json.loads`` on bytes runs ``detect_encoding`` and handles
 # every one of them, so a body opening with a BOM is JSON as far as any client
 # that parses it is concerned — including the OpenAI SDK, which decodes via
-# httpx2's ``.json()``. Listed rather than stripped because the big-endian
-# forms put a NUL before the ``{``, so stripping and re-testing for ``{``
-# would reject exactly the payloads this exists to admit.
+# httpx v1's ``.json()`` (that SDK depends on httpx, not the bridge's httpx2).
+# Listed rather than stripped because the big-endian forms put a NUL before
+# the ``{``, so stripping and re-testing for ``{`` would reject exactly the
+# payloads this exists to admit.
 _UTF_BOMS = (
     codecs.BOM_UTF8,
     codecs.BOM_UTF32_LE,
