@@ -82,10 +82,17 @@ budget. Rather than let ~886 models vanish from one listing every TTL window,
 fal serves the previous catalogue while the refresh runs in the background —
 stale-while-revalidate. A refresh that fails or comes back empty leaves the
 last good listing (and the edit-routing map derived from it) in place, so an
-upstream blip degrades to a slightly old answer instead of no answer. Only the
-very first listing of the process pays the fetch inline. Setting
+upstream blip degrades to a slightly old answer instead of no answer. The one
+failure that doesn't work that way is a rejected credential, which disables
+discovery outright (above) and so isn't served from the previous listing
+either.
+
+Calls made *before the first successful fetch* still pay for it inline — so a
+fal that is unreachable at boot blocks one caller per retry window until a
+fetch lands, rather than only ever the very first. Setting
 `catalog_ttl_seconds = 0` opts out entirely, as everywhere else: no value is
-retained, so every request fetches live.
+retained, so every request fetches live and nothing refreshes in the
+background.
 
 Concurrent requests collapse into the fetch already in flight rather than each
 starting their own. A **failed** fetch is remembered for `catalog_retry_seconds`

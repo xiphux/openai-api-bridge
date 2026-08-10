@@ -964,6 +964,21 @@ def test_catalog_is_cached(discovering_client: TestClient) -> None:
     assert route.call_count == len(SUPPORTED_CATEGORIES)
 
 
+async def _settle_refresh(backend: FalBackend, timeout: float = 2.0) -> None:
+    """Wait for the background catalogue refresh to finish.
+
+    Polls the SingleFlight rather than sleeping a guessed interval, so these
+    tests don't depend on a wall-clock margin holding on a loaded machine.
+    Returns immediately when no refresh is in flight, so callers that need to
+    prove one *started* must assert on the route's call count as well.
+    """
+    deadline = time.monotonic() + timeout
+    while backend._catalog_refresh.keys():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"background refresh did not finish within {timeout}s")
+        await asyncio.sleep(0.005)
+
+
 def _stable_catalog(models: list[tuple[str, str]]) -> respx.Route:
     """A responder that serves the same page every time.
 
@@ -1008,12 +1023,39 @@ async def test_catalog_refreshes_after_the_ttl_without_blocking_the_caller(
         assert route.call_count == first_pass, "the caller must not wait on the refetch"
 
         # ...but one was started, and it lands on its own.
-        await asyncio.sleep(0.05)
+        await _settle_refresh(backend)
         assert route.call_count == 2 * first_pass, "the refresh should run in the background"
 
         # And the refreshed entry is what subsequent callers get.
         assert len(await backend.list_models()) == 1
         assert route.call_count == 2 * first_pass, "a fresh catalogue is not re-fetched"
+    finally:
+        await backend.aclose()
+
+
+@respx.mock
+async def test_disabling_the_cache_also_disables_stale_serving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`catalog_ttl_seconds = 0` means every answer is read live.
+
+    Stale-while-revalidate must not quietly reintroduce a cached answer for an
+    operator who turned caching off — that is precisely what they opted out
+    of. So no value is retained and every call fetches inline; no background
+    refresh is ever started.
+    """
+    monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
+    route = _stable_catalog([(NANO, "Nano")])
+
+    backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.0)
+    try:
+        assert len(await backend.list_models()) == 1
+        assert route.call_count == len(SUPPORTED_CATEGORIES)
+        assert backend._catalog.stale() is None, "nothing may be retained"
+
+        assert len(await backend.list_models()) == 1
+        assert route.call_count == 2 * len(SUPPORTED_CATEGORIES), "every call fetches live"
+        assert not backend._catalog_refresh.keys(), "no background refresh should be started"
     finally:
         await backend.aclose()
 
@@ -1039,19 +1081,32 @@ async def test_a_failed_refresh_keeps_serving_the_last_good_catalogue(
             return httpx.Response(200, json=_catalog_page([(NANO, "Nano")]))
         return httpx.Response(200, json={"models": [], "has_more": False})
 
-    respx.get(MODELS_API).mock(side_effect=responder)
+    route = respx.get(MODELS_API).mock(side_effect=responder)
 
+    # A short retry window so the second failure below is a real second
+    # attempt rather than the cooldown suppressing it.
     backend = _direct_backend(retry_seconds=300.0, model_ids=[], catalog_ttl_seconds=0.05)
+    backend._catalog.failure_cooldown_seconds = 0.05
     try:
         assert len(await backend.list_models()) == 1
+        first_pass = route.call_count
         healthy = False
         await asyncio.sleep(0.1)
 
-        # Serves stale and kicks off the refresh, which fails.
+        # Serves stale and kicks off a refresh, which fails.
         assert len(await backend.list_models()) == 1
-        await asyncio.sleep(0.05)
+        await _settle_refresh(backend)
+        assert route.call_count == 2 * first_pass, "the failing refresh must actually have run"
 
         # Still the last good listing, not the (empty) configured set.
+        assert len(await backend.list_models()) == 1
+
+        # And it survives a second failed window too — the point is durability
+        # across repeated failures, not just one.
+        await asyncio.sleep(0.1)
+        assert len(await backend.list_models()) == 1
+        await _settle_refresh(backend)
+        assert route.call_count == 3 * first_pass, "the cooldown should lapse and retry"
         assert len(await backend.list_models()) == 1
     finally:
         await backend.aclose()
@@ -1093,11 +1148,12 @@ async def test_an_empty_refresh_does_not_wipe_variant_routes(
             )
         return httpx.Response(200, json={"models": [], "has_more": False})
 
-    respx.get(MODELS_API).mock(side_effect=responder)
+    route = respx.get(MODELS_API).mock(side_effect=responder)
 
     backend = _direct_backend(retry_seconds=0.0, model_ids=[], catalog_ttl_seconds=0.05)
     try:
         await backend.list_models()
+        first_pass = route.call_count
         assert backend._variant_routes.get(NANO) == NANO_VARIANT_EDIT, (
             "pairing should be established"
         )
@@ -1105,11 +1161,14 @@ async def test_an_empty_refresh_does_not_wipe_variant_routes(
         healthy = False
         await asyncio.sleep(0.1)
         await backend.list_models()  # serves stale, starts the empty refresh
-        await asyncio.sleep(0.05)
+        await _settle_refresh(backend)
+        assert route.call_count == 2 * first_pass, "the empty refresh must actually have run"
 
         assert backend._variant_routes.get(NANO) == NANO_VARIANT_EDIT, (
             "an empty refresh must not clobber a working routing map"
         )
+        # And routing still resolves through it, not just the raw dict.
+        assert await backend._reference_variant(NANO) == NANO_VARIANT_EDIT
     finally:
         await backend.aclose()
 
@@ -1157,7 +1216,15 @@ async def test_catalog_refresh_is_not_started_twice_concurrently(
 ) -> None:
     """Every caller arriving while the refresh runs joins it rather than
     starting its own — otherwise a burst past the TTL would fan out one full
-    paginated catalogue fetch per request."""
+    paginated catalogue fetch per request.
+
+    Asserted on the number of *live tasks*, not on the upstream call count.
+    Call count alone can't tell single-flight apart from the cache's own lock:
+    `_fetch_catalog_entries` re-checks `fresh()` after acquiring it, so even a
+    version that spawned a task per caller would see all but the first
+    short-circuit to zero round trips. The task count is what the SingleFlight
+    is actually for.
+    """
     monkeypatch.setenv("TEST_FAL_TOKEN", "fal-secret")
 
     async def slow(request: httpx.Request) -> httpx.Response:
@@ -1174,13 +1241,17 @@ async def test_catalog_refresh_is_not_started_twice_concurrently(
         first_pass = route.call_count
         await asyncio.sleep(0.1)
 
-        # Ten concurrent callers, all past the TTL.
+        # Ten concurrent callers, all past the TTL. The stale path is
+        # await-free, so all ten return before the refresh completes.
         results = await asyncio.gather(*(backend.list_models() for _ in range(10)))
         assert all(len(r) == 1 for r in results), "all callers get the stale listing"
-        await asyncio.sleep(0.15)
-        assert route.call_count == 2 * first_pass, (
-            f"expected one refresh pass, got {route.call_count // first_pass}"
+        assert len(backend._catalog_refresh) == 1, (
+            f"ten callers started {len(backend._catalog_refresh)} refresh tasks; "
+            "they should have joined one"
         )
+
+        await _settle_refresh(backend)
+        assert route.call_count == 2 * first_pass, "and it made exactly one pass upstream"
     finally:
         await backend.aclose()
 

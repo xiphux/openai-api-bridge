@@ -34,7 +34,8 @@ listing is 10–13 paginated round trips — past the `MODELS_TIMEOUT_SECONDS`
 budget `/v1/models` gives each provider, and unbounded on the image-edit path,
 which consults the catalogue to resolve variant routing. Blocking on it meant
 fal dropped out of one listing per TTL window, and could stall a generation.
-Only the first listing of the process pays the fetch inline.
+Calls before the *first successful* fetch still pay for it inline — if fal is
+unreachable at boot, one caller per retry window blocks until a fetch lands.
 
 If the catalogue can't be fetched, the provider keeps serving the last good
 listing if it has one, and otherwise degrades to whatever is explicitly
@@ -100,6 +101,12 @@ env var to fix, and is never retried, since a token read from the environment at
 startup cannot start working again. Discovery and introspection switch off for
 the process, and generation fails with `code: "upstream_auth_error"` (HTTP 502)
 rather than degrading quietly.
+
+This takes precedence over the stale-while-revalidate behaviour above: the
+latch is checked before the cached catalogue, so once a key is rejected the
+listing falls back to the explicitly configured models even though a
+previously-fetched catalogue is still held. Every *other* refresh failure
+keeps serving that catalogue.
 
 ## Content moderation
 

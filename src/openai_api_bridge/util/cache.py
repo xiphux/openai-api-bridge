@@ -79,16 +79,23 @@ class AsyncTTLCache[T]:
         than block on a refresh. :meth:`fresh` decides whether a refresh is
         *needed*; this is what there is to serve while one runs.
 
-        Deliberately ``None`` when caching is disabled (``ttl_seconds <= 0``):
-        an operator who turned the cache off has said they want every answer
-        read live, and quietly handing back a previous one would be the exact
-        behaviour they opted out of.
+        Deliberately ``None`` when caching is disabled: an operator who turned
+        the cache off has said they want every answer read live, and quietly
+        handing back a previous one would be the exact behaviour they opted
+        out of.
+
+        Gated on ``_stored_ttl``, the same field :meth:`fresh` reads, rather
+        than on the configured ``ttl_seconds``. The two differ when a caller
+        passed a per-store override — :meth:`store`'s ``ttl_seconds``, which
+        Venice uses to say "this listing is incomplete, don't hold it" — and
+        an override of ``0`` means exactly "not cacheable", which this has to
+        honour as well.
 
         A failed refresh doesn't clear it — :meth:`note_failure` leaves the
         value alone — so this also survives an upstream outage, which is when
         having a slightly old answer matters most.
         """
-        if self.ttl_seconds <= 0:
+        if self._stored_ttl <= 0:
             return None
         return self._value
 

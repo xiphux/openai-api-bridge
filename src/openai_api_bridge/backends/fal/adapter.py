@@ -300,8 +300,12 @@ class FalBackend(Backend):
         image edit could land on the refetch, where nothing bounds it at all
         (see :meth:`_reference_variant`).
 
-        The other backends fetch a single page, so their refresh fits inside
-        the budget and there is nothing to hide.
+        The other backends fetch one unpaginated listing (Venice two, run
+        concurrently), so their refresh fits inside the budget and there is
+        nothing to hide.
+
+        A rejected credential is checked before any of this and is not served
+        from the cache — see :meth:`_note_auth_failure`.
         """
         if not self.cfg.discover_models or self._auth_failed:
             return self._configured_entries()
@@ -327,8 +331,12 @@ class FalBackend(Backend):
                 )
             return previous
 
-        # Nothing cached at all — the first call of the process, or caching is
-        # disabled outright. Someone has to pay for the fetch.
+        # Nothing cached at all. Someone has to pay for the fetch — and note
+        # this is every call before the first *successful* one, not just the
+        # first call of the process: if fal is unreachable at boot, `stale()`
+        # keeps returning None, so one caller per retry window blocks here
+        # until a fetch lands. Caching being disabled outright lands here too,
+        # every time, which is what disabling it means.
         return await self._fetch_catalog_entries()
 
     async def _fetch_catalog_entries(self) -> list[ModelEntry]:
@@ -354,6 +362,15 @@ class FalBackend(Backend):
                 return self._configured_entries()
             try:
                 raw = await self.client.fetch_catalog(self._categories)
+                # Translation is inside the guard, not after it. It is pure and
+                # its inputs are already shape-checked by the client, so an
+                # escape here is unlikely — but this now also runs as a
+                # background task whose result nobody retrieves, where an
+                # escape would be invisible *and* would skip the `note_failure`
+                # below. Without the cooldown armed, every subsequent caller
+                # past the TTL would start another refresh that fails exactly
+                # the same way, for as long as traffic arrives.
+                entries, variant_routes = self._entries_from_catalog(raw)
             except UpstreamAuthError as e:
                 self._note_auth_failure(e)
                 return self._configured_entries()
@@ -374,7 +391,6 @@ class FalBackend(Backend):
                     self.cfg.catalog_retry_seconds,
                 )
                 return self._configured_entries()
-            entries, variant_routes = self._entries_from_catalog(raw)
             if not entries:
                 self._catalog.note_failure(
                     UpstreamError(
