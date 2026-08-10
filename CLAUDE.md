@@ -108,5 +108,9 @@ is documented in the README.
 - Tests stub upstream HTTP with `respx`; `pytest-asyncio` is in auto mode. The
   `client` fixture (`conftest.py`) runs the full app with an empty provider config
   for auth/validation/404 paths; infra fixtures use a fresh sqlite + tmp dir per test.
-</content>
-</invoke>
+- **The runtime speaks `httpx2`, but tests author respx mocks in `httpx` v1.**
+  respx patches httpcore, so `conftest.py` points its default mocker at
+  `httpcore2` to intercept httpx2 traffic — but `return_value=` still type
+  checks against `httpx.Response` and rejects an `httpx2.Response`
+  (lundberg/respx#324). Rule of thumb: objects handed to **respx** are `httpx`,
+  objects handed to **bridge code** are `httpx2`. Both are dev deps on purpose.

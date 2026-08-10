@@ -22,7 +22,7 @@ import base64
 import logging
 from typing import Any
 
-import httpx
+import httpx2
 
 from ...errors import UpstreamError
 from ...util.http import parse_json, raise_for_upstream_status
@@ -35,9 +35,9 @@ class VeniceClient:
     def __init__(self, *, base_url: str, api_token: str) -> None:
         self.base_url = base_url.rstrip("/")
         self._token = api_token
-        self._client = httpx.AsyncClient(
+        self._client = httpx2.AsyncClient(
             headers={"Authorization": f"Bearer {api_token}"},
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx2.Timeout(60.0, connect=10.0),
         )
 
     async def aclose(self) -> None:
@@ -55,14 +55,14 @@ class VeniceClient:
                 f"{self.base_url}/api/v1/models", params={"type": model_type}
             )
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="Venice",
                 endpoint="/models",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Venice /models failed: {e}") from e
         body = parse_json(response, "Venice /models")
         return list(body.get("data", []))
@@ -94,14 +94,14 @@ class VeniceClient:
                 f"{self.base_url}/api/v1/image/generate", json=payload
             )
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="Venice",
                 endpoint="/image/generate",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Venice /image/generate failed: {e}") from e
 
         body = parse_json(response, "Venice /image/generate")
@@ -136,14 +136,14 @@ class VeniceClient:
                 f"{self.base_url}/api/v1/image/edit", data=data, files=files
             )
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="Venice",
                 endpoint="/image/edit",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Venice /image/edit failed: {e}") from e
 
         content = response.content

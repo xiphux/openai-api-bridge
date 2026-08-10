@@ -16,12 +16,27 @@ from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import pytest
+import pytest_httpx2  # noqa: F401  -- import registers respx's httpcore2 mocker
+import respx.mocks
 from fastapi.testclient import TestClient
 
 from openai_api_bridge.config import reset_caches_for_tests
 from openai_api_bridge.infra.db import Database, run_migrations
 from openai_api_bridge.infra.filestore import FileStore
 from openai_api_bridge.infra.jobstore import JobStore
+
+# respx mocks by patching httpcore, the transport layer *below* httpx, so which
+# client it intercepts is a matter of which package it patches. Its default
+# targets httpcore; the bridge speaks httpx2, which sits on httpcore2. Rather
+# than thread `using="httpcore2"` through all 183 `respx.mock` call sites, point
+# the default at the mocker pytest_httpx2 registers on import — `Router.using`
+# reads this global lazily, so every default-configured router picks it up.
+#
+# Note that respx still *authors* mocks in httpx v1 types: `return_value=` type
+# checks against `httpx.Response` and rejects an `httpx2.Response`
+# (lundberg/respx#324). Stubs below and in tests/ stay on httpx deliberately;
+# only objects passed straight into bridge code are httpx2.
+respx.mocks.DEFAULT_MOCKER = "httpcore2"
 
 
 @pytest.fixture

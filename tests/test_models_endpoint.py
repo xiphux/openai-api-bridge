@@ -13,7 +13,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from openai_api_bridge.api.models import _entries_for, list_models
@@ -95,7 +95,7 @@ async def test_listing_order_follows_provider_order() -> None:
     "error",
     [
         UpstreamError("catalogue is down"),
-        httpx.ConnectError("connection refused"),
+        httpx2.ConnectError("connection refused"),
         KeyError("architecture"),
         ValueError("unexpected catalogue shape"),
     ],

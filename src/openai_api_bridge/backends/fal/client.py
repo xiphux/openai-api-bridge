@@ -25,7 +25,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
+import httpx2
 
 from ...errors import RateLimited, UnsupportedOperation, UpstreamAuthError, UpstreamError
 from ...util.http import fetch_asset_with_retry, parse_json, raise_for_upstream_status
@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 _DEFAULT_GENERATION_READ_TIMEOUT_S = 600.0
 
 
-def _status_error(e: httpx.HTTPStatusError, what: str) -> UpstreamError:
+def _status_error(e: httpx2.HTTPStatusError, what: str) -> UpstreamError:
     """Map a status from the *queue lifecycle* calls onto an error.
 
     The inference entry points (``run_image``, ``submit_queued``) don't use
@@ -113,9 +113,9 @@ class FalClient:
             self._inference_headers["X-Fal-Object-Lifecycle-Preference"] = json.dumps(
                 {"expiration_duration_seconds": output_expiration_seconds}
             )
-        self._client = httpx.AsyncClient(
+        self._client = httpx2.AsyncClient(
             headers=self._auth_headers,
-            timeout=httpx.Timeout(
+            timeout=httpx2.Timeout(
                 request_timeout_seconds or _DEFAULT_GENERATION_READ_TIMEOUT_S,
                 connect=10.0,
             ),
@@ -139,14 +139,14 @@ class FalClient:
         try:
             resp = await self._client.post(url, json=body, headers=self._inference_headers)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="fal",
                 endpoint=model_id,
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"fal {model_id} failed: {e}") from e
         return _extract_image_urls(parse_json(resp, f"fal {model_id}"), model_id)
 
@@ -165,14 +165,14 @@ class FalClient:
         try:
             resp = await self._client.post(url, json=body, headers=self._inference_headers)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="fal",
                 endpoint=model_id,
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"fal {model_id} queue submit failed: {e}") from e
         body_json = parse_json(resp, f"fal {model_id} queue submit")
         if not isinstance(body_json, dict):
@@ -205,9 +205,9 @@ class FalClient:
         try:
             resp = await self._client.put(job.cancel_url, timeout=30.0)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise _status_error(e, f"{model_id} cancel") from e
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"fal {model_id} cancel failed: {e}") from e
 
     async def poll_queued(self, job: QueuedRequest, *, model_id: str) -> str:
@@ -215,9 +215,9 @@ class FalClient:
         try:
             resp = await self._client.get(job.status_url, timeout=60.0)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise _status_error(e, f"{model_id} status") from e
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"fal {model_id} status poll failed: {e}") from e
         body = parse_json(resp, f"fal {model_id} status")
         status = body.get("status") if isinstance(body, dict) else None
@@ -229,9 +229,9 @@ class FalClient:
         try:
             resp = await self._client.get(job.response_url, timeout=120.0)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise _status_error(e, f"{model_id} result") from e
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"fal {model_id} result fetch failed: {e}") from e
         body = parse_json(resp, f"fal {model_id} result")
         if not isinstance(body, dict):
@@ -285,9 +285,9 @@ class FalClient:
             try:
                 resp = await self._client.get(self.models_api_url, params=params, timeout=60.0)
                 resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
+            except httpx2.HTTPStatusError as e:
                 raise _status_error(e, f"listing {category}") from e
-            except httpx.HTTPError as e:
+            except httpx2.HTTPError as e:
                 raise UpstreamError(f"fal model API listing {category} failed: {e}") from e
             body = parse_json(resp, f"fal listing {category}")
             if not isinstance(body, dict):
@@ -342,9 +342,9 @@ class FalClient:
         try:
             resp = await self._client.get(self.models_api_url, params=params, timeout=60.0)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise _status_error(e, "the model API") from e
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"fal model API request failed: {e}") from e
         body = parse_json(resp, "fal the model API")
         if not isinstance(body, dict):

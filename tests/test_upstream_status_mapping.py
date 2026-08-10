@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-import httpx
+import httpx  # respx authors its mocks in v1 types; see tests/conftest.py
+import httpx2  # what bridge code actually raises and receives
 import pytest
 
 from openai_api_bridge.errors import (
@@ -197,13 +198,13 @@ def test_fal_auth_error_does_not_echo_the_upstream_body(status: int) -> None:
     """fal's own mapper had the same leak the shared one was fixed for."""
     from openai_api_bridge.backends.fal.client import _status_error
 
-    response = httpx.Response(
+    response = httpx2.Response(
         status,
         text="invalid credentials for key fal-key-SECRET123",
-        request=httpx.Request("GET", "https://fal.run/x"),
+        request=httpx2.Request("GET", "https://fal.run/x"),
     )
     err = _status_error(
-        httpx.HTTPStatusError("boom", request=response.request, response=response), "/x"
+        httpx2.HTTPStatusError("boom", request=response.request, response=response), "/x"
     )
 
     assert isinstance(err, UpstreamAuthError)
@@ -213,11 +214,11 @@ def test_fal_auth_error_does_not_echo_the_upstream_body(status: int) -> None:
 def test_fal_non_auth_error_still_carries_the_body() -> None:
     from openai_api_bridge.backends.fal.client import _status_error
 
-    response = httpx.Response(
-        500, text="internal explosion", request=httpx.Request("GET", "https://fal.run/x")
+    response = httpx2.Response(
+        500, text="internal explosion", request=httpx2.Request("GET", "https://fal.run/x")
     )
     err = _status_error(
-        httpx.HTTPStatusError("boom", request=response.request, response=response), "/x"
+        httpx2.HTTPStatusError("boom", request=response.request, response=response), "/x"
     )
 
     assert not isinstance(err, UpstreamAuthError)
@@ -360,11 +361,11 @@ def test_fal_maps_429_to_a_rate_limit_too() -> None:
     """fal keeps its own return-style mapper; its status semantics must not drift."""
     from openai_api_bridge.backends.fal.client import _status_error
 
-    response = httpx.Response(
-        429, text="too many requests", request=httpx.Request("GET", "https://fal.run/x")
+    response = httpx2.Response(
+        429, text="too many requests", request=httpx2.Request("GET", "https://fal.run/x")
     )
     err = _status_error(
-        httpx.HTTPStatusError("boom", request=response.request, response=response), "/x"
+        httpx2.HTTPStatusError("boom", request=response.request, response=response), "/x"
     )
 
     assert isinstance(err, RateLimited)

@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Any, NoReturn
 
-import httpx
+import httpx2
 
 from ..errors import (
     InvalidRequest,
@@ -25,10 +25,10 @@ _DEFAULT_FETCH_TIMEOUT_S = 120.0
 # and the bridge has exactly one — but the test suite runs each case in a fresh
 # loop, and a client carried across would hand out connections attached to a
 # closed one.
-_asset_client: httpx.AsyncClient | None = None
+_asset_client: httpx2.AsyncClient | None = None
 _asset_client_loop: asyncio.AbstractEventLoop | None = None
 
-# httpx defaults to a 5s keepalive expiry, which is shorter than the gap
+# httpx2 defaults to a 5s keepalive expiry, which is shorter than the gap
 # between almost every pair of asset fetches this bridge makes: image
 # generations are seconds to a minute apart, video minutes. At the default,
 # measurement showed a second connection opened after a 6s idle gap — i.e. the
@@ -40,27 +40,27 @@ _asset_client_loop: asyncio.AbstractEventLoop | None = None
 # win from sharing a client — building one costs ~2.5ms of blocking event-loop
 # time to construct an SSLContext and load the certifi bundle, which the
 # previous client-per-attempt paid on every fetch and every retry.
-_ASSET_LIMITS = httpx.Limits(
+_ASSET_LIMITS = httpx2.Limits(
     max_connections=100,
     max_keepalive_connections=20,
     keepalive_expiry=300.0,
 )
 
 
-def _asset_fetch_client() -> httpx.AsyncClient:
+def _asset_fetch_client() -> httpx2.AsyncClient:
     """The shared client used to download generated assets.
 
     Deliberately built with **no default headers**. Asset URLs point at public
     CDNs (fal.media, storage.imagerouter.io, OpenRouter's host), and the
     bridge's upstream ``Authorization`` header has no business being attached
     to them — some providers would log it. Keeping the client unauthenticated
-    is also what makes httpx's cross-origin header stripping on redirects a
+    is also what makes httpx2's cross-origin header stripping on redirects a
     non-question rather than something to reason about per provider.
     """
     global _asset_client, _asset_client_loop
     loop = asyncio.get_running_loop()
     if _asset_client is None or _asset_client_loop is not loop or _asset_client.is_closed:
-        _asset_client = httpx.AsyncClient(follow_redirects=True, limits=_ASSET_LIMITS)
+        _asset_client = httpx2.AsyncClient(follow_redirects=True, limits=_ASSET_LIMITS)
         _asset_client_loop = loop
     return _asset_client
 
@@ -117,10 +117,10 @@ def raise_for_upstream_status(*, status: int, body: str, provider: str, endpoint
     raise UpstreamError(f"{provider} {endpoint} returned {status}: {body}")
 
 
-def parse_json(resp: httpx.Response, what: str) -> Any:
+def parse_json(resp: httpx2.Response, what: str) -> Any:
     """Decode a JSON response body, reporting a non-JSON one as an upstream fault.
 
-    ``httpx``'s ``.json()`` raises ``ValueError``, which is not a
+    ``httpx2``'s ``.json()`` raises ``ValueError``, which is not a
     ``BridgeError`` — so an upstream answering 200 with HTML (a captive portal,
     a CDN error page, a WAF interstitial) would escape the per-provider
     handlers as an unhandled exception, surfacing as a 500 and a full
@@ -180,7 +180,7 @@ def _asset_too_large(provider_label: str, url: str, size: int, max_bytes: int) -
 
 
 async def _read_capped(
-    response: httpx.Response,
+    response: httpx2.Response,
     *,
     provider_label: str,
     url: str,
@@ -249,7 +249,7 @@ async def fetch_asset_with_retry(
 
     * **No auth leakage.** The shared client is unauthenticated, so the
       bridge's upstream ``Authorization`` header is never attached to a CDN
-      request, and httpx's cross-origin header-stripping on redirects can't
+      request, and httpx2's cross-origin header-stripping on redirects can't
       surprise us. See :func:`_asset_fetch_client`.
     * **Transient conditions.** A just-minted asset URL can briefly 401/404
       before storage catches up, CDNs occasionally 5xx or drop the connection,
@@ -265,7 +265,7 @@ async def fetch_asset_with_retry(
     gets by explicitly asking for it — the video-bearing providers pass their
     configured ceiling.
     """
-    last_error: httpx.HTTPError | None = None
+    last_error: httpx2.HTTPError | None = None
 
     for attempt in range(max_attempts):
         try:
@@ -277,7 +277,7 @@ async def fetch_asset_with_retry(
                 # Non-2xx, not merely >= 400. This replaced `raise_for_status()`,
                 # which raises on anything outside 2xx — and the difference is
                 # not academic. `follow_redirects=True` covers the ordinary
-                # redirect, but httpx only follows when the status is one of
+                # redirect, but httpx2 only follows when the status is one of
                 # 301/302/303/307/308 *and* a Location header is present. A 300,
                 # 304, 305 or 306, or a malformed 302 from a CDN or WAF with no
                 # Location, is left for us. Gated on `>= 400` those fell through
@@ -328,7 +328,7 @@ async def fetch_asset_with_retry(
                     max_bytes=max_bytes,
                 )
                 return data, content_type
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             last_error = e
             if attempt < max_attempts - 1:
                 delay = base_delay * (2**attempt)

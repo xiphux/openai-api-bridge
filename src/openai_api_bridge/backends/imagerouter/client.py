@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
+import httpx2
 
 from ...errors import UpstreamError
 from ...util.http import fetch_asset_with_retry, parse_json, raise_for_upstream_status
@@ -43,7 +43,7 @@ log = logging.getLogger(__name__)
 
 
 # ImageRouter generation can take a while — diffusion models on the slower
-# tier, or video on any tier, easily run past 60s. Default httpx timeouts
+# tier, or video on any tier, easily run past 60s. Default httpx2 timeouts
 # (5s read) would cut these short. The connect timeout stays low because
 # DNS / TLS handshake should always be fast; only the read side needs the
 # generous budget.
@@ -58,9 +58,9 @@ class ImageRouterClient:
         self.base_url = base_url.rstrip("/")
         self.max_asset_bytes = max_asset_bytes
         self._auth_headers = {"Authorization": f"Bearer {api_token}"}
-        self._client = httpx.AsyncClient(
+        self._client = httpx2.AsyncClient(
             headers=self._auth_headers,
-            timeout=httpx.Timeout(_DEFAULT_GENERATION_READ_TIMEOUT_S, connect=10.0),
+            timeout=httpx2.Timeout(_DEFAULT_GENERATION_READ_TIMEOUT_S, connect=10.0),
         )
 
     async def aclose(self) -> None:
@@ -81,14 +81,14 @@ class ImageRouterClient:
         try:
             resp = await self._client.get(f"{self.base_url}/v2/models", timeout=30.0)
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="ImageRouter",
                 endpoint="/v2/models",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ImageRouter /v2/models failed: {e}") from e
         body = parse_json(resp, "ImageRouter /v2/models")
         if not isinstance(body, list):
@@ -116,14 +116,14 @@ class ImageRouterClient:
                 f"{self.base_url}/v1/openai/images/generations", json=payload
             )
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="ImageRouter",
                 endpoint="/images/generations",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ImageRouter /images/generations failed: {e}") from e
         return _extract_first_url(
             parse_json(resp, "ImageRouter /images/generations"), "/images/generations"
@@ -167,14 +167,14 @@ class ImageRouterClient:
                 files=files,
             )
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="ImageRouter",
                 endpoint="/images/edits",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ImageRouter /images/edits failed: {e}") from e
         return _extract_first_url(parse_json(resp, "ImageRouter /images/edits"), "/images/edits")
 
@@ -195,7 +195,7 @@ class ImageRouterClient:
         ImageRouter's /videos/generations is synchronous — the HTTP request
         blocks until generation completes (can be minutes). The bridge's
         ``video_jobs`` runner already runs in the background and is happy
-        to await this call; the long timeout below is what keeps httpx
+        to await this call; the long timeout below is what keeps httpx2
         from giving up too early.
 
         With ``input_reference`` set, the request goes out as multipart
@@ -219,23 +219,23 @@ class ImageRouterClient:
                     f"{self.base_url}/v1/openai/videos/generations",
                     data=params,
                     files=[("image[]", (filename, input_reference, ct))],
-                    timeout=httpx.Timeout(_DEFAULT_VIDEO_READ_TIMEOUT_S, connect=10.0),
+                    timeout=httpx2.Timeout(_DEFAULT_VIDEO_READ_TIMEOUT_S, connect=10.0),
                 )
             else:
                 resp = await self._client.post(
                     f"{self.base_url}/v1/openai/videos/generations",
                     json=params,
-                    timeout=httpx.Timeout(_DEFAULT_VIDEO_READ_TIMEOUT_S, connect=10.0),
+                    timeout=httpx2.Timeout(_DEFAULT_VIDEO_READ_TIMEOUT_S, connect=10.0),
                 )
             resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="ImageRouter",
                 endpoint="/videos/generations",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ImageRouter /videos/generations failed: {e}") from e
         return _extract_first_url(
             parse_json(resp, "ImageRouter /videos/generations"), "/videos/generations"

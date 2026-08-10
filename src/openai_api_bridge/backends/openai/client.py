@@ -1,7 +1,7 @@
 """HTTP client for an upstream OpenAI-compatible server.
 
 Pure passthrough — request bodies and response bodies are forwarded with
-zero translation. The only thing this client does beyond a shared httpx is
+zero translation. The only thing this client does beyond a shared httpx2 is
 manage the optional Authorization header and surface upstream HTTP errors as
 typed bridge exceptions.
 
@@ -27,7 +27,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-import httpx
+import httpx2
 
 from ...errors import UpstreamError
 from ...util.http import parse_json, raise_for_upstream_status
@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 # "this is HTML". ``json.loads`` on bytes runs ``detect_encoding`` and handles
 # every one of them, so a body opening with a BOM is JSON as far as any client
 # that parses it is concerned — including the OpenAI SDK, which decodes via
-# httpx's ``.json()``. Listed rather than stripped because the big-endian
+# httpx2's ``.json()``. Listed rather than stripped because the big-endian
 # forms put a NUL before the ``{``, so stripping and re-testing for ``{``
 # would reject exactly the payloads this exists to admit.
 _UTF_BOMS = (
@@ -72,16 +72,16 @@ class OpenAIClient:
             headers["Authorization"] = f"Bearer {api_token}"
         # Use a generous default timeout for non-streaming calls; streaming
         # opens its own client with no read timeout.
-        self._client = httpx.AsyncClient(
+        self._client = httpx2.AsyncClient(
             headers=headers,
-            timeout=httpx.Timeout(request_timeout_seconds, connect=10.0),
+            timeout=httpx2.Timeout(request_timeout_seconds, connect=10.0),
         )
-        self._streaming_client = httpx.AsyncClient(
+        self._streaming_client = httpx2.AsyncClient(
             headers=headers,
             # Streaming chat completions can sit idle between tokens — disable
             # the read timeout so a slow token stream isn't mistaken for a
             # dead connection. Connect timeout still bounds initial setup.
-            timeout=httpx.Timeout(None, connect=10.0),
+            timeout=httpx2.Timeout(None, connect=10.0),
         )
 
     async def aclose(self) -> None:
@@ -97,14 +97,14 @@ class OpenAIClient:
         try:
             response = await self._client.get(f"{self.base_url}/v1/models")
             response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             raise_for_upstream_status(
                 status=e.response.status_code,
                 body=e.response.text[:300],
                 provider="Upstream",
                 endpoint="/v1/models",
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/models failed: {e}") from e
         body = parse_json(response, "Upstream /v1/models")
         return list(body.get("data", []))
@@ -120,7 +120,7 @@ class OpenAIClient:
         """
         try:
             response = await self._client.post(f"{self.base_url}/v1/chat/completions", json=body)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/chat/completions failed: {e}") from e
         return self._raw_body(response, "/v1/chat/completions")
 
@@ -141,7 +141,7 @@ class OpenAIClient:
                 "POST", f"{self.base_url}/v1/chat/completions", json=body
             )
             response = await self._streaming_client.send(req, stream=True)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/chat/completions stream failed to open: {e}") from e
 
         if response.status_code != 200:
@@ -171,13 +171,13 @@ class OpenAIClient:
         """
         try:
             response = await self._client.post(f"{self.base_url}/v1/embeddings", json=body)
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"Upstream /v1/embeddings failed: {e}") from e
         return self._raw_body(response, "/v1/embeddings")
 
     # --- helpers ----------------------------------------------------------
 
-    def _raw_body(self, response: httpx.Response, endpoint: str) -> bytes:
+    def _raw_body(self, response: httpx2.Response, endpoint: str) -> bytes:
         """The upstream's 200 body, forwarded whole; a typed error otherwise.
 
         Forwarding without decoding is the point — see the module docstring —

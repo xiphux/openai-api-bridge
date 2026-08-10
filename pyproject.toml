@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
   "aiosqlite>=0.22.1",
   "fastapi>=0.141.1",
-  "httpx>=0.28.1",
+  "httpx2>=2.10.0",
   "pydantic>=2.13.4",
   "pydantic-settings>=2.15.0",
   "python-multipart>=0.0.32",
@@ -33,17 +33,19 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-  # Starlette's TestClient imports httpx2 when it can and warns when it falls
-  # back to httpx, so this is the test client's dependency, not ours. The
-  # runtime still speaks httpx (see [project.dependencies]) because respx —
-  # what every upstream stub in tests/ is written against — hard-depends on
-  # httpx and patches its internals, so it cannot see httpx2 traffic. Both
-  # halves move together once respx grows fork support (lundberg/respx#324).
-  "httpx2>=2.10.0",
+  # respx mocks by patching httpcore, one layer below httpx, so it still
+  # authors mocks in httpx v1 types even when the traffic it intercepts is
+  # httpx2 — `return_value=` rejects an httpx2.Response outright
+  # (lundberg/respx#324). Tests therefore import both on purpose: httpx to
+  # build what respx returns, httpx2 for objects handed straight to src.
+  "httpx>=0.28.1",
   "mypy>=2.3.0",
   "pre-commit>=4.0.0",
   "pytest>=9.1.1",
   "pytest-asyncio>=1.4.0",
+  # Registers respx's httpcore2 mocker; see the DEFAULT_MOCKER note in
+  # tests/conftest.py for why that one line replaces 347 call-site edits.
+  "pytest-httpx2>=1.0.0",
   "respx>=0.23.1",
   # 0.16 expanded the default rule set and started formatting Python blocks in
   # Markdown; the floor keeps local runs matching the pinned pre-commit hook.

@@ -393,5 +393,5 @@ class Backend(ABC):
     # --- lifecycle -------------------------------------------------------
 
     async def aclose(self) -> None:
-        """Optional cleanup hook (e.g. close a shared httpx client)."""
+        """Optional cleanup hook (e.g. close a shared httpx2 client)."""
         return

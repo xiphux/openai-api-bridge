@@ -15,7 +15,7 @@ import time
 import uuid
 from typing import Any
 
-import httpx
+import httpx2
 
 from ...errors import GenerationTimeout, UpstreamAuthError, UpstreamError, WorkflowInvalid
 from ...util.http import parse_json
@@ -70,13 +70,13 @@ class ComfyUIClient:
         self.max_poll_interval = max(max_poll_interval_seconds, poll_interval_seconds)
         self.request_timeout = request_timeout_seconds
         # Every other adapter configures its client explicitly; this one
-        # inherited httpx's 5s default for anything not passing a per-call
+        # inherited httpx2's 5s default for anything not passing a per-call
         # timeout. That's a tight *connect* budget for a self-hosted box that
         # can be slow to accept while loading a model, and it left any future
         # call site that forgets an explicit timeout on a different budget
         # from the rest of the bridge.
-        self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(request_timeout_seconds, connect=10.0),
+        self._client = httpx2.AsyncClient(
+            timeout=httpx2.Timeout(request_timeout_seconds, connect=10.0),
         )
 
     async def aclose(self) -> None:
@@ -97,7 +97,7 @@ class ComfyUIClient:
             response.raise_for_status()
             result = parse_json(response, "ComfyUI image upload")
             return str(result.get("name", filename))
-        except httpx.HTTPStatusError as e:
+        except httpx2.HTTPStatusError as e:
             status = e.response.status_code
             if status in (401, 403):
                 # The same rule submit_prompt already applied, on the same
@@ -117,7 +117,7 @@ class ComfyUIClient:
                     f"ComfyUI rejected our credentials ({status}) on /upload/image"
                 ) from e
             raise UpstreamError(f"ComfyUI image upload returned {status}") from e
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ComfyUI image upload failed: {e}") from e
 
     async def submit_prompt(self, workflow: dict[str, Any]) -> str:
@@ -136,7 +136,7 @@ class ComfyUIClient:
                 json={"prompt": workflow, "client_id": uuid.uuid4().hex},
                 timeout=self.request_timeout,
             )
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ComfyUI /prompt failed: {e}") from e
 
         if response.status_code == 200:
@@ -250,9 +250,9 @@ class ComfyUIClient:
                     if prompt_id in history:
                         return dict(history[prompt_id])
             except (
-                httpx.ReadTimeout,
-                httpx.ConnectError,
-                httpx.RemoteProtocolError,
+                httpx2.ReadTimeout,
+                httpx2.ConnectError,
+                httpx2.RemoteProtocolError,
                 UpstreamError,  # includes a non-JSON 200 from a proxy hiccup
             ) as e:
                 log.debug("Transient history poll error (will retry): %s", type(e).__name__)
@@ -264,9 +264,9 @@ class ComfyUIClient:
                         queue_url, prompt_id, per_request_timeout
                     )
                 except (
-                    httpx.ReadTimeout,
-                    httpx.ConnectError,
-                    httpx.RemoteProtocolError,
+                    httpx2.ReadTimeout,
+                    httpx2.ConnectError,
+                    httpx2.RemoteProtocolError,
                 ) as e:
                     # Don't fail just because the queue check itself was flaky;
                     # the main loop will retry on the next interval. Don't
@@ -360,7 +360,7 @@ class ComfyUIClient:
                 timeout=60.0,
             )
             response.raise_for_status()
-        except httpx.HTTPError as e:
+        except httpx2.HTTPError as e:
             raise UpstreamError(f"ComfyUI /view fetch failed: {e}") from e
 
         content_type = (

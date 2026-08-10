@@ -29,7 +29,7 @@ async def drain_lingering() -> None:
     """Stop orphaned catalogue fetches. Called from the app's shutdown path.
 
     Ordered *before* the dispatcher closes its backends: these tasks are
-    awaiting on an httpx client ``BackendDispatcher.aclose`` is about to close
+    awaiting on an httpx2 client ``BackendDispatcher.aclose`` is about to close
     underneath them, which fails silently since ``_entries_for`` swallows
     everything — and the loop would otherwise be torn down with them pending.
     """
@@ -46,7 +46,7 @@ async def _entries_for(provider_id: str, backend: Backend) -> list[ModelEntry]:
         return []
     except Exception:
         # Same intent, but the guarantee can't rest on every adapter
-        # remembering to wrap its upstream errors: a bare httpx error or an
+        # remembering to wrap its upstream errors: a bare httpx2 error or an
         # unexpected catalogue shape would otherwise 500 the whole endpoint
         # and take every healthy provider's models with it.
         log.exception("Provider %r list_models raised an unexpected error", provider_id)
