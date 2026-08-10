@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +82,17 @@ class Database:
 
         Takes the write lock, so this can't commit a ``transaction()`` block
         that another task has open — see that method.
+
+        The statement and the commit are two separate awaits, so this has the
+        same cancellation window ``transaction()`` does and closes it the same
+        way. aiosqlite queues the statement onto its worker thread; cancelling
+        the awaiting task doesn't cancel the SQL, so without the rollback a
+        cancellation landing between the two would release the lock with the
+        statement sitting in an open transaction, for the next writer's commit
+        to adopt. This is the busier of the two write paths — every
+        ``JobStore.update``, ``FileStore.put`` and ``_touch`` goes through it —
+        and video jobs are routinely cancelled mid-flight by
+        ``DELETE /v1/videos/{id}`` and by the scheduler's shutdown timeout.
         """
         if self._writer is not None and self._writer is asyncio.current_task():
             raise RuntimeError(
@@ -90,8 +101,13 @@ class Database:
                 "context manager yields instead."
             )
         async with self._write_lock:
-            await self.conn.execute(sql, params)
-            await self.conn.commit()
+            try:
+                await self.conn.execute(sql, params)
+                await self.conn.commit()
+            except BaseException:
+                with suppress(Exception):
+                    await self.conn.rollback()
+                raise
 
     async def fetchone(self, sql: str, params: Sequence[Any] = ()) -> aiosqlite.Row | None:
         async with self.conn.execute(sql, params) as cur:
@@ -121,8 +137,22 @@ class Database:
             try:
                 yield self.conn
                 await self.conn.commit()
-            except Exception:
-                await self.conn.rollback()
+            except BaseException:
+                # BaseException, not Exception, because CancelledError is the
+                # case that matters most here. A cancelled block — the video
+                # runner being cancelled by DELETE /v1/videos/{id}, or the
+                # scheduler's shutdown timeout — would otherwise leave its
+                # statements uncommitted on the shared connection while the
+                # lock is released, and the next writer's commit would adopt
+                # them. That is precisely the failure the lock above exists to
+                # prevent, arriving by the one path `except Exception` let
+                # through.
+                #
+                # A failing rollback is suppressed rather than replacing the
+                # error we're unwinding with: the caller needs to see why the
+                # block actually failed.
+                with suppress(Exception):
+                    await self.conn.rollback()
                 raise
             finally:
                 self._writer = None

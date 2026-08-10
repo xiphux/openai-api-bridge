@@ -90,6 +90,68 @@ async def test_concurrent_transactions_are_serialized(tdb: Database) -> None:
     assert await _rows(tdb) == {"x-a", "x-b", "y-a", "y-b", "z-a", "z-b"}
 
 
+async def test_a_cancelled_transaction_is_rolled_back(tdb: Database) -> None:
+    """CancelledError is a BaseException, so `except Exception` never saw it.
+
+    A block cancelled between its statements and its commit would release the
+    lock with an open transaction on the shared connection, and the next
+    writer's commit would adopt the abandoned rows — the exact failure the
+    lock exists to prevent, reached by the one path that skipped the rollback.
+    """
+    started = asyncio.Event()
+
+    async def cancelled_transaction() -> None:
+        async with tdb.transaction() as conn:
+            await conn.execute("INSERT INTO t (id) VALUES ('abandoned')")
+            started.set()
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(cancelled_transaction())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # The next writer must not inherit the cancelled block's row.
+    await tdb.execute("INSERT INTO t (id) VALUES ('next-writer')")
+    assert await _rows(tdb) == {"next-writer"}
+
+
+async def test_a_cancelled_execute_does_not_leave_a_write_for_the_next_committer(
+    tdb: Database,
+) -> None:
+    """`execute()` has the same two-await window `transaction()` does.
+
+    aiosqlite queues the statement onto its worker thread, so cancelling the
+    awaiting task doesn't cancel the SQL. Without a rollback the lock is
+    released with that statement in an open transaction, and whichever writer
+    commits next adopts a write its caller believes was cancelled.
+    """
+    started = asyncio.Event()
+    real_commit = tdb.conn.commit
+
+    async def slow_commit() -> None:
+        # Widen the window between the statement and its commit so the
+        # cancellation lands inside it deterministically.
+        started.set()
+        await asyncio.sleep(3600)
+        await real_commit()
+
+    async def cancelled_write() -> None:
+        await tdb.execute("INSERT INTO t (id) VALUES ('cancelled')")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(tdb.conn, "commit", slow_commit)
+        task = asyncio.create_task(cancelled_write())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    await tdb.execute("INSERT INTO t (id) VALUES ('next-writer')")
+    assert await _rows(tdb) == {"next-writer"}
+
+
 async def test_execute_inside_transaction_raises_rather_than_deadlocking(
     tdb: Database,
 ) -> None:
