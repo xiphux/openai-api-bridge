@@ -33,6 +33,13 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+  # Starlette's TestClient imports httpx2 when it can and warns when it falls
+  # back to httpx, so this is the test client's dependency, not ours. The
+  # runtime still speaks httpx (see [project.dependencies]) because respx —
+  # what every upstream stub in tests/ is written against — hard-depends on
+  # httpx and patches its internals, so it cannot see httpx2 traffic. Both
+  # halves move together once respx grows fork support (lundberg/respx#324).
+  "httpx2>=2.10.0",
   "mypy>=2.3.0",
   "pre-commit>=4.0.0",
   "pytest>=9.1.1",
