@@ -14,8 +14,8 @@ its parent's concern. Packages Dependabot groups together
 (.github/dependabot.yml) share one issue, since they upgrade together. An
 issue's body is refreshed when a newer major appears, and it is closed once
 nothing in it is behind a major any more. Issues are matched by a marker
-comment in the body, and a title edited by hand is kept until a newer major
-changes the issue.
+comment in the body, and a title edited by hand is kept until the issue's body
+next changes (a newer major, or a new locked version in its table).
 
 "Major" is Dependabot's definition, the first version component, so this and
 the `ignore` rule cover exactly the same updates. A 0.x minor (0.23 -> 0.24) is
@@ -183,7 +183,8 @@ def main(argv: list[str]) -> int:
             print(f"Opened: {title}")
         elif normalized_text(existing["body"]) != normalized_text(body):
             # The title is only rewritten along with a body change (a newer
-            # major), so a title someone edited stays put until there is news.
+            # major, or a minor/patch moving the locked version), so a title
+            # someone edited stays put until there is news.
             gh("issue", "edit", str(existing["number"]), "--title", title, "--body", body)
             print(f"Updated #{existing['number']}: {title}")
         else:

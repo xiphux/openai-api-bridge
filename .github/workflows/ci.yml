@@ -64,7 +64,7 @@ jobs:
       - name: pre-commit
         run: uv run --frozen pre-commit run --all-files --show-diff-on-failure
 
-      # Strict mode, as configured in pyproject.toml. `if: always()` so a lint
+      # Strict mode, as configured in pyproject.toml. `!cancelled()` so a lint
       # nit doesn't hide a type error in the same run. This matters most for
       # Dependabot: pydantic, fastapi and starlette minors routinely change
       # their annotations without changing runtime behaviour tests would see.
