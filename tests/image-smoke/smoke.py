@@ -5,8 +5,9 @@ its ``--no-dev`` venv — never the developer's. Not a pytest module (nothing
 here is collected); every check raises on failure, so a clean exit is the pass.
 
 What this exists to catch is what the test suite structurally cannot: tests
-run on a full dev install on glibc, while the image installs ``--no-dev`` on
-Alpine/musl. So:
+run on a full dev install on glibc with every upstream mocked below httpx2,
+while the image installs ``--no-dev`` on Alpine/musl and talks to real sockets.
+So:
 
 * every module under ``openai_api_bridge`` must import, which fails if source
   imports something that is only a dev dependency (``httpx`` is one, on
@@ -14,7 +15,10 @@ Alpine/musl. So:
 * every native extension must load and do real work, which fails if a release
   dropped its musllinux wheel or shipped a broken one;
 * the running server must parse a real multipart body and answer through the
-  bridge's own error envelope, not a 500.
+  bridge's own error envelope, not a 500;
+* the OpenAI passthrough must reach run.sh's stub upstream over the network:
+  httpx2's real transport, a stream uvicorn forwards as it arrives rather than
+  buffering, and an unreachable upstream answered with a 502.
 """
 
 from __future__ import annotations
@@ -120,12 +124,77 @@ async def check_server_over_httpx2() -> None:
     print(f"server answered /v1/models and a multipart edit ({r.status_code})")
 
 
+async def check_passthrough_over_the_network() -> None:
+    """The bridge's outbound path, end to end, against run.sh's stub upstream.
+
+    Nothing in pytest reaches this code: every backend test mocks httpx2's
+    transport, so httpcore2, h11 and the socket layer only ever run here — and
+    neither does uvicorn forwarding a response while the upstream is still
+    sending it.
+    """
+    import time
+
+    import httpx2
+
+    key = os.environ["BRIDGE_API_KEY"]
+    auth = {"Authorization": f"Bearer {key}"}
+    chat = {"messages": [{"role": "user", "content": "ping"}]}
+    async with httpx2.AsyncClient(base_url=BASE_URL, timeout=20) as client:
+        r = await client.get("/v1/models", headers=auth)
+        assert r.status_code == 200, (r.status_code, r.text)
+        ids = [m["id"] for m in r.json()["data"]]
+        assert "stub/stub-model" in ids, ids
+
+        r = await client.post(
+            "/v1/chat/completions", headers=auth, json={**chat, "model": "stub/stub-model"}
+        )
+        assert r.status_code == 200, (r.status_code, r.text)
+        assert r.json()["choices"][0]["message"]["content"] == "pong", r.text
+
+        # The stub pauses between events. A forwarded stream delivers the first
+        # event well before the last; a buffered one delivers everything at
+        # once, after all the pauses.
+        started = time.monotonic()
+        first_at: float | None = None
+        received = b""
+        async with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers=auth,
+            json={**chat, "model": "stub/stub-model", "stream": True},
+        ) as r:
+            assert r.status_code == 200, r.status_code
+            assert r.headers["content-type"].startswith("text/event-stream"), r.headers
+            async for chunk in r.aiter_bytes():
+                if first_at is None and b"Hello" in received + chunk:
+                    first_at = time.monotonic() - started
+                received += chunk
+        total = time.monotonic() - started
+        for text in (b"Hello", b" from", b" upstream", b"[DONE]"):
+            assert text in received, received
+        assert first_at is not None
+        assert total - first_at >= 0.75, (
+            f"stream was buffered: first event at {first_at:.2f}s, end at {total:.2f}s"
+        )
+
+        r = await client.post(
+            "/v1/chat/completions", headers=auth, json={**chat, "model": "down/stub-model"}
+        )
+        assert r.status_code == 502, (r.status_code, r.text)
+        assert r.json()["error"]["code"] == "upstream_error", r.text
+    print(
+        "passthrough: JSON, a stream forwarded as it arrived "
+        f"(first event {first_at:.2f}s of {total:.2f}s), and a 502 for a dead upstream"
+    )
+
+
 def main() -> int:
     check_every_module_imports()
     check_dev_dependencies_absent()
     check_native_extensions()
     asyncio.run(check_aiosqlite())
     asyncio.run(check_server_over_httpx2())
+    asyncio.run(check_passthrough_over_the_network())
     print(json.dumps({"python": sys.version.split()[0], "platform": sys.platform}))
     return 0
 

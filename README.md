@@ -608,7 +608,7 @@ and ruff from `uv.lock`.
 | Tests | `pytest --cov`: fails on any warning, and below the branch-coverage floor in `pyproject.toml` |
 | Workflow + Dockerfile lint | actionlint, zizmor, hadolint |
 | Dependency audit | `pip-audit` over the production (`--no-dev`) lock |
-| Docker image smoke | builds amd64 + arm64, boots amd64 and serves requests, import-checks both from the image's own venv |
+| Docker image smoke | builds amd64 + arm64; boots amd64 and serves requests, including the OpenAI passthrough against a stub upstream over a real network (JSON, streaming, unreachable upstream); import-checks both from the image's own venv |
 | Secret scan | gitleaks over the tested commit's history |
 
 Dependabot proposes GitHub Actions, `uv` and pre-commit updates daily, each

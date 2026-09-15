@@ -24,8 +24,9 @@
 #              envelope and multipart forms; mypy strict covers its typing;
 #              the image smoke serves requests through it
 #   uvicorn    the image smoke boots the real server under uvicorn and serves
-#              HTTP through it (tests/image-smoke), on both architectures'
-#              native extensions (uvloop, httptools)
+#              HTTP through it (tests/image-smoke), including an SSE stream it
+#              must forward as it arrives rather than buffer, on both
+#              architectures' native extensions (uvloop, httptools)
 #   aiosqlite  the infra fixtures run a real SQLite per test (migrations,
 #              JobStore, FileStore, eviction); the image smoke boots on a
 #              fresh database
