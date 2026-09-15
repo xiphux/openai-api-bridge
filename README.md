@@ -423,8 +423,9 @@ Tag conventions published by the workflow:
 | `main`             | every push to `main` | bleeding edge / dev integration |
 | `sha-abc1234`      | every build | rollback / audit |
 
-Dependabot's auto-merges push to `main` with the workflow token, which starts
-no workflows, so `main` doesn't move for them until the next ordinary push.
+Dependabot's auto-merges land on `main` with the workflow token, which starts
+no workflows, so the `main` image tag doesn't pick them up until the next
+ordinary push republishes it.
 
 State (SQLite + cached files) lives in the named volume `bridge-state`.
 
@@ -615,8 +616,9 @@ green if every update in it is a patch, a minor outside 0.x, or a 0.x minor of
 an allowlisted package whose breakage a test would catch — and only if the PR
 already contains `main`'s tip. A PR held only for being behind `main` isn't
 rebased automatically unless it conflicts; comment `@dependabot rebase` on it
-and CI plus the merge decision run again. Everything else stays open for review; the
-header of that workflow has the full rule and the allowlist's reasons. Majors
+and CI plus the merge decision run again. Everything else stays open for
+review; the header of that workflow has the full rule and the allowlist's
+reasons. Majors
 of Python dependencies aren't proposed at all: `upgrade-check.yml` keeps one
 issue open per available major instead. GitHub Actions and pre-commit majors
 do arrive as PRs, which stay open for review like any other held update.

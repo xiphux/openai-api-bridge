@@ -48,7 +48,8 @@ dev = [
   "pytest-httpx2>=1.0.0",
   "respx>=0.23.1",
   # 0.16 expanded the default rule set and started formatting Python blocks in
-  # Markdown; the floor keeps local runs matching the pinned pre-commit hook.
+  # Markdown. pre-commit and CI both run this ruff from uv.lock (see
+  # .pre-commit-config.yaml), so the floor only keeps a re-lock from going back.
   "ruff>=0.16.2",
 ]
 

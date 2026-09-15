@@ -10,6 +10,10 @@
 #     dependabot-automerge.yml listens for (by this workflow's name, `CI`).
 #   - Indirect via `workflow_call` from docker.yml on `main` pushes and
 #     `v*.*.*` tags, so publishing is gated on exactly these jobs.
+#
+# Don't rename: dependabot-automerge.yml listens for `workflow_run` of a
+# workflow NAMED `CI`, and nothing (actionlint included) flags the mismatch —
+# auto-merge would just silently stop firing.
 name: CI
 
 on:

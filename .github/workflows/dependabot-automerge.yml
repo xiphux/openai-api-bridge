@@ -115,9 +115,9 @@ jobs:
           # human pushing a fix onto it), that verdict is for a different tree.
           if [ "$head" != "$SHA" ]; then echo "PR #$pr head moved past $SHA - skipping"; exit 0; fi
           if [ "$author" != "app/dependabot" ]; then echo "PR #$pr not opened by Dependabot ($author)"; exit 0; fi
-          committer=$(gh api "repos/$REPO/commits/$SHA" --jq '.author.login // empty')
-          if [ "$committer" != "dependabot[bot]" ]; then
-            echo "Head commit authored by '$committer', not Dependabot - manual review"; exit 0
+          commit_author=$(gh api "repos/$REPO/commits/$SHA" --jq '.author.login // empty')
+          if [ "$commit_author" != "dependabot[bot]" ]; then
+            echo "Head commit authored by '$commit_author', not Dependabot - manual review"; exit 0
           fi
 
           # The tree that lands must be the tree CI tested (see the header).
