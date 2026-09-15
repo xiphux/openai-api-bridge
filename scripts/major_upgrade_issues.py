@@ -158,16 +158,18 @@ def main(argv: list[str]) -> int:
     direct = direct_dependencies(Path("pyproject.toml"))
     pending = pending_upgrades(outdated, direct, dependabot_groups(Path(".github/dependabot.yml")))
 
-    by_key: dict[str, dict[str, Any]] = {}
     if not dry_run:
         label = ["label", "create", LABEL, "--force", "--color", "d4c5f9"]
         gh(*label, "--description", "A major version upgrade is available")
-        listing = ["issue", "list", "--label", LABEL, "--state", "open", "--limit", "200"]
-        issues = json.loads(gh(*listing, "--json", "number,title,body"))
-        for issue in issues:
-            match = re.search(rf"<!-- {LABEL}:(.+?) -->", issue["body"])
-            if match:
-                by_key[match.group(1)] = issue
+
+    # Read even on a dry run (listing changes nothing), so the preview shows
+    # which issues would be updated or closed, not only which would open.
+    by_key: dict[str, dict[str, Any]] = {}
+    listing = ["issue", "list", "--label", LABEL, "--state", "open", "--limit", "200"]
+    for issue in json.loads(gh(*listing, "--json", "number,title,body")):
+        match = re.search(rf"<!-- {LABEL}:(.+?) -->", issue["body"])
+        if match:
+            by_key[match.group(1)] = issue
 
     for key, packages in pending.items():
         title, body = issue_for(key, packages)
@@ -189,6 +191,9 @@ def main(argv: list[str]) -> int:
 
     for key, issue in by_key.items():
         if key in pending:
+            continue
+        if dry_run:
+            print(f"close: #{issue['number']} {issue['title']}")
             continue
         comment = "Closing: nothing here is behind a major version any more."
         gh("issue", "close", str(issue["number"]), "--comment", comment)
