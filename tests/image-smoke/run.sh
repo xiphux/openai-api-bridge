@@ -76,9 +76,14 @@ docker run -d --name "$name" \
 	-v "$here:/smoke:ro" \
 	"$image" >/dev/null
 
+# Every curl is bounded: a server that accepts the connection but never
+# answers would otherwise hang one call forever, and the 60-try budget below
+# would never get to count.
+curl_bounded() { curl --max-time 5 "$@"; }
+
 echo "--- waiting for the server"
 for _ in $(seq 1 60); do
-	if curl -fsS -o /dev/null -H "Authorization: Bearer $key" "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
+	if curl_bounded -fsS -o /dev/null -H "Authorization: Bearer $key" "http://127.0.0.1:$port/v1/models" 2>/dev/null; then
 		break
 	fi
 	if [ "$(docker inspect -f '{{.State.Running}}' "$name")" != true ]; then
@@ -87,10 +92,10 @@ for _ in $(seq 1 60); do
 	fi
 	sleep 1
 done
-curl -fsS -o /dev/null -H "Authorization: Bearer $key" "http://127.0.0.1:$port/v1/models"
+curl_bounded -fsS -o /dev/null -H "Authorization: Bearer $key" "http://127.0.0.1:$port/v1/models"
 
 echo "--- unauthenticated request is refused"
-status=$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/v1/models")
+status=$(curl_bounded -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/v1/models")
 if [ "$status" != 401 ]; then
 	echo "::error::expected 401 without a key, got $status"
 	exit 1
