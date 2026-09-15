@@ -1,4 +1,24 @@
 repos:
+  # Secrets first: a leaked token is the one mistake a later commit can't undo.
+  # Scans only what's staged, so it costs milliseconds. GitHub push protection
+  # and CI's `secrets` job (a scan of the tested commit's full history) back
+  # this up, which is why a machine without gitleaks gets a warning rather than
+  # a blocked commit — CI runs this file too, and its runner has no gitleaks.
+  # A false positive is allowed with a trailing `gitleaks:allow` comment on the
+  # flagged line; history lives in .gitleaksignore.
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (staged)
+        language: system
+        entry: >-
+          bash -c 'if command -v gitleaks >/dev/null 2>&1; then
+          exec gitleaks git --pre-commit --staged --redact --no-banner --verbose --log-level warn;
+          else echo "warning: gitleaks not installed; skipping the staged secret scan (brew install gitleaks)" >&2;
+          fi'
+        pass_filenames: false
+        always_run: true
+
   # Generic file-level checks (no language dependency)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -9,10 +29,22 @@ repos:
       - id: check-toml
       - id: check-added-large-files
 
-  # Ruff: lightning-fast Python linter + formatter (matches pyproject.toml config)
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.2
+  # Ruff runs from the project venv, not from astral-sh/ruff-pre-commit. That
+  # hook pins its own ruff in `rev:`, a second version beside uv.lock's: a
+  # Dependabot bump of ruff in uv.lock would pass CI while CI kept linting with
+  # the old one, and the two drift apart the moment either moves alone. One
+  # version, in uv.lock, is what both local commits and CI run.
+  - repo: local
     hooks:
-      - id: ruff # linter (pycodestyle, pyflakes, isort, bugbear, etc.)
-        args: [--fix]
-      - id: ruff-format # formatter (like Prettier)
+      - id: ruff-check
+        name: ruff check
+        language: system
+        entry: uv run --frozen ruff check --fix --force-exclude
+        types_or: [python, pyi, jupyter]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        language: system
+        entry: uv run --frozen ruff format --force-exclude
+        types_or: [python, pyi, jupyter]
+        require_serial: true

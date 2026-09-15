@@ -1,0 +1,18 @@
+# Historical gitleaks findings, each checked and judged a false positive.
+# Format: <commit>:<file>:<rule>:<line>. A finding in the current tree is
+# allowed inline with a trailing `gitleaks:allow` comment instead, which
+# survives edits that shift line numbers; this file only holds commits that
+# can't be edited.
+#
+# BridgeSettings whitespace-trimming tests: the fixture API key is the literal
+# "0123456789abcdef" (the 16-character minimum), padded with spaces. Not a
+# credential for anything.
+8ceab272de2ed4958d9ed950d13456c53d931567:tests/test_dispatcher_and_config.py:generic-api-key:49
+8ceab272de2ed4958d9ed950d13456c53d931567:tests/test_dispatcher_and_config.py:generic-api-key:50
+8ceab272de2ed4958d9ed950d13456c53d931567:tests/test_dispatcher_and_config.py:generic-api-key:59
+8ceab272de2ed4958d9ed950d13456c53d931567:tests/test_dispatcher_and_config.py:generic-api-key:60
+c35351dbe229f934322d4ebd620b51652fc0ca1e:tests/test_dispatcher_and_config.py:generic-api-key:64
+c35351dbe229f934322d4ebd620b51652fc0ca1e:tests/test_dispatcher_and_config.py:generic-api-key:65
+c35351dbe229f934322d4ebd620b51652fc0ca1e:tests/test_dispatcher_and_config.py:generic-api-key:233
+c35351dbe229f934322d4ebd620b51652fc0ca1e:tests/test_dispatcher_and_config.py:generic-api-key:234
+c35351dbe229f934322d4ebd620b51652fc0ca1e:tests/test_dispatcher_and_config.py:generic-api-key:241
