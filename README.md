@@ -615,5 +615,6 @@ green if every update in it is a patch, a minor outside 0.x, or a 0.x minor of
 an allowlisted package whose breakage a test would catch — and only if the PR
 already contains `main`'s tip. Everything else stays open for review; the
 header of that workflow has the full rule and the allowlist's reasons. Majors
-aren't proposed at all: `upgrade-check.yml` keeps one issue open per available
-major instead.
+of Python dependencies aren't proposed at all: `upgrade-check.yml` keeps one
+issue open per available major instead. GitHub Actions and pre-commit majors
+do arrive as PRs, which stay open for review like any other held update.
