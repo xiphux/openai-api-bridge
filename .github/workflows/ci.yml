@@ -55,8 +55,14 @@ jobs:
         with:
           enable-cache: true
 
+      # --locked, not --frozen: fail if uv.lock no longer matches
+      # pyproject.toml. --frozen installs the lock as-is without checking, so
+      # a pyproject edit committed without `uv lock` would pass every job while
+      # testing (and the Dockerfile shipping) the old resolution. Dependabot
+      # edits both together; this is for hand edits. Once this step passes, the
+      # --frozen runs below and in other jobs are installing a verified lock.
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
 
       # ruff (check + format, from uv.lock) and the file-hygiene hooks. The
       # gitleaks hook in there only warns on a runner; the `secrets` job below
