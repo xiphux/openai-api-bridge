@@ -94,8 +94,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      # --cov applies [tool.coverage] from pyproject.toml, including the
+      # branch-coverage floor (fail_under), which fails this step on its own.
       - name: pytest
-        run: uv run --frozen pytest -v
+        run: uv run --frozen pytest -v --cov
 
   # Its own job rather than steps in `static`: it needs no `uv sync`, so it
   # finishes in seconds. actionlint catches workflow mistakes (bad expressions,

@@ -583,6 +583,7 @@ Only `positive_prompt_node` is required:
 
 ```bash
 uv run pytest                # full suite
+uv run pytest --cov          # with branch coverage + the floor CI enforces
 uv run pytest -m live        # opt-in live tests against real backends (not yet wired)
 uv run ruff check .          # lint
 uv run mypy src              # type-check (strict)
@@ -604,7 +605,7 @@ and ruff from `uv.lock`.
 | Job | What it checks |
 |---|---|
 | Lint + format + type-check | pre-commit (ruff, file hygiene) and `mypy src` |
-| Tests | `pytest` |
+| Tests | `pytest --cov`: fails on any warning, and below the branch-coverage floor in `pyproject.toml` |
 | Workflow + Dockerfile lint | actionlint, zizmor, hadolint |
 | Dependency audit | `pip-audit` over the production (`--no-dev`) lock |
 | Docker image smoke | builds amd64 + arm64, boots amd64 and serves requests, import-checks both from the image's own venv |

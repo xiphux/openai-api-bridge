@@ -45,6 +45,7 @@ dev = [
   "pytest-asyncio>=1.4.0",
   # Registers respx's httpcore2 mocker; see the DEFAULT_MOCKER note in
   # tests/conftest.py for why that one line replaces 347 call-site edits.
+  "pytest-cov>=7.1.0",
   "pytest-httpx2>=1.0.0",
   "respx>=0.23.1",
   # 0.16 expanded the default rule set and started formatting Python blocks in
@@ -88,6 +89,20 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
   "live: tests that require live ComfyUI and/or Venice (opt-in via -m live)",
 ]
+
+# Read only when pytest runs with --cov (CI's `tests` job, or
+# `uv run pytest --cov` locally); a plain `uv run pytest` skips coverage.
+[tool.coverage.run]
+source = ["openai_api_bridge"]
+branch = true
+
+[tool.coverage.report]
+# A floor, not a target: CI fails if total branch coverage drops below it.
+# Raise it when coverage rises, so it holds new ground; never lower it to get
+# a change through — cover the change instead.
+fail_under = 88
+skip_covered = true
+show_missing = true
 
 [tool.mypy]
 python_version = "3.12"

@@ -21,6 +21,7 @@ uv sync                      # install (creates .venv); add --frozen --no-dev fo
 uv run openai-api-bridge     # run the server (needs BRIDGE_API_KEY in env)
 
 uv run pytest                # full suite
+uv run pytest --cov          # with branch coverage + the floor CI enforces
 uv run pytest -m live        # opt-in live tests against real backends (marker only; not yet wired)
 uv run pytest tests/test_video_lifecycle.py::test_name   # single test
 uv run ruff check .          # lint
