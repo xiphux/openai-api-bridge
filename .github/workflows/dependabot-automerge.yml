@@ -2,22 +2,84 @@
 #
 # Standalone + workflow_run on purpose: embedding this in the CI workflow made
 # that (reusable) workflow request contents/pull-requests write, which exceeds
-# what its callers (docker/deploy/publish) grant and invalidated the workflow.
-# Running AFTER CI completes keeps write-permissions out of the CI workflow.
-# It also runs from the trusted default branch, not PR code.
+# what its caller (docker.yml) grants and invalidated the workflow. Running
+# AFTER CI completes keeps write-permissions out of the CI workflow. It also
+# runs from the trusted default branch, not PR code — nothing here checks out
+# or executes anything from the PR.
 #
-# Safe = same major version, excluding 0.x minor bumps (which can break, e.g.
-# esbuild). Genuine majors and 0.x-minors are left open for manual review.
+# Safe = EVERY update in the PR is a semver patch, or a minor outside 0.x, or a
+# 0.x minor of a package on ZERO_X_MINOR_OK (below). A 0.0.x patch counts as a
+# patch (python-multipart is the case today; its parsing is exercised by the
+# image-edit tests in test_endpoints.py and the provider integration tests,
+# test_body_limits.py, and the image smoke's multipart edit).
+# Held for manual review: majors, other 0.x minors, anything that isn't a plain
+# release version (PEP 440 pre/post/dev releases — `2.0.0rc1`, `1.2.3.post1` —
+# and npm-style `-rc.1`), and anything whose metadata can't be read.
+#
+# ZERO_X_MINOR_OK names 0.x packages whose minors CI can actually judge, because
+# a real-library test sits on the path a breaking minor would break. Adding a
+# name means naming that test, here:
+#   fastapi    every router runs for real through the `client` fixture
+#              (tests/conftest.py): routing, validation, auth, the error
+#              envelope and multipart forms; mypy strict covers its typing;
+#              the image smoke serves requests through it
+#   uvicorn    the image smoke boots the real server under uvicorn and serves
+#              HTTP through it (tests/image-smoke), on both architectures'
+#              native extensions (uvloop, httptools)
+#   aiosqlite  the infra fixtures run a real SQLite per test (migrations,
+#              JobStore, FileStore, eviction); the image smoke boots on a
+#              fresh database
+#   respx      dev-only. Every upstream stub in the suite goes through it, and
+#              an unmocked request raises rather than passing through, so a
+#              minor that broke mocking fails loudly instead of testing nothing
+#   ruff       dev-only. A minor that adds a rule or changes formatting fails
+#              pre-commit, which holds the PR by going red; one that only
+#              loosens a rule is the uncovered case, and low stakes
+#
+# The verdict comes from the `updated-dependencies:` YAML block Dependabot
+# writes into its commit message, not from the PR title. The title only names
+# a version pair for single-dependency PRs; a grouped PR ("bump the respx
+# group with 2 updates") has none.
+#
+# That block carries `update-type` only for scheduled version updates; security
+# updates omit it (#17, httpx2, is one). For those, the bump is read off the
+# body's "Bumps [name](…) from A to B." / "Updates `name` from A to B" line,
+# the same fallback dependabot/fetch-metadata uses. A missing or ambiguous
+# "from" (e.g. a bare `4`), a "to" that disagrees with the block's version, or
+# a name listed twice with different pairs, still holds.
+#
+# Only a PR that already contains the tip of its base branch merges. CI tested
+# the PR against the base as it was then; if the base has moved since, the tree
+# that would land is one CI never ran. Two lockfile edits can merge as text
+# without a conflict and still leave a uv.lock that `uv sync --frozen` rejects
+# (glyphstream hit exactly this with its pnpm lockfile). A PR that is behind is
+# held, and Dependabot's scheduled run (daily, see dependabot.yml) rebases it,
+# which reruns CI and brings it back here. The workflow can't ask for the
+# rebase itself: Dependabot refuses `@dependabot rebase` from
+# github-actions[bot]. The cost is about one merge per day per batch.
+#
+# A merge made with GITHUB_TOKEN starts no push workflows, so docker.yml does
+# not publish `:main` for it; the next human push to main (or a release tag)
+# carries it. Releases are cut from tags, so nothing ships unreviewed-by-CI.
 name: Dependabot auto-merge
 
 on:
   workflow_run:
-    workflows: ["Build and publish container image"]
+    workflows: ['CI']
     types: [completed]
 
 permissions:
   contents: write
   pull-requests: write
+
+# One merge decision at a time, so two PRs whose CI finishes together can't both
+# pass the up-to-date check before either merges. Not cancel-in-progress: a
+# decision already underway finishes. GitHub keeps only the newest PENDING run in
+# a group, so a burst can drop a queued one; that PR is simply held until
+# Dependabot next rebases it, the same safe outcome as being behind.
+concurrency:
+  group: dependabot-automerge
+  cancel-in-progress: false
 
 jobs:
   automerge:
@@ -27,37 +89,121 @@ jobs:
       github.event.workflow_run.actor.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - name: Merge if the update is semver-safe
+      - name: Merge if every update is semver-safe
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Space-separated, exact package names. See the header for why each.
+          ZERO_X_MINOR_OK: fastapi uvicorn aiosqlite respx ruff
           REPO: ${{ github.repository }}
           SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty')
           if [ -z "$pr" ]; then echo "No PR found for $SHA"; exit 0; fi
-          title=$(gh pr view "$pr" --repo "$REPO" --json title --jq '.title')
-          echo "PR #$pr: $title"
-          if [[ "$title" =~ from\ ([0-9]+(\.[0-9]+)*)\ to\ ([0-9]+(\.[0-9]+)*) ]]; then
-            from="${BASH_REMATCH[1]}"; to="${BASH_REMATCH[3]}"
-          else
-            echo "Not a single-dependency bump title - leaving for manual review"; exit 0
+          read -r head author < <(gh pr view "$pr" --repo "$REPO" --json headRefOid,author \
+            --jq '"\(.headRefOid) \(.author.login)"')
+          # CI went green on $SHA. If the branch moved since (a rebase, or a
+          # human pushing a fix onto it), that verdict is for a different tree.
+          if [ "$head" != "$SHA" ]; then echo "PR #$pr head moved past $SHA - skipping"; exit 0; fi
+          if [ "$author" != "app/dependabot" ]; then echo "PR #$pr not opened by Dependabot ($author)"; exit 0; fi
+          committer=$(gh api "repos/$REPO/commits/$SHA" --jq '.author.login // empty')
+          if [ "$committer" != "dependabot[bot]" ]; then
+            echo "Head commit authored by '$committer', not Dependabot - manual review"; exit 0
           fi
-          IFS=. read -r fmaj fmin _ <<<"$from"
-          IFS=. read -r tmaj tmin _ <<<"$to"
-          fmaj=${fmaj:-0}; fmin=${fmin:-0}; tmaj=${tmaj:-0}; tmin=${tmin:-0}
-          safe=no
-          if [ "$fmaj" = "$tmaj" ]; then
-            if [ "$fmaj" = "0" ]; then
-              if [ "$fmin" = "$tmin" ]; then safe=yes; fi
-            else
-              safe=yes
-            fi
+
+          # The tree that lands must be the tree CI tested (see the header).
+          base=$(gh pr view "$pr" --repo "$REPO" --json baseRefName --jq .baseRefName)
+          behind=$(gh api "repos/$REPO/compare/$base...$SHA" --jq .behind_by)
+          if [ "$behind" != "0" ]; then
+            echo "PR #$pr is $behind commit(s) behind $base - holding until Dependabot rebases it"; exit 0
           fi
-          if [ "$safe" = "yes" ]; then
-            echo "Safe bump ($from -> $to) - merging"
-            gh pr merge "$pr" --repo "$REPO" --merge --delete-branch
+
+          # One "name|version|update-type|source" line per dependency. Not tabs:
+          # bash treats tab as IFS whitespace and collapses a run of them, so an
+          # empty version would shift the update type into `ver`.
+          # The block is YAML, so Dependabot quotes any value that would
+          # otherwise parse as a number: a two-part tag like 0.6 is written
+          # '0.6'. Strip quotes before the version is pattern-matched, or a
+          # quoted 0.x minor slips past the `0.*` hold below.
+          updates=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message' | awk '
+            function unquote(s) { gsub(/["\047]/, "", s); return s }
+            function vstrip(s) { sub(/^v/, "", s); return s }
+            # Classify A -> B by major/minor. "" (hold) unless both have
+            # numeric major.minor: a bare "4" could hide a minor or a patch.
+            function derive(a, b,   pa, pb) {
+              if (split(vstrip(a), pa, ".") < 2 || split(vstrip(b), pb, ".") < 2) return ""
+              if (pa[1] !~ /^[0-9]+$/ || pa[2] !~ /^[0-9]+$/) return ""
+              if (pb[1] !~ /^[0-9]+$/ || pb[2] !~ /^[0-9]+$/) return ""
+              if (pa[1] + 0 != pb[1] + 0) return "version-update:semver-major"
+              if (pa[2] + 0 != pb[2] + 0) return "version-update:semver-minor"
+              return "version-update:semver-patch"
+            }
+            # Record a body pair; a second, different pair for the same name
+            # makes the name ambiguous, so it is never derived.
+            function pair(n, a, b) {
+              if ((n in from) && (from[n] != a || to[n] != b)) amb[n] = 1
+              from[n] = a; to[n] = b
+            }
+            function flush(   src) {
+              if (name == "") return
+              src = (type == "" ? "neither metadata nor body" : "metadata")
+              if (type == "" && (name in from) && !(name in amb) && vstrip(to[name]) == vstrip(ver)) {
+                type = derive(from[name], to[name]); src = "body " from[name] " -> " to[name]
+              }
+              print name "|" ver "|" type "|" src
+              name = ver = type = ""
+            }
+            /^updated-dependencies:/ { inblock = 1; next }
+            inblock && /^\.\.\./     { inblock = 0 }
+            # Body lines, outside the block: the prose version pairs.
+            !inblock && /^Bumps \[[^]]+\]\([^)]*\) from [^ ]+ to [^ ]+\.$/ {
+              n = $2; gsub(/^\[|\].*$/, "", n); t = $NF; sub(/\.$/, "", t); pair(n, $(NF-2), t); next
+            }
+            !inblock && NF == 6 && $1 == "Updates" && $3 == "from" && $5 == "to" {
+              n = $2; gsub(/`/, "", n); pair(n, $4, $6); next
+            }
+            !inblock                 { next }
+            /^- dependency-name:/    { flush(); name = unquote($3) }
+            /^  dependency-version:/ { ver = vstrip(unquote($2)) }
+            /^  update-type:/        { type = unquote($2) }
+            END                      { flush() }
+          ')
+          if [ -z "$updates" ]; then echo "No updated-dependencies metadata - manual review"; exit 0; fi
+
+          safe=yes
+          while IFS='|' read -r name ver type src; do
+            verdict=hold
+            case "$ver" in
+              '')            reason="no version recorded" ;;
+              # Anything but digits and dots: PEP 440 pre/post/dev releases
+              # (2.0.0rc1, 1.2.3.post1, 1.0.dev0), local versions, npm -rc.1.
+              *[!0-9.]*)     reason="not a plain release version" ;;
+              *)
+                case "$type" in
+                  version-update:semver-patch) verdict=ok; reason="patch" ;;
+                  version-update:semver-minor)
+                    case "$ver" in
+                      0.*)
+                        case " $ZERO_X_MINOR_OK " in
+                          *" $name "*) verdict=ok; reason="0.x minor, allowlisted" ;;
+                          *)           reason="0.x minor" ;;
+                        esac ;;
+                      *)   verdict=ok; reason="minor" ;;
+                    esac ;;
+                  *) reason="${type:-unknown update type}" ;;
+                esac ;;
+            esac
+            echo "  $name -> ${ver:-?}: $reason ($verdict; type from ${src:-?})"
+            [ "$verdict" = ok ] || safe=no
+          done <<<"$updates"
+
+          if [ "$safe" = yes ]; then
+            echo "PR #$pr: all updates semver-safe - merging"
+            # --match-head-commit closes the window between the head check at
+            # the top and this call: a push landing in between is refused by
+            # GitHub rather than merged without the CI run this verdict is for.
+            gh pr merge "$pr" --repo "$REPO" --merge --delete-branch --match-head-commit "$SHA"
           else
-            echo "Holding ($from -> $to: major or 0.x-minor) - manual review"
+            echo "PR #$pr: holding for manual review"
           fi
