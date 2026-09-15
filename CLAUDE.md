@@ -26,7 +26,8 @@ uv run pytest tests/test_video_lifecycle.py::test_name   # single test
 uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run mypy src              # type-check (strict mode is on)
-pre-commit run --all-files   # runs ruff + ruff-format + file hygiene hooks
+uv run pre-commit run --all-files   # gitleaks (staged) + file hygiene + ruff from uv.lock
+tests/image-smoke/run.sh <image>    # boot-test a built runtime image, as CI does
 ```
 
 Local dev run: `cp config.toml.example config.toml`, `cp .env.example .env` (set
@@ -96,6 +97,24 @@ ComfyUI has no OpenAI surface, so a "model" is a workflow file pair on disk in
 metadata — which node receives the prompt/images, dimension/length nodes, output
 type). `backends/comfyui/workflows.py` scans and prepares these; the meta schema
 is documented in the README.
+
+## CI and Dependabot
+
+`ci.yml` is the one definition of the checks (lint, mypy, pytest, pip-audit,
+actionlint/zizmor/hadolint, gitleaks, Docker image boot smoke); `docker.yml`
+calls it before publishing. Dependabot PRs auto-merge via
+`dependabot-automerge.yml` when CI is green and every update is semver-safe —
+so a green CI run is a merge decision, and a gate that silently stops checking
+something lets updates through unreviewed. Keep that in mind when touching CI:
+
+- Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
+  via `docker run` are pinned by digest. zizmor/hadolint exceptions go in
+  `.github/zizmor.yml` / `.hadolint.yaml` with a reason, never silenced inline.
+- A 0.x package joins `ZERO_X_MINOR_OK` in the auto-merge workflow only with
+  the test that would catch its breaking minor named in that file's header.
+- A new runtime dependency with a native extension should get real work in
+  `tests/image-smoke/smoke.py` — that's the only check of the `--no-dev`
+  Alpine install.
 
 ## Conventions
 

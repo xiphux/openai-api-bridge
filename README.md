@@ -400,7 +400,8 @@ docker compose logs -f bridge
 
 The repo ships a GitHub Actions workflow (`.github/workflows/docker.yml`) that
 builds and publishes a multi-arch (amd64 + arm64) image to GitHub Container
-Registry on every push to `main` and on `v*.*.*` tags. To pull it:
+Registry on every push to `main` and on `v*.*.*` tags, after the CI suite
+(below) passes. To pull it:
 
 ```bash
 # in your .env
@@ -418,10 +419,12 @@ Tag conventions published by the workflow:
 | Tag                | When | Use it for |
 |---|---|---|
 | `latest`           | only when a semver `v*.*.*` tag is pushed (matches `nginx` / `postgres` / `python` convention — *not* HEAD of `main`) | production |
-| `v1.2.3` / `1.2` / `1` | semver tag pushes | pinning to a specific release |
+| `1.2.3` / `1.2` / `1` | semver tag pushes (`v1.2.3`) | pinning to a specific release |
 | `main`             | every push to `main` | bleeding edge / dev integration |
-| `pr-42`            | PR builds (built but not pushed) | n/a |
 | `sha-abc1234`      | every build | rollback / audit |
+
+Dependabot's auto-merges push to `main` with the workflow token, which starts
+no workflows, so `main` doesn't move for them until the next ordinary push.
 
 State (SQLite + cached files) lives in the named volume `bridge-state`.
 
@@ -581,4 +584,36 @@ Only `positive_prompt_node` is required:
 uv run pytest                # full suite
 uv run pytest -m live        # opt-in live tests against real backends (not yet wired)
 uv run ruff check .          # lint
+uv run mypy src              # type-check (strict)
+
+# Build the runtime image and boot-test it, as CI does
+docker build -t openai-api-bridge:smoke .
+tests/image-smoke/run.sh openai-api-bridge:smoke
 ```
+
+`uv run pre-commit install` adds the commit hooks: a gitleaks scan of what's
+staged (skipped with a warning if `gitleaks` isn't installed), file hygiene,
+and ruff from `uv.lock`.
+
+## CI and dependency updates
+
+`.github/workflows/ci.yml` runs on every PR and gates every publish from
+`docker.yml`:
+
+| Job | What it checks |
+|---|---|
+| Lint + format + type-check | pre-commit (ruff, file hygiene) and `mypy src` |
+| Tests | `pytest` |
+| Workflow + Dockerfile lint | actionlint, zizmor, hadolint |
+| Dependency audit | `pip-audit` over the production (`--no-dev`) lock |
+| Docker image smoke | builds amd64 + arm64, boots amd64 and serves requests, import-checks both from the image's own venv |
+| Secret scan | gitleaks over the tested commit's history |
+
+Dependabot proposes GitHub Actions, `uv` and pre-commit updates daily, each
+release held back a week. `dependabot-automerge.yml` merges a PR once CI is
+green if every update in it is a patch, a minor outside 0.x, or a 0.x minor of
+an allowlisted package whose breakage a test would catch — and only if the PR
+already contains `main`'s tip. Everything else stays open for review; the
+header of that workflow has the full rule and the allowlist's reasons. Majors
+aren't proposed at all: `upgrade-check.yml` keeps one issue open per available
+major instead.
