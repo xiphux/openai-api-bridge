@@ -439,3 +439,79 @@ async def test_ceiling_never_outruns_a_deliberately_slow_start() -> None:
         assert client.max_poll_interval == 20.0
     finally:
         await client.aclose()
+
+
+# --- poll_completion: what counts as transient, and the deadline --------------
+
+
+@respx.mock
+async def test_poll_completion_rides_out_transient_history_failures() -> None:
+    """A long render spans network blips; each of these must mean "poll again",
+    not "fail a job ComfyUI is still rendering"."""
+    import httpcore2
+
+    respx.get("http://comfy/history/blip-id").mock(
+        side_effect=[
+            httpcore2.ConnectError("refused"),
+            httpcore2.ReadTimeout("timed out"),
+            httpcore2.RemoteProtocolError("peer closed"),
+            httpx.Response(200, text="<html>502 from the proxy</html>"),  # non-JSON 200
+            httpx.Response(200, json={"blip-id": {"outputs": {"9": {}}}}),
+        ]
+    )
+
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=0.001)
+    try:
+        result = await client.poll_completion("blip-id", timeout_seconds=10.0)
+    finally:
+        await client.aclose()
+
+    assert result == {"outputs": {"9": {}}}
+
+
+@respx.mock
+async def test_poll_completion_does_not_count_an_unreachable_queue_as_a_drop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The drop detector needs /queue to *say* the prompt is gone. A queue
+    check that failed says nothing, so it must not advance the miss streak."""
+    import httpcore2
+
+    monkeypatch.setattr(comfy_client_module, "QUEUE_RECHECK_INTERVAL", 0.0)
+    monkeypatch.setattr(comfy_client_module, "QUEUE_MISS_THRESHOLD", 2)
+
+    history = respx.get("http://comfy/history/q-id").mock(
+        side_effect=[httpx.Response(200, json={})] * 5
+        + [httpx.Response(200, json={"q-id": {"outputs": {}}})]
+    )
+    queue = respx.get("http://comfy/queue").mock(side_effect=httpcore2.ConnectError("refused"))
+
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=0.001)
+    try:
+        result = await client.poll_completion("q-id", timeout_seconds=10.0)
+    finally:
+        await client.aclose()
+
+    assert result == {"outputs": {}}
+    assert history.call_count == 6
+    # Well past the threshold of 2, and still no drop declared.
+    assert queue.call_count >= 3
+
+
+@respx.mock
+async def test_poll_completion_gives_up_at_its_deadline() -> None:
+    from openai_api_bridge.errors import GenerationTimeout
+
+    respx.get("http://comfy/history/slow-id").mock(return_value=httpx.Response(200, json={}))
+    respx.get("http://comfy/queue").mock(
+        return_value=httpx.Response(
+            200, json={"queue_running": [[0, "slow-id", {}, {}]], "queue_pending": []}
+        )
+    )
+
+    client = ComfyUIClient(base_url="http://comfy", poll_interval_seconds=0.01)
+    try:
+        with pytest.raises(GenerationTimeout, match="timed out after"):
+            await client.poll_completion("slow-id", timeout_seconds=0.05)
+    finally:
+        await client.aclose()
