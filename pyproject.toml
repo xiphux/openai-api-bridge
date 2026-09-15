@@ -100,7 +100,7 @@ branch = true
 # A floor, not a target: CI fails if total branch coverage drops below it.
 # Raise it when coverage rises, so it holds new ground; never lower it to get
 # a change through — cover the change instead.
-fail_under = 88
+fail_under = 92
 skip_covered = true
 show_missing = true
 
