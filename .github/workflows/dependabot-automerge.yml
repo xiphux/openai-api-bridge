@@ -79,16 +79,6 @@ permissions:
   contents: write
   pull-requests: write
 
-# One merge decision at a time, so two PRs whose CI finishes together can't both
-# pass the up-to-date check before either merges. Not cancel-in-progress: a
-# decision already underway finishes. GitHub keeps only the newest PENDING run in
-# a group, so a burst can drop a queued one. That fails safe but can strand the
-# PR: nothing re-runs its decision until its CI runs again, which for a PR that
-# isn't behind means a push, a `@dependabot rebase`, or re-running its CI run.
-concurrency:
-  group: dependabot-automerge
-  cancel-in-progress: false
-
 jobs:
   automerge:
     if: >-
@@ -96,6 +86,24 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.actor.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    # A handful of API calls; bounded so a stalled one can't hold the
+    # concurrency group below (and every queued decision) for 6 hours.
+    timeout-minutes: 5
+    # One merge decision at a time, so two PRs whose CI finishes together can't
+    # both pass the up-to-date check before either merges. On the job, not the
+    # workflow: every CI completion starts this workflow, and a workflow-level
+    # group would let a human PR's run (which the `if:` then skips) take the
+    # pending slot from a real Dependabot decision. A job skipped by `if:` never
+    # joins the group.
+    #
+    # Not cancel-in-progress: a decision already underway finishes. GitHub keeps
+    # only the newest PENDING job in a group, so a burst of Dependabot PRs can
+    # still drop a queued one. That fails safe but can strand the PR: nothing
+    # re-runs its decision until its CI runs again, which for a PR that isn't
+    # behind means a push, a `@dependabot rebase`, or re-running its CI run.
+    concurrency:
+      group: dependabot-automerge
+      cancel-in-progress: false
     steps:
       - name: Merge if every update is semver-safe
         shell: bash
