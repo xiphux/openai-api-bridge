@@ -1,0 +1,41 @@
+# zizmor (GitHub Actions security linter) — run by the `infra` job in ci.yml.
+# Every exception below is a finding that was read and judged, not silenced to
+# get green. Add a new one only with the same kind of reason next to it.
+rules:
+  # Flags setup-uv's cache because ci.yml is called from docker.yml, a
+  # publishing workflow. The uv cache never reaches what we publish: the image
+  # installs its dependencies from uv.lock inside the Dockerfile, under
+  # BuildKit's own cache mount, and nothing from the test jobs' workspace is
+  # handed to `build-and-push`. A PR can only write caches into its own ref's
+  # scope, which `main` and tag runs never read. The `image` smoke job's buildx
+  # cache READS docker.yml's `publish` scope but WRITES only `ci-image-*`,
+  # which docker.yml never reads, so it can't feed layers into a published
+  # image either.
+  cache-poisoning:
+    ignore:
+      - ci.yml
+
+  # `workflow_run` is dangerous when the privileged run checks out or executes
+  # the triggering PR's code. This one does neither: it reads PR/commit metadata
+  # through the API, requires a Dependabot-authored head commit whose SHA is the
+  # one CI passed, and its only write is `gh pr merge`. The comment at the top
+  # of the file explains why it can't live inside ci.yml instead.
+  dangerous-triggers:
+    ignore:
+      - dependabot-automerge.yml
+
+  # Suggests `gh release create` over softprops/action-gh-release. A fair
+  # simplification, but it would change how the draft and generated notes
+  # compose, and it's style rather than risk. SHA-pinned in the meantime.
+  superfluous-actions:
+    ignore:
+      - docker.yml
+
+  # Suggests `uses: $/…` over `./…` for the reusable-workflow call. The `./`
+  # form resolves from the caller's own commit, which is what makes a publish
+  # run the checks of the commit it publishes; revisit once the new syntax's
+  # semantics there are confirmed rather than switching a release gate on a
+  # lint hint.
+  self-repository:
+    ignore:
+      - docker.yml

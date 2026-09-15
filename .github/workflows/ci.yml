@@ -82,6 +82,60 @@ jobs:
       - name: pytest
         run: uv run --frozen pytest -v
 
+  # Its own job rather than steps in `static`: it needs no `uv sync`, so it
+  # finishes in seconds. actionlint catches workflow mistakes (bad expressions,
+  # `needs` typos, shellcheck in `run:`); zizmor catches security ones
+  # (unpinned actions, injection, permissions); hadolint catches Dockerfile
+  # ones. Each tool's intentional exceptions live in its config
+  # (.github/zizmor.yml, .hadolint.yaml), with reasons.
+  infra:
+    name: Workflow + Dockerfile lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The release binary from GitHub, checksum-pinned, not the Docker Hub
+      # image: anonymous Docker Hub pulls are rate-limited per IP on runners
+      # shared with everyone else. It checks `run:` scripts with the runner
+      # image's preinstalled shellcheck. Bump the version and checksum together
+      # (from the release's checksums.txt).
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/$tarball"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
+      # Online audits use the job's read-only token to verify that each SHA pin
+      # is a real commit of the named repo and matches its `# vX.Y.Z` comment.
+      # Annotations instead of SARIF upload: no `security-events: write` needed.
+      # The action only runs zizmor versions in its own table (pulled by digest),
+      # so `version` must be one the pinned action release knows: bumping zizmor
+      # past it fails with "Unknown version" until the action is bumped too.
+      - name: zizmor
+        if: ${{ !cancelled() }}
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          version: 1.30.1
+          advanced-security: false
+          annotations: true
+
+      # Picks up .hadolint.yaml from the mounted repo root. Pinned by digest, and
+      # pulled from GHCR rather than Docker Hub for the same reason as actionlint.
+      - name: hadolint
+        if: ${{ !cancelled() }}
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          ghcr.io/hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+          hadolint Dockerfile
+
   # A known vulnerability in anything the image ships fails the run, so an
   # auto-merged update can't bring one in unnoticed — and neither can an
   # advisory published against something already locked, which holds every

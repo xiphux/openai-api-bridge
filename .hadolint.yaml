@@ -1,0 +1,9 @@
+# hadolint (Dockerfile linter) — run by the `infra` job in ci.yml. Rules
+# ignored repo-wide are ones that don't fit this image; one-off exceptions are
+# inline `# hadolint ignore=` pragmas next to the instruction they excuse.
+failure-threshold: warning
+ignored:
+  # "Pin versions in apk add." Alpine repos drop superseded package versions,
+  # so an exact `sqlite=x.y.z-r0` pin turns into a build failure weeks later.
+  # The base image tag (python:3.12-alpine) is what fixes the package set.
+  - DL3018
