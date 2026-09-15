@@ -53,10 +53,17 @@
 # that would land is one CI never ran. Two lockfile edits can merge as text
 # without a conflict and still leave a uv.lock that `uv sync --frozen` rejects
 # (glyphstream hit exactly this with its pnpm lockfile). A PR that is behind is
-# held, and Dependabot's scheduled run (daily, see dependabot.yml) rebases it,
-# which reruns CI and brings it back here. The workflow can't ask for the
-# rebase itself: Dependabot refuses `@dependabot rebase` from
-# github-actions[bot]. The cost is about one merge per day per batch.
+# held, and stays held until something rebases it; the rebase reruns CI and
+# brings it back here.
+#
+# Dependabot does NOT rebase a PR merely for being behind. It rebases on a
+# conflict with the base (or when a newer version supersedes the PR), so a
+# batch whose edits don't conflict stalls after its first merge: the rest are
+# behind, and no scheduled run touches them. Glyphstream's 2026-09-14 batch
+# did exactly that until each PR got a `@dependabot rebase` comment. That
+# comment, from someone with write access, is the fix; the hold message below
+# says so. The workflow can't post it itself: Dependabot refuses it from
+# github-actions[bot], and only a personal token would get past that.
 #
 # A merge made with GITHUB_TOKEN starts no push workflows, so docker.yml does
 # not publish `:main` for it; the next human push to main (or a release tag)
@@ -75,8 +82,9 @@ permissions:
 # One merge decision at a time, so two PRs whose CI finishes together can't both
 # pass the up-to-date check before either merges. Not cancel-in-progress: a
 # decision already underway finishes. GitHub keeps only the newest PENDING run in
-# a group, so a burst can drop a queued one; that PR is simply held until
-# Dependabot next rebases it, the same safe outcome as being behind.
+# a group, so a burst can drop a queued one. That fails safe but can strand the
+# PR: nothing re-runs its decision until its CI runs again, which for a PR that
+# isn't behind means a push, a `@dependabot rebase`, or re-running its CI run.
 concurrency:
   group: dependabot-automerge
   cancel-in-progress: false
@@ -116,7 +124,7 @@ jobs:
           base=$(gh pr view "$pr" --repo "$REPO" --json baseRefName --jq .baseRefName)
           behind=$(gh api "repos/$REPO/compare/$base...$SHA" --jq .behind_by)
           if [ "$behind" != "0" ]; then
-            echo "PR #$pr is $behind commit(s) behind $base - holding until Dependabot rebases it"; exit 0
+            echo "PR #$pr is $behind commit(s) behind $base - holding; comment '@dependabot rebase' on it to retest and re-decide"; exit 0
           fi
 
           # One "name|version|update-type|source" line per dependency. Not tabs:

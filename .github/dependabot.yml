@@ -14,10 +14,11 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      # Daily, not weekly: each run also rebases every open Dependabot PR, and
-      # that is the only way a PR the auto-merge workflow held for being behind
-      # main gets rebased and re-tested. Cooldown still sets how often a given
-      # package can actually change.
+      # Daily, so a release is proposed the day its cooldown ends rather than up
+      # to a week later; cooldown still sets how soon a given release can land.
+      # A scheduled run does NOT rebase a PR the auto-merge workflow held for
+      # being behind main — only a conflict or `@dependabot rebase` does (see
+      # the header of dependabot-automerge.yml).
       interval: daily
     commit-message:
       prefix: ci
@@ -31,7 +32,7 @@ updates:
   - package-ecosystem: uv
     directory: /
     schedule:
-      # Daily for the same rebase reason as above.
+      # Daily, for the same reason as above.
       interval: daily
     commit-message:
       prefix: deps
