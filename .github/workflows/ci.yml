@@ -1,0 +1,175 @@
+# CI — lint, type-check, tests and a secret scan.
+#
+# Triggers:
+#   - Direct on push to any branch except `main`, Dependabot's, and tags.
+#     Feature-branch pushes get feedback without a Docker publish riding along.
+#     Dependabot branches are excluded because every one has a PR: the push run
+#     would duplicate the `pull_request` run on the same commit, and only the
+#     `pull_request` run is read by dependabot-automerge.yml.
+#   - Direct on every PR. Drives the PR checks UI, and its completion is what
+#     dependabot-automerge.yml listens for (by this workflow's name, `CI`).
+#   - Indirect via `workflow_call` from docker.yml on `main` pushes and
+#     `v*.*.*` tags, so publishing is gated on exactly these jobs.
+name: CI
+
+on:
+  push:
+    branches-ignore: [main, 'dependabot/**']
+    tags-ignore: ['**']
+  pull_request:
+  workflow_call:
+
+# Direct runs: one per ref, newest wins. Under `workflow_call` the `github`
+# context is the caller's, so `github.workflow` is docker.yml's name there and
+# the group falls back to the run id — unique, so a called run never cancels
+# (or queues behind) another publish's tests.
+concurrency:
+  group: ${{ github.workflow == 'CI' && format('ci-{0}', github.ref) || github.run_id }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repo or a registry. Under `workflow_call` this also
+# caps what docker.yml's grant can reach in here.
+permissions:
+  contents: read
+
+jobs:
+  # Lint, format and type-check share a job: each takes seconds, and separate
+  # jobs would each pay for their own checkout and `uv sync`.
+  static:
+    name: Lint + format + type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # ruff (check + format, from uv.lock) and the file-hygiene hooks. The
+      # gitleaks hook in there only warns on a runner; the `secrets` job below
+      # is the real scan.
+      - name: pre-commit
+        run: uv run --frozen pre-commit run --all-files --show-diff-on-failure
+
+      # Strict mode, as configured in pyproject.toml. `if: always()` so a lint
+      # nit doesn't hide a type error in the same run. This matters most for
+      # Dependabot: pydantic, fastapi and starlette minors routinely change
+      # their annotations without changing runtime behaviour tests would see.
+      - name: mypy
+        if: ${{ !cancelled() }}
+        run: uv run --frozen mypy src
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: pytest
+        run: uv run --frozen pytest -v
+
+  # Build the runtime image and boot it. Every other job runs a full dev install
+  # on glibc; the image installs `--no-dev` on Alpine/musl. A runtime import of
+  # a dev-only package (httpx is one, on purpose), or a native dependency
+  # release that drops its musllinux wheel, passes every other job and breaks
+  # the shipped image — and Dependabot auto-merges before docker.yml ever
+  # builds. tests/image-smoke/run.sh boots the container, and smoke.py does
+  # real work with each runtime dependency from the image's own venv. Runnable
+  # locally the same way.
+  #
+  # Both architectures build, since Python's native wheels are per-arch and an
+  # arm64-only gap is plausible. amd64 boots and serves; arm64 runs the import
+  # and native-extension checks under QEMU, which is slow for a server but
+  # fine for a few seconds of imports.
+  #
+  # Cache: reads docker.yml's `publish` scope so a warm build is quick, but
+  # writes only to its own scopes, so a PR run can never feed layers into the
+  # image docker.yml publishes.
+  image:
+    name: Docker image smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build runtime image (amd64)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: openai-api-bridge:ci-amd64
+          cache-from: |
+            type=gha,scope=publish
+            type=gha,scope=ci-image-amd64
+          cache-to: type=gha,mode=max,scope=ci-image-amd64
+
+      - name: Build runtime image (arm64)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: openai-api-bridge:ci-arm64
+          cache-from: |
+            type=gha,scope=publish
+            type=gha,scope=ci-image-arm64
+          cache-to: type=gha,mode=max,scope=ci-image-arm64
+
+      - name: Boot and smoke-test the image (amd64)
+        run: tests/image-smoke/run.sh openai-api-bridge:ci-amd64
+
+      - name: Import-check the image (arm64)
+        if: ${{ !cancelled() }}
+        run: tests/image-smoke/run.sh --imports-only openai-api-bridge:ci-arm64 linux/arm64
+
+  # Backstop for the pre-commit hook, which only runs where gitleaks is
+  # installed and is skipped by `--no-verify` (and never runs for Dependabot's
+  # commits). GitHub secret scanning and push protection also cover this public
+  # repo; this is the check that fails a PR.
+  #
+  # Scans the full history of the commit under test, not just the new commits:
+  # at this repo's size that takes under a second, and it needs no base-ref
+  # logic that differs between push, PR and workflow_call.
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Pinned by digest, and Dependabot doesn't see a `docker run`, so bump the
+      # tag and digest together by hand. --redact keeps a real hit out of the
+      # (public) job log. --log-opts=HEAD scans the history of the commit under
+      # test only: gitleaks defaults to `git log --all`, and fetch-depth 0
+      # fetches every remote branch, so a finding on some stale, unrelated
+      # branch would otherwise fail every PR. Reviewed false positives:
+      # .gitleaksignore (history) and inline `gitleaks:allow` (current tree).
+      - name: gitleaks
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git . --redact --no-banner --verbose --log-opts=HEAD
