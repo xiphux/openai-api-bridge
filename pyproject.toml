@@ -75,6 +75,14 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Strict config/markers: a typo in this table or a mark fails instead of being
+# ignored.
+addopts = ["--strict-config", "--strict-markers"]
+# Any warning fails the suite. Dependabot auto-merges minors on a green run, and
+# a minor that deprecates something the bridge uses warns before the major that
+# removes it; failing on it holds that update for a human instead. A warning
+# reviewed and judged harmless gets a narrow `ignore::` entry here, with why.
+filterwarnings = ["error"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
