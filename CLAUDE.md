@@ -27,6 +27,7 @@ uv run pytest tests/test_video_lifecycle.py::test_name   # single test
 uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run mypy src              # type-check (strict mode is on)
+uv run deptry .              # unused/undeclared dependencies (CI gates on it)
 uv run pre-commit run --all-files   # gitleaks (staged) + file hygiene + ruff from uv.lock
 tests/image-smoke/run.sh <image>    # boot-test a built runtime image, as CI does
 ```
@@ -101,13 +102,21 @@ is documented in the README.
 
 ## CI and Dependabot
 
-`ci.yml` is the one definition of the checks (lint, mypy, pytest, pip-audit,
-actionlint/zizmor/hadolint, gitleaks, Docker image boot smoke); `docker.yml`
+`ci.yml` is the one definition of the checks (lint, mypy, deptry, pytest,
+pip-audit, actionlint/zizmor/hadolint, gitleaks, Docker image boot smoke); `docker.yml`
 calls it before publishing. Dependabot PRs auto-merge via
 `dependabot-automerge.yml` when CI is green and every update is semver-safe —
 so a green CI run is a merge decision, and a gate that silently stops checking
 something lets updates through unreviewed. Keep that in mind when touching CI:
 
+- deptry answers the other half of dependency hygiene from pip-audit: a package
+  declared but unused still installs and still ships in the image, and an
+  import missing from the declarations works only until whatever pulled it in
+  stops. Its exceptions are in `[tool.deptry]` in pyproject.toml, each with its
+  reason: `scripts/` is excluded (upgrade-check.yml runs it `--no-project
+  --with pyyaml==...`, so project dependencies do not govern it), and
+  python-multipart is ignored for DEP002 (FastAPI parses multipart with it but
+  nothing imports the name).
 - Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
   via `docker run` are pinned by digest. zizmor/hadolint exceptions go in
   `.github/zizmor.yml` / `.hadolint.yaml` with a reason, never silenced inline.
