@@ -14,6 +14,13 @@ dependencies = [
   "pydantic>=2.13.4",
   "pydantic-settings>=2.15.0",
   "python-multipart>=0.0.32",
+  # Imported directly by api/_limits.py, which is a pure ASGI middleware:
+  # starlette's Headers/JSONResponse and its ASGIApp/Message/Receive/Scope/Send
+  # types, which FastAPI does not re-export. It arrives through FastAPI either
+  # way, but a direct import is a direct dependency — declared, it is one
+  # FastAPI could stop pulling in without taking this with it, and one
+  # Dependabot tracks in its own right.
+  "starlette>=1.6.0",
   "uvicorn[standard]>=0.52.1",
 ]
 
