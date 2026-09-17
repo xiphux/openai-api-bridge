@@ -78,6 +78,20 @@ jobs:
         if: ${{ !cancelled() }}
         run: uv run --frozen mypy src
 
+      # Declared-but-unused packages, and imports missing from the
+      # declarations. Neither shows up anywhere else: an unused package still
+      # installs, still ships in the image, and Dependabot keeps proposing
+      # (and auto-merging) updates for it, while an undeclared import works
+      # until whatever pulled it in stops. Its two recorded exceptions live in
+      # [tool.deptry] in pyproject.toml, with the reasoning beside them.
+      #
+      # From the venv, like ruff and mypy: one version, in uv.lock, is what
+      # both a local run and this job use. It also lets deptry read installed
+      # metadata for the package-to-module mapping instead of guessing.
+      - name: deptry
+        if: ${{ !cancelled() }}
+        run: uv run --frozen deptry .
+
   tests:
     name: Tests
     runs-on: ubuntu-latest

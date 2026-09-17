@@ -26,6 +26,10 @@ updates:
     # keeps a fresh compromise from reaching a SHA pin automatically.
     cooldown:
       default-days: 7
+    # The default is 5 per entry, and ci.yml pins eleven distinct actions.
+    # Version updates over the limit are not opened until a slot frees;
+    # security updates are never counted against it.
+    open-pull-requests-limit: 10
 
   # pyproject.toml + uv.lock. Direct dependencies only; a transitive one moves
   # when a direct one needs it to, or through a security update.
@@ -37,6 +41,11 @@ updates:
     commit-message:
       prefix: deps
       prefix-development: deps(dev)
+    # Above the default 5: sixteen direct dependencies between the project
+    # and its dev group, released in cooldown batches, and four update PRs
+    # were open at once as this was written. A version update over the limit
+    # is not opened until a slot frees; security updates are exempt.
+    open-pull-requests-limit: 10
     # A week, for supply-chain reasons: most malicious PyPI publishes are found
     # and yanked within days, and most of these PRs merge unattended. Security
     # updates ignore cooldown and still arrive at once.
