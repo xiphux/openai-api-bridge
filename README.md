@@ -611,6 +611,12 @@ and ruff from `uv.lock`.
 | Docker image smoke | builds amd64 + arm64; boots amd64 and serves requests, including the OpenAI passthrough against a stub upstream over a real network (JSON, streaming, unreachable upstream); import-checks both from the image's own venv |
 | Secret scan | gitleaks over the tested commit's history |
 
+Pushing a `v*.*.*` tag publishes a GitHub release once that suite passes, with
+notes built from the commits in the tag by `scripts/release_notes.py`, grouped
+by their conventional-commit prefix. GitHub's own generated notes list only
+pull requests, which would miss nearly everything here — work lands as direct
+commits to `main`.
+
 Dependabot proposes GitHub Actions, `uv` and pre-commit updates daily, each
 release held back a week. `dependabot-automerge.yml` merges a PR once CI is
 green if every update in it is a patch, a minor outside 0.x, or a 0.x minor of
