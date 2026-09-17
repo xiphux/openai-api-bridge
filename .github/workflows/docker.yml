@@ -106,11 +106,14 @@ jobs:
           cache-from: type=gha,scope=publish
           cache-to: type=gha,mode=max,scope=publish
 
-  # Create a GitHub Release whenever a v*.*.* tag is pushed. Notes are
-  # auto-generated from PRs/commits since the previous tag (categorization
-  # is configured in `.github/release.yml`). Released as a draft so you can
-  # review and optionally edit before publishing — flip `draft: false` once
-  # you trust the auto-generated notes for your repo's flow.
+  # Create a GitHub Release whenever a v*.*.* tag is pushed, published rather
+  # than drafted: a draft is invisible to everyone but the maintainer, and
+  # twelve of them accumulated unnoticed behind that default.
+  #
+  # Notes come from scripts/release_notes.py, which reads the commits in the
+  # tag. NOT GitHub's `generate_release_notes`, which lists pull requests only:
+  # work here lands as direct commits to main, so v0.6.0's generated notes
+  # named the two Dependabot PRs in it and none of the other 42 commits.
   create-release:
     needs: build-and-push
     if: startsWith(github.ref, 'refs/tags/v')
@@ -123,13 +126,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0 # full history so release notes can compare to prior tag
+          fetch-depth: 0 # full history + tags, so the notes can diff against the prior tag
 
-      - name: Create draft release
+      # No dependencies: the script is standard library only, so this needs no
+      # uv sync. It fails the job rather than publishing an empty release.
+      - name: Build release notes
+        env:
+          TAG: ${{ github.ref_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/release_notes.py "$TAG" > "$RUNNER_TEMP/notes.md"
+
+      - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          generate_release_notes: true
-          draft: true
-          # Body is left blank so GitHub's auto-generation fills it in based
-          # on `.github/release.yml`. To prepend a hand-written intro, set
-          # `body:` here and GitHub appends the auto-generated notes after it.
+          body_path: ${{ runner.temp }}/notes.md
+          draft: false
