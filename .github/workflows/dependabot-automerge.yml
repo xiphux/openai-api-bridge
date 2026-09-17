@@ -82,10 +82,20 @@ permissions:
 
 jobs:
   automerge:
+    # The actor is not always Dependabot. When a PR is brought up to date by
+    # hand -- "Update branch", or any push to its branch -- the run that
+    # follows is attributed to whoever did it, and gating on the actor alone
+    # skipped this job and left a green, up-to-date PR sitting unmerged.
+    # (openai-api-bridge #18, whose uv-build range update Dependabot will not
+    # rebase on request, needed exactly that.) The branch name covers those
+    # runs; it is only a cheap filter either way, since the script below is
+    # what actually authenticates the PR: authored by dependabot[bot], from
+    # this repository, against the default branch, at the SHA CI just passed.
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.actor.login == 'dependabot[bot]'
+      (github.event.workflow_run.actor.login == 'dependabot[bot]' ||
+      startsWith(github.event.workflow_run.head_branch, 'dependabot/'))
     runs-on: ubuntu-latest
     # A handful of API calls; bounded so a stalled one can't hold the
     # concurrency group below (and every queued decision) for 6 hours.
