@@ -39,9 +39,16 @@
 
 	dependencyDashboard: true,
 
-	// Sixteen direct dependencies between the project and its dev group, plus
-	// the action pins, released in cooldown batches.
-	prConcurrentLimit: 10,
+	// Deliberately small. Actions minutes are free on a public repository, so
+	// unlike the private repos this is not a billing decision: it bounds how
+	// many open PRs a single merge invalidates, since `rebaseWhen:
+	// 'behind-base-branch'` rebases every one left behind and each rebase
+	// re-runs CI. Kept in line with the private repositories, where the same
+	// number is a direct saving, so the configs stay comparable. Not a
+	// throughput cap: prHourlyLimit (2, the default) limits creation well below
+	// it. Majors are what to watch, since one nobody merges holds its slot
+	// indefinitely.
+	prConcurrentLimit: 5,
 
 	automergeStrategy: 'merge',
 	// GitHub's own auto-merge, so a PR lands the moment its checks pass. This is
