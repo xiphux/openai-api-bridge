@@ -1,0 +1,153 @@
+{
+	// Renovate keeps the Python dependencies, action pins and pre-commit hooks
+	// here current, in place of Dependabot's version updates. Dependabot's
+	// SECURITY updates stay on: they are a repository setting rather than a
+	// config file, so a vulnerable package still arrives as a dependabot/** PR.
+	//
+	// Why the switch: Dependabot offers only a package's newest version, so a
+	// pending major replaced that package's minor and patch updates -- hence
+	// majors were ignored here, with upgrade-check.yml opening an issue for each
+	// instead. It also rebases a PR only when it CONFLICTS, never when it merely
+	// falls behind, so a batch stalled after its first merge and each remaining
+	// PR needed a human to ask for a rebase. #18 was worse still: a range
+	// widening for uv_build has no resolved version, so Dependabot re-submitted
+	// it as a new PR on every run and ignored `@dependabot rebase` entirely.
+	//
+	// .github/workflows/renovate-nudge.yml is the one workaround Renovate needs:
+	// jobs are scheduled every four hours on this plan, and a merge it makes
+	// enqueues no job of its own, so nothing would rebase the PRs each merge
+	// leaves behind.
+	$schema: 'https://docs.renovatebot.com/renovate-schema.json',
+
+	extends: ['config:recommended'],
+
+	// The pre-commit manager is DISABLED by default and has to be opted into --
+	// it is still beta upstream. Without this, dropping dependabot.yml would
+	// silently stop .pre-commit-config.yaml's `rev:` pins from ever moving
+	// again. One repo is pinned there today (pre-commit-hooks); ruff and
+	// gitleaks are local hooks with nothing to pin.
+	'pre-commit': {
+		enabled: true,
+	},
+
+	// Rebase whenever a branch falls behind main, not only when it conflicts.
+	rebaseWhen: 'behind-base-branch',
+
+	// Most malicious PyPI publishes are found and yanked within days, and most
+	// of these merge unattended.
+	minimumReleaseAge: '7 days',
+
+	dependencyDashboard: true,
+
+	// Sixteen direct dependencies between the project and its dev group, plus
+	// the action pins, released in cooldown batches.
+	prConcurrentLimit: 10,
+
+	automergeStrategy: 'merge',
+	// GitHub's own auto-merge, so a PR lands the moment its checks pass. This is
+	// a public repository, so branch protection with required checks is
+	// available and is what makes that meaningful; without required checks
+	// GitHub declines to arm it and Renovate merges during its own run instead.
+	platformAutomerge: true,
+
+	// `deps:` / `deps(dev):` for Python and `ci:` for actions and hooks, as
+	// Dependabot wrote them.
+	commitMessagePrefix: 'deps:',
+
+	// The label Dependabot applied by default, kept so a saved PR filter still
+	// finds these.
+	labels: ['dependencies'],
+
+	packageRules: [
+		{
+			// pyproject.toml states floors (`ruff>=0.16.2`), and uv.lock states
+			// what is installed. Dependabot moved only the lock -- its ruff PR
+			// touched uv.lock and nothing else -- and this reproduces that.
+			//
+			// It also has to be said explicitly: the default `auto` strategy
+			// changes nothing when an update already satisfies the range, so
+			// with open-ended floors like these it would raise almost no PRs at
+			// all. `update-lockfile` updates the lock for in-range updates and
+			// still replaces a range when an update falls outside it, which is
+			// what build-system.requires (`uv_build>=0.11.2,<0.13.0`) needs.
+			matchManagers: ['pep621'],
+			rangeStrategy: 'update-lockfile',
+		},
+		{
+			matchManagers: ['pep621'],
+			matchDepTypes: ['dependency-groups', 'tool.uv.dev-dependencies'],
+			commitMessagePrefix: 'deps(dev):',
+		},
+		{
+			matchManagers: ['github-actions', 'pre-commit'],
+			commitMessagePrefix: 'ci:',
+			// A hijacked action tag or hook release is usually caught and pulled
+			// within days; a week keeps a fresh compromise from reaching a pin
+			// automatically.
+			minimumReleaseAge: '7 days',
+		},
+
+		// What auto-merges, and what does not. Carried over from the verdict in
+		// dependabot-automerge.yml: patch yes; minor yes unless the package is
+		// 0.x, bar the allowlist below; majors and prereleases never.
+		{
+			matchUpdateTypes: ['patch', 'minor'],
+			automerge: true,
+		},
+		{
+			matchUpdateTypes: ['minor'],
+			matchCurrentVersion: '/^0\\./',
+			automerge: false,
+		},
+		{
+			// The 0.x packages whose minors CI can actually judge, carried over
+			// from ZERO_X_MINOR_OK: each is exercised by the test suite rather
+			// than merely installed by it.
+			matchPackageNames: ['fastapi', 'uvicorn', 'aiosqlite', 'respx', 'ruff'],
+			matchUpdateTypes: ['minor'],
+			matchCurrentVersion: '/^0\\./',
+			automerge: true,
+		},
+		{
+			// Majors arrive as their own pull requests now, alongside that
+			// package's routine updates rather than in place of them, which is
+			// what upgrade-check.yml's issues stood in for.
+			matchUpdateTypes: ['major'],
+			automerge: false,
+		},
+		{
+			matchCurrentVersion: '/-/',
+			automerge: false,
+		},
+
+		// The test mocking stack moves together, so CI never sees half a family
+		// bumped: pytest-httpx2 registers respx's httpcore2 mocker, and respx
+		// still builds its mocks from httpx v1 types (see the DEFAULT_MOCKER
+		// note in tests/conftest.py). Narrow on purpose -- a group is held if
+		// any member is.
+		{
+			groupName: 'respx',
+			matchUpdateTypes: ['minor', 'patch'],
+			matchPackageNames: ['respx', 'httpx', 'pytest-httpx2'],
+		},
+
+		{
+			// The Dockerfile's base image, which Dependabot was never configured
+			// to watch here -- Renovate's dockerfile manager is on by default,
+			// so this is new coverage rather than a port. Both stages pin
+			// python:3.12-alpine; a patch or minor of that tag merges on a green
+			// CI run like anything else, and the image smoke job in ci.yml is
+			// what judges it. A major (3.13) is held, as majors are everywhere
+			// here.
+			matchManagers: ['dockerfile'],
+			commitMessagePrefix: 'ci:',
+		},
+	],
+
+	// A vulnerable package is proposed regardless of the cooldown above, the
+	// same carve-out Dependabot's security updates have.
+	vulnerabilityAlerts: {
+		minimumReleaseAge: null,
+		automerge: false,
+	},
+}

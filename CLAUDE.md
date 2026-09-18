@@ -100,14 +100,14 @@ metadata — which node receives the prompt/images, dimension/length nodes, outp
 type). `backends/comfyui/workflows.py` scans and prepares these; the meta schema
 is documented in the README.
 
-## CI and Dependabot
+## CI and dependency updates
 
 `ci.yml` is the one definition of the checks (lint, mypy, deptry, pytest,
 pip-audit, actionlint/zizmor/hadolint, gitleaks, Docker image boot smoke); `docker.yml`
-calls it before publishing. Dependabot PRs auto-merge via
-`dependabot-automerge.yml` when CI is green and every update is semver-safe —
-so a green CI run is a merge decision, and a gate that silently stops checking
-something lets updates through unreviewed. Keep that in mind when touching CI:
+calls it before publishing. Renovate PRs (`.github/renovate.json5`) auto-merge
+when CI is green and every update is semver-safe — so a green CI run is a merge
+decision, and a gate that silently stops checking something lets updates through
+unreviewed. Keep that in mind when touching CI:
 
 - deptry answers the other half of dependency hygiene from pip-audit: a package
   declared but unused still installs and still ships in the image, and an
@@ -120,8 +120,21 @@ something lets updates through unreviewed. Keep that in mind when touching CI:
 - Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
   via `docker run` are pinned by digest. zizmor/hadolint exceptions go in
   `.github/zizmor.yml` / `.hadolint.yaml` with a reason, never silenced inline.
-- A 0.x package joins `ZERO_X_MINOR_OK` in the auto-merge workflow only with
-  the test that would catch its breaking minor named in that file's header.
+- A 0.x package joins the 0.x-minor allowlist in `renovate.json5` only with the
+  test that would catch its breaking minor named beside it. Majors are never
+  auto-merged; Renovate raises them as their own PRs, alongside a package's
+  routine updates rather than in place of them, which is why `upgrade-check.yml`
+  no longer runs weekly and `dependabot-automerge.yml` is dormant. Both are kept
+  rather than deleted so reverting is a checkout. Dependabot **security**
+  updates are untouched — a repository setting, not a config file.
+- `renovate.json5` sets `rangeStrategy: update-lockfile` for pep621 and opts the
+  `pre-commit` manager in. Both are load-bearing: the default strategy changes
+  nothing when an update already satisfies an open-ended floor like
+  `ruff>=0.16.2`, so almost nothing would be proposed, and the pre-commit
+  manager is off by default, so `.pre-commit-config.yaml`'s `rev:` pins would
+  quietly stop moving.
+- `renovate-nudge.yml` wakes Renovate after a push: a merge it performs enqueues
+  no job of its own, and the scheduled run is four-hourly.
 - A new runtime dependency with a native extension should get real work in
   `tests/image-smoke/smoke.py` — that's the only check of the `--no-dev`
   Alpine install.
