@@ -124,6 +124,19 @@
 			// package's routine updates rather than in place of them, which is
 			// what upgrade-check.yml's issues stood in for.
 			matchUpdateTypes: ['major'],
+		// Rebased only on a genuine conflict, unlike everything else here.
+		// A major never auto-merges, so it sits open until somebody decides on
+		// it -- and under the repository-wide `rebaseWhen: 'behind-base-branch'`
+		// every unrelated merge to the default branch rebased it and re-ran the
+		// whole suite against a pull request that was never going to land on
+		// that push. Measured in heatsheet-io over 18-20 September: 44 of its
+		// 54 pull-request CI runs were on majors, renovate/pnpm-12.x alone
+		// running twelve times at roughly 51 billable minutes each.
+		//
+		// Being behind costs a major nothing: nothing merges it automatically,
+		// and whoever picks it up wants a fresh run at that moment anyway --
+		// which ticking its checkbox on the dependency dashboard provides.
+		rebaseWhen: 'conflicted',
 			automerge: false,
 		},
 		{
