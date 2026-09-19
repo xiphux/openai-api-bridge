@@ -51,6 +51,13 @@ dev = [
   "pre-commit>=4.0.0",
   "pytest>=9.1.1",
   "pytest-asyncio>=1.4.0",
+  # For tests/test_ci_workflow.py, which parses the workflow files to
+  # assert the CI gate cannot report a pass it did not earn. The
+  # comment under [tool.deptry] about PyYAML concerns scripts/, which
+  # runs outside this environment on purpose; a test runs inside it.
+  "pyyaml>=6.0.2",
+  # mypy runs strict over tests/ too, and yaml ships no inline types.
+  "types-PyYAML>=6.0.12",
   # Registers respx's httpcore2 mocker; see the DEFAULT_MOCKER note in
   # tests/conftest.py for why that one line replaces 347 call-site edits.
   "pytest-cov>=7.1.0",

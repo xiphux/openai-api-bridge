@@ -9,7 +9,10 @@
 #   - Direct on every PR. Drives the PR checks UI, and its completion is what
 #     dependabot-automerge.yml listens for (by this workflow's name, `CI`).
 #   - Indirect via `workflow_call` from docker.yml on `main` pushes and
-#     `v*.*.*` tags, so publishing is gated on exactly these jobs.
+#     `v*.*.*` tags, so publishing is gated on exactly these jobs. Both of
+#     those re-check content that has already been checked -- the `main` push
+#     re-runs what the pull request ran, and the tag re-runs what the `main`
+#     push ran over the same commit -- which is what `gate` below removes.
 #
 # Don't rename: dependabot-automerge.yml listens for `workflow_run` of a
 # workflow NAMED `CI`, and nothing (actionlint included) flags the mismatch —
@@ -44,10 +47,168 @@ permissions:
 # default is 6 hours, which is how long a hang would otherwise hold a runner
 # (and a Dependabot PR's verdict).
 jobs:
+  # Has this exact content already gone green somewhere else? If so every
+  # check below skips, because running them again would test the same bytes
+  # a second time.
+  #
+  # Two ways that can be true, tried in order:
+  #
+  #   (1) THE SAME COMMIT — a release tag points at the commit `main` was
+  #       already pushed with, so the run that checked `main` checked this.
+  #       Identical SHA is the strongest evidence there is.
+  #   (2) THE SAME TREE — on a `main` push, HEAD is the merge commit and its
+  #       second parent is the branch that merged. Equal trees mean
+  #       byte-identical checkouts, because a tree object hashes the complete
+  #       recursive listing, every path, mode and blob, while saying nothing
+  #       about lineage, message or commit hash. Equality also proves the
+  #       branch was up to date when it merged: had `main` moved ahead, the
+  #       merge would have folded those commits into the tree and the hashes
+  #       would differ. So the case that must not inherit — a branch tested
+  #       against an older `main`, merged onto a newer one, never tested in
+  #       combination — is excluded by the comparison itself.
+  #
+  # They compose without overlapping: on a `main` push (1) finds nothing,
+  # because a pull_request run reports the BRANCH head as its `head_sha`
+  # rather than the merge commit, so it falls through to (2). On a tag (1)
+  # answers at once.
+  #
+  # The two lookups name DIFFERENT workflows. This file never has a run of
+  # its own on `main` or a tag — docker.yml calls it, and a called workflow
+  # runs inside the caller's run — so the branch/tag evidence is a docker.yml
+  # run, while the pull-request evidence is a run of this file.
+  #
+  # THE INVARIANT THAT MATTERS: at least one job here must not skip. A called
+  # workflow whose jobs ALL skip concludes as *skipped*, and docker.yml's
+  # `build-and-push` hangs off `needs: tests`, so that would skip the publish
+  # and turn a release into a green run that shipped nothing. It cannot
+  # happen: the checks skip only when `passed == 'true'`, and only a job that
+  # RAN can emit that. So if `gate` skips, the checks run; if it runs, it is
+  # itself the non-skipped job.
+  #
+  # Not on pull requests, deliberately. There the checkout is the merge ref —
+  # itself a merge commit whose second parent is the branch head — so (2)
+  # would compare a tree against the very branch under test and look up that
+  # branch's own runs. A pull request must never certify itself. Because this
+  # job can therefore skip, every check carries `!cancelled()`: without it a
+  # skipped `gate` would skip the whole suite, since a plain expression does
+  # not override the success-gating a skipped dependency imposes.
+  #
+  # Guarded at two levels. `continue-on-error` on the STEP stops a failed
+  # lookup — a network error, an unparseable response — from failing the job;
+  # the same key on the JOB stops a job-level death, in practice a runner that
+  # never allocates, from failing the run. Neither bounds queue time, since
+  # `timeout-minutes` does not start until a runner picks the job up. Nothing
+  # depends on this job finishing usefully — the checks run regardless.
+  #
+  # Re-runs re-check for real: the script declines to inherit on attempt 2 and
+  # above, so "Re-run all jobs" still means something.
+  #
+  # Staleness: an inherited pass asserts "identical content", not "identical
+  # toolchain". The window is minutes for a merge; for a tag it is however
+  # long sits between the merge and the release.
+  gate:
+    name: Check for an earlier pass
+    if: >-
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # For the run lookups below.
+      actions: read
+    outputs:
+      passed: ${{ steps.inherit.outputs.passed }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit and its parents is all (2) needs. If a fetch ever
+          # comes back without the second parent, `rev-parse` fails and the
+          # step falls through to running the checks.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Inherit a pass this content already earned
+        id: inherit
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SAME_SHA_WORKFLOW: .github/workflows/docker.yml
+          PR_WORKFLOW: .github/workflows/ci.yml
+        run: |
+          set -euo pipefail
+
+          # A re-run is somebody asking for these checks to actually run.
+          if [ "${GITHUB_RUN_ATTEMPT:-1}" != "1" ]; then
+            echo "Attempt ${GITHUB_RUN_ATTEMPT:-1}: re-checking rather than inheriting."
+            exit 0
+          fi
+
+          runs_for () {
+            gh api "/repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=$1&per_page=100" \
+              --jq "$2"
+          }
+
+          # Each lookup either sets `reason` or bows out, so there is exactly
+          # one line below that can report a pass, however many ways there are
+          # to earn one.
+          reason=""
+
+          # shellcheck disable=SC2016
+          # The single quotes are the point: `$ENV.…` must reach jq
+          # unexpanded, so that jq reads the value from the environment. A
+          # shell expansion here would splice the value into the program text
+          # instead, which is both wrong and the shape an injection would take.
+          same_sha=$(runs_for "${GITHUB_SHA}" '
+            [.workflow_runs[]
+             | select(.path == $ENV.SAME_SHA_WORKFLOW
+                      and (.id | tostring) != $ENV.GITHUB_RUN_ID)]
+            | sort_by(.run_started_at) | last | .conclusion // empty')
+
+          if [ "${same_sha}" = "success" ]; then
+            reason="${GITHUB_SHA} has already been checked by an earlier run"
+          else
+            if ! pr_head=$(git rev-parse -q --verify 'HEAD^2'); then
+              echo "No earlier run for ${GITHUB_SHA}, and HEAD is not a merge commit."
+              exit 0
+            fi
+
+            head_tree=$(git rev-parse 'HEAD^{tree}')
+            pr_tree=$(git rev-parse "${pr_head}^{tree}")
+
+            if [ "${head_tree}" != "${pr_tree}" ]; then
+              echo "Tree ${head_tree} differs from ${pr_head}'s ${pr_tree}."
+              echo "The merge combined two lines nothing has tested together."
+              exit 0
+            fi
+
+            # shellcheck disable=SC2016
+            # Same reason as above.
+            same_tree=$(runs_for "${pr_head}" '
+              [.workflow_runs[]
+               | select(.path == $ENV.PR_WORKFLOW
+                        and .event == "pull_request")]
+              | sort_by(.run_started_at) | last | .conclusion // empty')
+
+            if [ "${same_tree}" != "success" ]; then
+              echo "No successful run for ${pr_head} (got: ${same_tree:-none})."
+              exit 0
+            fi
+
+            reason="the tree is identical to ${pr_head}, whose checks passed"
+          fi
+
+          echo "Inheriting: ${reason}."
+          echo "passed=true" >> "${GITHUB_OUTPUT}"
+
   # Lint, format and type-check share a job: each takes seconds, and separate
   # jobs would each pay for their own checkout and `uv sync`.
   static:
     name: Lint + format + type-check
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -98,6 +259,8 @@ jobs:
 
   tests:
     name: Tests
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -125,6 +288,8 @@ jobs:
   # (.github/zizmor.yml, .hadolint.yaml), with reasons.
   infra:
     name: Workflow + Dockerfile lint
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -187,6 +352,8 @@ jobs:
   # with `--require-hashes` resolves nothing, so it checks exactly uv.lock.
   audit:
     name: Dependency audit
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -228,6 +395,8 @@ jobs:
   # image docker.yml publishes.
   image:
     name: Docker image smoke
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -282,6 +451,8 @@ jobs:
   # logic that differs between push, PR and workflow_call.
   secrets:
     name: Secret scan
+    needs: gate
+    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
