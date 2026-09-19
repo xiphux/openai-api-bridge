@@ -74,11 +74,13 @@ dev = [
 # ships in the image, and Dependabot goes on proposing updates for it, while an
 # undeclared import works right up until whatever was pulling it in stops.
 [tool.deptry]
-# scripts/ is not run against this project's environment. upgrade-check.yml
-# invokes major_upgrade_issues.py with `uv run --no-project --with pyyaml==...`,
-# supplying its dependencies at the call site on purpose (the comment there
-# explains why PyYAML is not borrowed from the venv). Scanning it would report
-# that deliberate arrangement as a missing dependency.
+# scripts/ is not run against this project's environment: what remains there
+# (release_notes.py) is invoked with `uv run --no-project`, supplying its
+# dependencies at the call site on purpose. Scanning it would report that
+# deliberate arrangement as a missing dependency.
+#
+# The exclusion was written for major_upgrade_issues.py, which upgrade-check.yml
+# ran the same way; both are gone, and the reasoning outlived them.
 extend_exclude = ["scripts"]
 
 [tool.deptry.per_rule_ignores]

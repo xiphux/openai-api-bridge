@@ -4,19 +4,20 @@
 #   - Direct on push to any branch except `main`, Dependabot's, and tags.
 #     Feature-branch pushes get feedback without a Docker publish riding along.
 #     Dependabot branches are excluded because every one has a PR: the push run
-#     would duplicate the `pull_request` run on the same commit, and only the
-#     `pull_request` run is read by dependabot-automerge.yml.
-#   - Direct on every PR. Drives the PR checks UI, and its completion is what
-#     dependabot-automerge.yml listens for (by this workflow's name, `CI`).
+#     would duplicate the `pull_request` run on the same commit, and the
+#     `pull_request` run is the one that matters. Dependabot still opens those
+#     branches for SECURITY updates, which is why the exclusion stays.
+#   - Direct on every PR. Drives the PR checks UI.
 #   - Indirect via `workflow_call` from docker.yml on `main` pushes and
 #     `v*.*.*` tags, so publishing is gated on exactly these jobs. Both of
 #     those re-check content that has already been checked -- the `main` push
 #     re-runs what the pull request ran, and the tag re-runs what the `main`
 #     push ran over the same commit -- which is what `gate` below removes.
 #
-# Don't rename: dependabot-automerge.yml listens for `workflow_run` of a
-# workflow NAMED `CI`, and nothing (actionlint included) flags the mismatch —
-# auto-merge would just silently stop firing.
+# Nothing keys on this workflow's NAME any more. dependabot-automerge.yml did,
+# listening for `workflow_run` of a workflow named `CI`, and nothing — not
+# even actionlint — flagged a mismatch, so a rename would have stopped
+# auto-merge silently. Renovate merges through the platform instead.
 name: CI
 
 on:

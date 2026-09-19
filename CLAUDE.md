@@ -113,8 +113,8 @@ unreviewed. Keep that in mind when touching CI:
   declared but unused still installs and still ships in the image, and an
   import missing from the declarations works only until whatever pulled it in
   stops. Its exceptions are in `[tool.deptry]` in pyproject.toml, each with its
-  reason: `scripts/` is excluded (upgrade-check.yml runs it `--no-project
-  --with pyyaml==...`, so project dependencies do not govern it), and
+  reason: `scripts/` is excluded (it is run outside this project's
+  environment, so project dependencies do not govern it), and
   python-multipart is ignored for DEP002 (FastAPI parses multipart with it but
   nothing imports the name).
 - Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
@@ -123,10 +123,13 @@ unreviewed. Keep that in mind when touching CI:
 - A 0.x package joins the 0.x-minor allowlist in `renovate.json5` only with the
   test that would catch its breaking minor named beside it. Majors are never
   auto-merged; Renovate raises them as their own PRs, alongside a package's
-  routine updates rather than in place of them, which is why `upgrade-check.yml`
-  no longer runs weekly and `dependabot-automerge.yml` is dormant. Both are kept
-  rather than deleted so reverting is a checkout. Dependabot **security**
-  updates are untouched — a repository setting, not a config file.
+  routine updates rather than in place of them — and they are not rebased while
+  they sit, since nothing will merge them until someone decides.
+  `upgrade-check.yml` and `dependabot-automerge.yml` did those jobs before and
+  are now deleted, with `scripts/major_upgrade_issues.py`: the weekly issues
+  existed only because Dependabot could not offer a major without displacing a
+  package's routine updates. Dependabot **security** updates are untouched — a
+  repository setting, not a config file — and arrive as PRs to merge by hand.
 - `renovate.json5` sets `rangeStrategy: update-lockfile` for pep621 and opts the
   `pre-commit` manager in. Both are load-bearing: the default strategy changes
   nothing when an update already satisfies an open-ended floor like

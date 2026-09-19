@@ -20,9 +20,6 @@ rules:
   # through the API, requires a Dependabot-authored head commit whose SHA is the
   # one CI passed, and its only write is `gh pr merge`. The comment at the top
   # of the file explains why it can't live inside ci.yml instead.
-  dangerous-triggers:
-    ignore:
-      - dependabot-automerge.yml
 
   # Suggests `gh release create` over softprops/action-gh-release. A fair
   # simplification, but it would change how the draft and generated notes
