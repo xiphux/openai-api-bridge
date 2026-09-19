@@ -168,6 +168,26 @@
 		},
 	],
 
+	// Renovate's own vulnerability source, from osv.dev, rather than the
+	// GitHub alerts that `vulnerabilityAlerts` below reads. Both are wanted.
+	//
+	// `vulnerabilityAlerts` is `supportedPlatforms: ["github"]` -- it consumes
+	// the Dependabot ALERTS on this repository, which means it works only if
+	// the Renovate app can read them. That permission has not been confirmed
+	// here, and the failure would be silent: no alerts visible, no fix raised,
+	// nothing red. osv.dev is queried by Renovate directly, so this path does
+	// not depend on it. osv.dev ingests GitHub's advisories among other
+	// sources, so turning it on does not narrow what gets caught.
+	//
+	// This is what makes it safe to stop Dependabot opening its own security
+	// pull requests: with a source Renovate owns, switching those off removes a
+	// duplicate rather than the only fix. Dependabot ALERTS stay on -- they
+	// cost nothing, and they feed `vulnerabilityAlerts` if that permission does
+	// turn out to exist.
+	//
+	// Container images are not in scope here; Grype covers those.
+	osvVulnerabilityAlerts: true,
+
 	// A vulnerable package is proposed regardless of the cooldown above, the
 	// same carve-out Dependabot's security updates have.
 	vulnerabilityAlerts: {
