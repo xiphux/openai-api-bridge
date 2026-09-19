@@ -147,3 +147,11 @@ def test_publish_is_gated_on_checks_concluding_success() -> None:
     docker = load("docker.yml")
     assert docker["build-and-push"]["needs"] == "tests"
     assert "if" not in docker["build-and-push"]
+
+
+def test_caller_grants_the_scope_the_gate_declares() -> None:
+    # A called workflow is CAPPED by the calling job, and declaring a
+    # permission the caller withholds is a hard validation error that rejects
+    # the whole file before any job runs -- not a quiet downgrade. Both halves
+    # must agree, and only this asserts the caller's half.
+    assert load("docker.yml")["tests"]["permissions"]["actions"] == "read"

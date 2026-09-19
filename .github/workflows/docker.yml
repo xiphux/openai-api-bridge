@@ -39,6 +39,15 @@ jobs:
   tests:
     name: CI
     uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      # The called workflow's `gate` declares `actions: read` to look up
+      # earlier runs, and a called workflow is CAPPED by the calling job. A
+      # declared permission the caller does not grant is not a silent
+      # downgrade -- it is a hard validation error, "the nested job 'gate' is
+      # requesting 'actions: read', but is only allowed 'actions: none'",
+      # which rejects the whole file before any job starts.
+      actions: read
 
   build-and-push:
     needs: tests
