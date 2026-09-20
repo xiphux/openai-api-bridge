@@ -69,7 +69,9 @@ async def run_video_job(
             file_id=file_id,
             progress_pct=100,
             # What the backend actually rendered, which snapping means need not
-            # be what the request named. None leaves the requested value.
+            # be what the request named. None is written through as NULL rather
+            # than skipped: a backend that deals in no ratios honoured nothing,
+            # so the row must stop reporting the request as if it had.
             aspect_ratio=asset.aspect_ratio,
         )
         log.info("Video job %s completed; file_id=%s", job_id, file_id)

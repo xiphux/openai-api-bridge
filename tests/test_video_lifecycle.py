@@ -521,3 +521,55 @@ async def test_poll_completion_gives_up_at_its_deadline() -> None:
             await client.poll_completion("slow-id", timeout_seconds=0.05)
     finally:
         await client.aclose()
+
+
+async def test_a_completed_job_stops_reporting_an_unhonoured_aspect_ratio(
+    jobstore: JobStore,
+) -> None:
+    """A backend that deals in no ratios honoured nothing, so the row must not
+    keep echoing the request back as if it had.
+
+    The patch convention elsewhere in `update` is "None means skip", which would
+    leave the creation-time request standing forever — and `docs/aspect-ratios.md`
+    tells clients the completed job's value is the real one.
+    """
+    await jobstore.create(
+        job_id="ar1", model="p/m", prompt="x", size=None, aspect_ratio="16:9", seconds=None
+    )
+    queued = await jobstore.get("ar1")
+    assert queued is not None
+    # Seeded from the request while queued.
+    assert queued.aspect_ratio == "16:9"
+
+    await jobstore.update("ar1", status="completed", aspect_ratio=None)
+    settled = await jobstore.get("ar1")
+    assert settled is not None
+    assert settled.aspect_ratio is None
+
+
+async def test_a_completed_job_reports_the_ratio_the_backend_rendered(
+    jobstore: JobStore,
+) -> None:
+    """And when the backend DOES report one, it replaces the request — snapping
+    means the two differ whenever the model's menu lacked what was asked for."""
+    await jobstore.create(
+        job_id="ar2", model="p/m", prompt="x", size=None, aspect_ratio="21:9", seconds=None
+    )
+    await jobstore.update("ar2", status="completed", aspect_ratio="16:9")
+    settled = await jobstore.get("ar2")
+    assert settled is not None
+    assert settled.aspect_ratio == "16:9"
+
+
+async def test_an_unrelated_update_leaves_the_aspect_ratio_alone(
+    jobstore: JobStore,
+) -> None:
+    """The sentinel must not turn every patch into a clear: an update that says
+    nothing about the ratio still has to leave it standing."""
+    await jobstore.create(
+        job_id="ar3", model="p/m", prompt="x", size=None, aspect_ratio="4:3", seconds=None
+    )
+    await jobstore.update("ar3", status="in_progress")
+    job = await jobstore.get("ar3")
+    assert job is not None
+    assert job.aspect_ratio == "4:3"

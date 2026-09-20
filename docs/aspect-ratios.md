@@ -118,9 +118,10 @@ So **read the echo rather than recording your request**:
 
 * Images: `aspect_ratio` on each `data[]` entry, omitted when the backend
   didn't deal in ratios.
-* Video: `aspect_ratio` on the job object from `GET /v1/videos/{id}`. Set from
-  the request at creation, then refined to the real value once the render
-  completes.
+* Video: `aspect_ratio` on the job object from `GET /v1/videos/{id}`. Seeded
+  from the request at creation, then settled once the render completes — to
+  what was rendered, or to `null` when the backend deals in no ratios. So read
+  it off the **completed** job; on a queued one it is still just your request.
 
 If you persist a generation's shape — to label it, or to reproduce it on a
 regenerate — persist the echoed value.

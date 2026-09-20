@@ -13,6 +13,21 @@ from .db import Database
 JobStatus = Literal["queued", "in_progress", "completed", "failed"]
 
 
+class _Unset:
+    """Sentinel for :meth:`JobStore.update`: "leave this column alone".
+
+    The patch convention here is "only fields explicitly passed (not None) are
+    written", which cannot express "write NULL". That is fine for every field
+    that only ever gains a value, and wrong for ``aspect_ratio``, which has to be
+    able to go BACK to NULL: it is seeded from the request at creation, and a
+    backend that doesn't deal in ratios reports none, at which point the row must
+    stop claiming the request was honoured.
+    """
+
+
+_UNSET = _Unset()
+
+
 @dataclass(slots=True, frozen=True)
 class VideoJob:
     id: str
@@ -20,9 +35,13 @@ class VideoJob:
     model: str
     prompt: str
     size: str | None
-    # The canonical aspect ratio this job renders at. Set from the request, then
-    # refined on completion to what the backend actually used — snapping means a
-    # model may render the nearest ratio it offers rather than the one asked for.
+    # The canonical aspect ratio this job renders at. Seeded from the request,
+    # then settled on completion to what the backend actually used — snapping
+    # means a model may render the nearest ratio it offers rather than the one
+    # asked for, and a backend that deals in no ratios at all reports none, which
+    # clears this back to NULL rather than leaving the unhonoured request
+    # standing. So on a COMPLETED job this is what was rendered, or NULL when
+    # nothing reported a ratio; while queued it is only what was asked for.
     aspect_ratio: str | None
     seconds: float | None
     # **Always None.** The column exists and is read back here, but nothing
@@ -106,9 +125,13 @@ class JobStore:
         file_id: str | None = None,
         error_message: str | None = None,
         progress_pct: int | None = None,
-        aspect_ratio: str | None = None,
+        aspect_ratio: str | _Unset | None = _UNSET,
     ) -> None:
-        """Patch-style update. Only fields explicitly passed (not None) are written."""
+        """Patch-style update. Only fields explicitly passed (not None) are written.
+
+        ``aspect_ratio`` is the exception: it takes a sentinel default so that
+        passing ``None`` WRITES NULL rather than meaning "skip". See :class:`_Unset`.
+        """
         sets: list[str] = ["updated_at = ?"]
         params: list[Any] = [int(time.time())]
         if status is not None:
@@ -126,7 +149,7 @@ class JobStore:
         if progress_pct is not None:
             sets.append("progress_pct = ?")
             params.append(progress_pct)
-        if aspect_ratio is not None:
+        if not isinstance(aspect_ratio, _Unset):
             sets.append("aspect_ratio = ?")
             params.append(aspect_ratio)
         params.append(job_id)
