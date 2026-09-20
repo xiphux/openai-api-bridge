@@ -327,7 +327,21 @@ def prepare_workflow(
     if record.aspect_ratios:
         chosen = snap_aspect_ratio(aspect_ratio, record.aspect_ratios)
         node_id = str(meta["aspect_ratio_node"])
-        if chosen is not None and node_id in workflow:
+        if node_id not in workflow:
+            # The scan validated this id against the graph, but the graph is
+            # re-read per request while the meta is cached — so an operator who
+            # renumbers the node mid-process lands here. Worth a warning rather
+            # than a silent no-op: the run still succeeds, at the graph's own
+            # saved ratio, while `effective_aspect_ratio` reports the snapped
+            # request. That divergence is otherwise invisible.
+            log.warning(
+                "Workflow %r: aspect_ratio_node %r is no longer in the graph; "
+                "rendering at the graph's saved ratio and reporting the requested one. "
+                "Restart to rescan, or set cache_workflows = false.",
+                record.slug,
+                node_id,
+            )
+        elif chosen is not None:
             field = meta.get("aspect_ratio_field", "aspect_ratio")
             workflow[node_id].setdefault("inputs", {})[field] = chosen.literal
     else:

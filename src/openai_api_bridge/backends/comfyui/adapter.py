@@ -93,7 +93,8 @@ class ComfyUIBackend(Backend):
         With ``cache_workflows = false`` this rescanned on every request —
         every /v1/models and every generation — and a scan reads and parses
         each ``.meta.json`` (plus the graph itself for any workflow needing
-        output-type autodetection). With fifty workflows that's ~50-100 file
+        output-type autodetection or declaring an aspect-ratio node, whose
+        saved value is where the advertised default comes from). With fifty workflows that's ~50-100 file
         reads and JSON parses per request, synchronously, on the event loop
         the whole bridge shares.
 

@@ -34,9 +34,11 @@ class AspectRatio:
     """One selectable aspect ratio.
 
     ``value`` is the ratio as the node spells it (``"16:9"``) and is what a
-    client sends back. ``label`` is the literal's parenthetical, when it has one, for
-    a client that wants a word beside the numbers. ``literal`` is the exact
-    string the upstream node expects — bridge-internal.
+    client sends back. ``label`` is whatever followed that token — the
+    parenthetical in ComfyUI's own spellings, but see
+    :func:`parse_aspect_ratio` for the unparenthesised case — and is ``None``
+    for a bare ratio. ``literal`` is the exact string the upstream node
+    expects — bridge-internal.
 
     ``ratio`` is ``width / height``, precomputed because snapping compares it
     for every option on every request.
