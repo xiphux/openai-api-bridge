@@ -105,6 +105,10 @@ ratio you asked for, the bridge picks the **nearest ratio it does offer**,
 measured in log space so `2:1` is as far from `1:1` as `1:2` is. It does not
 return a 400, and it does not fall back to the model's own default.
 
+(A value that isn't a `W:H` token at all — `"wide"`, `null`, a number — is not
+"a ratio you sent" and gets no snapping: it is treated as naming nothing, so the
+model's own default stands.)
+
 That matters because a client's menu and a model's menu drift apart for
 ordinary reasons:
 
@@ -119,12 +123,17 @@ further from the request than anything in the list. Snapping gives you `16:9`.
 
 So **read the echo rather than recording your request**:
 
-* Images: `aspect_ratio` on each `data[]` entry, omitted when the backend
+* Images: `aspect_ratio` on each `data[]` entry, **omitted** when the backend
   didn't deal in ratios.
 * Video: `aspect_ratio` on the job object from `GET /v1/videos/{id}`. Seeded
   from the request at creation, then settled once the render completes — to
   what was rendered, or to `null` when the backend deals in no ratios. So read
   it off the **completed** job; on a queued one it is still just your request.
+
+Note the two surfaces differ in shape, deliberately: the image field is absent
+when there's nothing to say, while the job field is always present and may be
+`null`. The job object carries `size` the same way, so `aspect_ratio` matches its
+neighbours rather than the image echo. Handle both.
 
 If you persist a generation's shape — to label it, or to reproduce it on a
 regenerate — persist the echoed value.

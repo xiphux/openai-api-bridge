@@ -626,9 +626,13 @@ Two consequences worth knowing:
   `data[]` entry for images, and on the job row for `/v1/videos`.
 
 The default advertised in `aspect_ratio_default` is read from the node's saved
-value in the graph, so it costs no meta field and can't drift from what the
-workflow really does. Like the rest of the meta it's captured at scan time —
-see `cache_workflows`.
+value in the graph, so it costs no meta field — there's no second place to
+declare it and no way for the two to disagree. It is captured at **scan** time
+though, like the rest of the meta: edit the graph's saved ratio without
+restarting and, under the default `cache_workflows = true`, the render follows
+the file while the advertised default (and the echo, for a request that names
+no ratio) follows the cache until a rescan. `cache_workflows = false` picks a
+graph edit up on its own.
 
 ## Tests
 

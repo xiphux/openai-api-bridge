@@ -223,8 +223,9 @@ def test_a_declared_node_and_list_are_resolved_at_scan_time(tmp_path: Path) -> N
 
 
 def test_the_default_is_read_from_the_graphs_saved_value(tmp_path: Path) -> None:
-    """Costs no meta field, and means the advertised default can't drift from
-    what the workflow actually does."""
+    """Costs no meta field — there is no second place to declare it, so nothing
+    can disagree with the graph. (It is read at SCAN time, so it can still lag a
+    graph edited under ``cache_workflows = true``; see the README.)"""
     _write(
         tmp_path,
         {"positive_prompt_node": "1", "aspect_ratio_node": "5", "aspect_ratios": STOCK},

@@ -101,9 +101,12 @@ class ComfyUIBackend(Backend):
         A stat-only fingerprint tells us whether anything moved, which is the
         cheap version of the same guarantee, and the scan itself runs off the
         loop. Note the graph itself is re-read from disk per generation (see
-        ``read_graph_text``), so an edited *workflow* takes effect regardless
-        of this cache; what the rescan buys is picking up edited or added
-        *meta* files.
+        ``read_graph_text``), so an edited *workflow* takes effect for the
+        RENDER regardless of this cache. Values *derived* from the graph at scan
+        time do not: ``output_type`` and ``aspect_ratio_default`` are read once
+        here and follow the rescan, not the file. So what the rescan buys is
+        picking up edited or added *meta* files, plus those two graph-derived
+        fields.
         """
         if self._workflows is not None:
             if self.cfg.cache_workflows:
