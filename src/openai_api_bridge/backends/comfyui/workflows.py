@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ...errors import UnsupportedOperation, WorkflowInvalid
+from ...util.aspect import AspectRatio, parse_aspect_ratio, parse_aspect_ratios, snap_aspect_ratio
 from ...util.ids import slugify
 
 log = logging.getLogger(__name__)
@@ -38,6 +39,15 @@ class WorkflowRecord:
     meta: dict[str, Any]
     output_type: str  # "image" | "video"
     display_name: str
+    # Resolved at scan time rather than read from ``meta`` at use sites: the
+    # literals need parsing and validating, and doing it once per scan means one
+    # warning per bad declaration instead of one per request.
+    aspect_ratios: tuple[AspectRatio, ...] = ()
+    # The canonical ratio the graph is saved with — what this workflow produces
+    # when a request names none. Read from the graph, so it costs no meta field,
+    # but it is captured at scan time and so goes stale with the rest of the
+    # scan until ``cache_workflows`` lets it rescan.
+    aspect_ratio_default: str | None = None
 
 
 def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
@@ -69,11 +79,22 @@ def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
             log.warning("Skipping %s: meta missing 'positive_prompt_node'", json_path.name)
             continue
 
-        output_type = meta.get("output_type")
-        if output_type not in ("image", "video"):
-            output_type = _autodetect_output_type(json_path)
-            if output_type is None:
+        # The graph is read here only when something needs it: autodetecting the
+        # output type, or reading the aspect-ratio node's saved default. Most
+        # workflows already pay for that read via autodetection.
+        declared_type = meta.get("output_type")
+        needs_autodetect = declared_type not in ("image", "video")
+        wants_aspect = meta.get("aspect_ratio_node") is not None or "aspect_ratios" in meta
+        graph = _read_graph(json_path) if needs_autodetect or wants_aspect else None
+
+        if needs_autodetect:
+            if graph is None:
                 continue
+            output_type = _output_type_of(graph)
+        else:
+            output_type = str(declared_type)
+
+        aspect_ratios, aspect_ratio_default = _resolve_aspect_ratios(meta, graph, json_path.name)
 
         base = json_path.name.removesuffix(".json")
         slug = slugify(base)
@@ -96,27 +117,114 @@ def scan_workflows(workflows_dir: Path) -> dict[str, WorkflowRecord]:
             meta=meta,
             output_type=output_type,
             display_name=display_name,
+            aspect_ratios=aspect_ratios,
+            aspect_ratio_default=aspect_ratio_default,
         )
         log.info(
-            "Discovered workflow %r (%s) — output_type=%s",
+            "Discovered workflow %r (%s) — output_type=%s%s",
             display_name,
             json_path.name,
             output_type,
+            f", {len(aspect_ratios)} aspect ratios" if aspect_ratios else "",
         )
     return out
 
 
-def _autodetect_output_type(json_path: Path) -> str | None:
+def _read_graph(json_path: Path) -> dict[str, Any] | None:
+    """Parse a workflow graph, or ``None`` when it can't be read."""
     try:
-        graph = json.loads(json_path.read_text(encoding="utf-8"))
+        parsed = json.loads(json_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        log.warning("Skipping %s: workflow read failed: %s", json_path.name, e)
+        log.warning("%s: workflow read failed: %s", json_path.name, e)
         return None
+    if not isinstance(parsed, dict):
+        log.warning("%s: workflow graph is not an object", json_path.name)
+        return None
+    return parsed
+
+
+def _output_type_of(graph: dict[str, Any]) -> str:
     has_video = any(
         isinstance(node, dict) and node.get("class_type") in VIDEO_OUTPUT_CLASS_TYPES
         for node in graph.values()
     )
     return "video" if has_video else "image"
+
+
+def _resolve_aspect_ratios(
+    meta: dict[str, Any],
+    graph: dict[str, Any] | None,
+    filename: str,
+) -> tuple[tuple[AspectRatio, ...], str | None]:
+    """Validate a workflow's aspect-ratio declaration and read its default.
+
+    Both halves are required: the node says where to inject, the list says what
+    may be injected, and neither is derivable from the other — the graph holds
+    only the *current* value, never the node's menu. Half a declaration is an
+    operator mistake rather than a partial feature, so it warns and disables,
+    which leaves the workflow generating at its baked-in ratio instead of
+    advertising a menu it can't honour (or honouring values it never offered).
+    """
+    node_id = meta.get("aspect_ratio_node")
+    raw = meta.get("aspect_ratios")
+    if node_id is None and raw is None:
+        return (), None
+
+    if node_id is None or raw is None:
+        missing = "aspect_ratio_node" if node_id is None else "aspect_ratios"
+        log.warning(
+            "%s: aspect ratios need both 'aspect_ratio_node' and 'aspect_ratios'; "
+            "%r is missing, so the selector is disabled for this workflow",
+            filename,
+            missing,
+        )
+        return (), None
+
+    options = parse_aspect_ratios(raw, where=filename)
+    if not options:
+        log.warning("%s: 'aspect_ratios' yielded no usable options; selector disabled", filename)
+        return (), None
+
+    # Nothing to inject into means the declaration is stale — a renumbered node,
+    # usually, which is silent otherwise because ComfyUI ids aren't stable across
+    # a re-export.
+    if graph is not None and str(node_id) not in graph:
+        log.warning(
+            "%s: aspect_ratio_node %r is not in the graph; selector disabled",
+            filename,
+            node_id,
+        )
+        return (), None
+
+    # An aspect-ratio node computes the dimensions the graph then uses, so a
+    # workflow declaring both knobs has two writers for one value and the
+    # downstream one wins — which is whichever the graph happens to wire last.
+    # Prefer the ratio: it is the newer, more specific declaration, and it is
+    # the one a client is being told about.
+    if meta.get("dimensions_node") is not None:
+        log.warning(
+            "%s: declares both 'aspect_ratio_node' and 'dimensions_node'. These set the same "
+            "thing; honouring the aspect ratio and ignoring 'size' for this workflow. Remove "
+            "'dimensions_node' to silence this.",
+            filename,
+        )
+
+    field = meta.get("aspect_ratio_field", "aspect_ratio")
+    default: str | None = None
+    if graph is not None:
+        node = graph.get(str(node_id))
+        current = node.get("inputs", {}).get(field) if isinstance(node, dict) else None
+        parsed = parse_aspect_ratio(current)
+        if parsed is None:
+            log.debug(
+                "%s: aspect_ratio_node %r has no readable %r value; advertising no default",
+                filename,
+                node_id,
+                field,
+            )
+        else:
+            default = parsed.value
+    return options, default
 
 
 def read_graph_text(record: WorkflowRecord) -> str:
@@ -142,6 +250,7 @@ def prepare_workflow(
     image_filenames: list[str] | None = None,
     width: int | None = None,
     height: int | None = None,
+    aspect_ratio: str | None = None,
     length: int | None = None,
     rng: random.Random | None = None,
 ) -> dict[str, Any]:
@@ -212,13 +321,24 @@ def prepare_workflow(
             if field_name in inputs and isinstance(inputs[field_name], int | float):
                 inputs[field_name] = rng.randint(0, 2**32 - 1)
 
-    # Dimensions
-    dim_node = meta.get("dimensions_node")
-    if dim_node and dim_node in workflow:
-        if width and width > 0:
-            workflow[dim_node]["inputs"][meta.get("width_field", "width")] = width
-        if height and height > 0:
-            workflow[dim_node]["inputs"][meta.get("height_field", "height")] = height
+    # Aspect ratio. A workflow offering one exposes no pixel knob at all — the
+    # megapixel budget and rounding stay baked into the node — so every ratio it
+    # advertises renders within the VRAM the operator sized the graph for.
+    if record.aspect_ratios:
+        chosen = snap_aspect_ratio(aspect_ratio, record.aspect_ratios)
+        node_id = str(meta["aspect_ratio_node"])
+        if chosen is not None and node_id in workflow:
+            field = meta.get("aspect_ratio_field", "aspect_ratio")
+            workflow[node_id].setdefault("inputs", {})[field] = chosen.literal
+    else:
+        # Dimensions. Skipped entirely for a ratio workflow: the two would fight,
+        # and the ratio node is downstream of nothing we could usefully set here.
+        dim_node = meta.get("dimensions_node")
+        if dim_node and dim_node in workflow:
+            if width and width > 0:
+                workflow[dim_node]["inputs"][meta.get("width_field", "width")] = width
+            if height and height > 0:
+                workflow[dim_node]["inputs"][meta.get("height_field", "height")] = height
 
     # Length (video frame count)
     length_node = meta.get("length_node")
@@ -226,6 +346,18 @@ def prepare_workflow(
         workflow[length_node]["inputs"][meta.get("length_field", "value")] = length
 
     return workflow
+
+
+def effective_aspect_ratio(record: WorkflowRecord, requested: str | None) -> str | None:
+    """The canonical ratio a run will actually render at, for the response echo.
+
+    Snapping means the value a client asked for is not always the value it gets,
+    and a request naming none still renders at *something*. Reporting the real
+    figure is what lets a client label or re-use a generation truthfully instead
+    of recording its own request back.
+    """
+    chosen = snap_aspect_ratio(requested, record.aspect_ratios)
+    return chosen.value if chosen is not None else record.aspect_ratio_default
 
 
 def seconds_to_frames(seconds: float | None, meta: dict[str, Any]) -> int | None:

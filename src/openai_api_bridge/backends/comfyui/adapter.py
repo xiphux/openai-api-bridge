@@ -21,6 +21,7 @@ from ..base import (
 from .client import ComfyUIClient
 from .workflows import (
     WorkflowRecord,
+    effective_aspect_ratio,
     prepare_workflow,
     read_graph_text,
     scan_workflows,
@@ -141,6 +142,10 @@ class ComfyUIBackend(Backend):
                     ["text", "image"] if r.meta.get("image_inputs") else ["text"],
                     r.output_type,
                 ),
+                # Empty when the workflow declares none, but the field's contract
+                # is that absence means "no selector", so it stays None there.
+                aspect_ratios=r.aspect_ratios or None,
+                aspect_ratio_default=r.aspect_ratio_default,
             )
             for r in sorted(records.values(), key=lambda r: r.slug)
         ]
@@ -154,6 +159,7 @@ class ComfyUIBackend(Backend):
         *,
         prompt: str,
         size: str | None,
+        aspect_ratio: str | None = None,
         image_filenames: list[str] | None = None,
         length: int | None = None,
         on_upstream_id: UpstreamIdCallback | None = None,
@@ -173,6 +179,7 @@ class ComfyUIBackend(Backend):
             image_filenames=image_filenames,
             width=width or None,
             height=height or None,
+            aspect_ratio=aspect_ratio,
             length=length,
             rng=rng,
         )
@@ -232,6 +239,7 @@ class ComfyUIBackend(Backend):
         prompt_id: str,
         *,
         timeout_seconds: float | None = None,
+        aspect_ratio: str | None = None,
     ) -> GeneratedAsset:
         """Wait for a queued run to finish and download its output."""
         timeout = self._poll_timeout_for(record) if timeout_seconds is None else timeout_seconds
@@ -243,7 +251,12 @@ class ComfyUIBackend(Backend):
         data, content_type = await self.client.retrieve_media(
             history, output_type=record.output_type
         )
-        return GeneratedAsset(data=data, content_type=content_type, kind=record.output_type)
+        return GeneratedAsset(
+            data=data,
+            content_type=content_type,
+            kind=record.output_type,
+            aspect_ratio=effective_aspect_ratio(record, aspect_ratio),
+        )
 
     async def _run_one(
         self,
@@ -251,6 +264,7 @@ class ComfyUIBackend(Backend):
         *,
         prompt: str,
         size: str | None,
+        aspect_ratio: str | None = None,
         image_filenames: list[str] | None = None,
         length: int | None = None,
         on_upstream_id: UpstreamIdCallback | None = None,
@@ -262,13 +276,14 @@ class ComfyUIBackend(Backend):
             graph_text,
             prompt=prompt,
             size=size,
+            aspect_ratio=aspect_ratio,
             image_filenames=image_filenames,
             length=length,
             on_upstream_id=on_upstream_id,
             rng=rng,
         )
         try:
-            return await self._collect_one(record, prompt_id)
+            return await self._collect_one(record, prompt_id, aspect_ratio=aspect_ratio)
         except BaseException:
             # Queued but never collected — most often because the client
             # disconnected or a video job was cancelled, which cancels us
@@ -283,6 +298,7 @@ class ComfyUIBackend(Backend):
         n: int,
         prompt: str,
         size: str | None,
+        aspect_ratio: str | None = None,
         image_filenames: list[str] | None = None,
         rng: random.Random | None = None,
     ) -> list[GeneratedAsset]:
@@ -311,6 +327,7 @@ class ComfyUIBackend(Backend):
                         graph_text,
                         prompt=prompt,
                         size=size,
+                        aspect_ratio=aspect_ratio,
                         image_filenames=image_filenames,
                         rng=rng,
                     )
@@ -331,7 +348,9 @@ class ComfyUIBackend(Backend):
         budget = self._poll_timeout_for(record) * n
 
         tasks = [
-            asyncio.create_task(self._collect_one(record, pid, timeout_seconds=budget))
+            asyncio.create_task(
+                self._collect_one(record, pid, timeout_seconds=budget, aspect_ratio=aspect_ratio)
+            )
             for pid in prompt_ids
         ]
         try:
@@ -368,6 +387,7 @@ class ComfyUIBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         record = await self._record_for(model_slug)
@@ -380,7 +400,9 @@ class ComfyUIBackend(Backend):
                 f"Model {model_slug!r} requires an input image; use /v1/images/edits",
                 param="image",
             )
-        return await self._run_batch(record, n=n, prompt=prompt, size=size)
+        return await self._run_batch(
+            record, n=n, prompt=prompt, size=size, aspect_ratio=aspect_ratio
+        )
 
     async def edit_image(
         self,
@@ -389,6 +411,7 @@ class ComfyUIBackend(Backend):
         prompt: str,
         images: list[InputImage],
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         record = await self._record_for(model_slug)
@@ -410,6 +433,7 @@ class ComfyUIBackend(Backend):
             n=n,
             prompt=prompt,
             size=size,
+            aspect_ratio=aspect_ratio,
             image_filenames=list(comfy_filenames),
         )
 
@@ -419,6 +443,7 @@ class ComfyUIBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         seconds: float | None = None,
         input_reference: bytes | None = None,
         input_reference_content_type: str | None = None,
@@ -457,6 +482,7 @@ class ComfyUIBackend(Backend):
             record,
             prompt=prompt,
             size=size,
+            aspect_ratio=aspect_ratio,
             image_filenames=image_filenames,
             length=length,
             on_upstream_id=on_upstream_id,
