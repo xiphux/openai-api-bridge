@@ -421,3 +421,174 @@ def test_upload_extension_does_not_reach_video_types(video_type: str) -> None:
     # ...while the store, whose input is a fetched asset rather than a caller,
     # still names them.
     assert asset_extension(video_type) != ""
+
+
+# --- aspect ratio ----------------------------------------------------------
+
+_RATIO_LITERALS = ["1:1 (Square)", "3:2 (Photo)", "16:9 (Widescreen)"]
+
+
+@pytest.fixture
+def ratio_workflow(comfyui_workflows_dir: Path) -> Path:
+    """A workflow whose size comes from a ResolutionSelector, not a latent."""
+    (comfyui_workflows_dir / "ratio-t2i.json").write_text(
+        json.dumps(
+            {
+                "1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+                "2": {"class_type": "SaveImage", "inputs": {}},
+                "5": {
+                    "class_type": "ResolutionSelector",
+                    "inputs": {
+                        "aspect_ratio": "3:2 (Photo)",
+                        "megapixels": 0.5,
+                        "multiple": 32,
+                    },
+                },
+            }
+        )
+    )
+    (comfyui_workflows_dir / "ratio-t2i.meta.json").write_text(
+        json.dumps(
+            {
+                "positive_prompt_node": "1",
+                "display_name": "Ratio T2I",
+                "aspect_ratio_node": "5",
+                "aspect_ratios": _RATIO_LITERALS,
+            }
+        )
+    )
+    return comfyui_workflows_dir
+
+
+@respx.mock
+def test_models_advertises_aspect_ratios_and_the_workflows_default(
+    client_with_comfyui: TestClient,
+    ratio_workflow: Path,
+) -> None:
+    r = client_with_comfyui.get(
+        "/v1/models", headers={"Authorization": "Bearer test-bridge-api-key"}
+    )
+    by_id = {m["id"]: m for m in r.json()["data"]}
+    entry = by_id["comfyui/ratio-t2i"]
+    # Canonical ratios with the literal's parenthetical as a label — the node's
+    # own spelling never reaches the client.
+    assert entry["aspect_ratios"] == [
+        {"value": "1:1", "label": "Square"},
+        {"value": "3:2", "label": "Photo"},
+        {"value": "16:9", "label": "Widescreen"},
+    ]
+    # Read off the graph's saved value, so it can't drift from what the
+    # workflow actually renders when a request names no ratio.
+    assert entry["aspect_ratio_default"] == "3:2"
+    # A workflow without the declaration omits both, which a client reads as
+    # "offer no selector" rather than "one fixed ratio".
+    assert "aspect_ratios" not in by_id["comfyui/tiny-t2i"]
+    assert "aspect_ratio_default" not in by_id["comfyui/tiny-t2i"]
+
+
+def _stub_one_generation() -> respx.Route:
+    submit_route = respx.post(f"{COMFY}/prompt").mock(
+        return_value=httpx.Response(200, json={"prompt_id": "abc-123"})
+    )
+    respx.get(f"{COMFY}/history/abc-123").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "abc-123": {
+                    "outputs": {
+                        "2": {
+                            "images": [
+                                {
+                                    "filename": "ComfyUI_00001_.png",
+                                    "subfolder": "",
+                                    "type": "output",
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
+    )
+    respx.get(f"{COMFY}/view").mock(
+        return_value=httpx.Response(200, content=PNG_MAGIC, headers={"content-type": "image/png"})
+    )
+    return submit_route
+
+
+@respx.mock
+def test_a_requested_ratio_reaches_the_node_as_its_own_literal(
+    client_with_comfyui: TestClient,
+    ratio_workflow: Path,
+) -> None:
+    submit_route = _stub_one_generation()
+    r = client_with_comfyui.post(
+        "/v1/images/generations",
+        headers={"Authorization": "Bearer test-bridge-api-key"},
+        json={"model": "comfyui/ratio-t2i", "prompt": "x", "aspect_ratio": "16:9"},
+    )
+    assert r.status_code == 200, r.text
+    submitted = json.loads(submit_route.calls[0].request.content)
+    node = submitted["prompt"]["5"]["inputs"]
+    assert node["aspect_ratio"] == "16:9 (Widescreen)"
+    # The pixel budget is the operator's, not the client's — this is what makes
+    # every advertised ratio safe to offer.
+    assert node["megapixels"] == 0.5
+    assert node["multiple"] == 32
+    # And the response says what was actually rendered.
+    assert r.json()["data"][0]["aspect_ratio"] == "16:9"
+
+
+@respx.mock
+def test_an_unoffered_ratio_snaps_rather_than_failing(
+    client_with_comfyui: TestClient,
+    ratio_workflow: Path,
+) -> None:
+    """A remembered preference, or a fan-out across models with different menus,
+    must not 400 — and must not silently fall back to the workflow default,
+    which here is the landscape 3:2 for a portrait request."""
+    submit_route = _stub_one_generation()
+    r = client_with_comfyui.post(
+        "/v1/images/generations",
+        headers={"Authorization": "Bearer test-bridge-api-key"},
+        json={"model": "comfyui/ratio-t2i", "prompt": "x", "aspect_ratio": "9:16"},
+    )
+    assert r.status_code == 200, r.text
+    submitted = json.loads(submit_route.calls[0].request.content)
+    assert submitted["prompt"]["5"]["inputs"]["aspect_ratio"] == "1:1 (Square)"
+    # The echo reports the snapped value, not the request, so a client can
+    # label and re-use the result truthfully.
+    assert r.json()["data"][0]["aspect_ratio"] == "1:1"
+
+
+@respx.mock
+def test_naming_no_ratio_reports_the_workflows_own_default(
+    client_with_comfyui: TestClient,
+    ratio_workflow: Path,
+) -> None:
+    submit_route = _stub_one_generation()
+    r = client_with_comfyui.post(
+        "/v1/images/generations",
+        headers={"Authorization": "Bearer test-bridge-api-key"},
+        json={"model": "comfyui/ratio-t2i", "prompt": "x"},
+    )
+    assert r.status_code == 200, r.text
+    submitted = json.loads(submit_route.calls[0].request.content)
+    assert submitted["prompt"]["5"]["inputs"]["aspect_ratio"] == "3:2 (Photo)"
+    assert r.json()["data"][0]["aspect_ratio"] == "3:2"
+
+
+@respx.mock
+def test_a_ratio_sent_to_a_workflow_that_offers_none_is_ignored(
+    client_with_comfyui: TestClient,
+) -> None:
+    """Accept-and-ignore rather than 400: arriving here means a client sent a
+    knob this model never advertised, which is not worth failing a render over."""
+    _stub_one_generation()
+    r = client_with_comfyui.post(
+        "/v1/images/generations",
+        headers={"Authorization": "Bearer test-bridge-api-key"},
+        json={"model": "comfyui/tiny-t2i", "prompt": "x", "aspect_ratio": "16:9"},
+    )
+    assert r.status_code == 200, r.text
+    assert "aspect_ratio" not in r.json()["data"][0]

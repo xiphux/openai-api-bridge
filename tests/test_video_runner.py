@@ -59,13 +59,16 @@ async def _started(event: asyncio.Event, task: asyncio.Task[None]) -> None:
 
 
 async def _run(generate: Any, jobstore: JobStore, filestore: FileStore) -> None:
-    await jobstore.create(job_id="job1", model="p/m", prompt="a cat", size=None, seconds=None)
+    await jobstore.create(
+        job_id="job1", model="p/m", prompt="a cat", size=None, aspect_ratio=None, seconds=None
+    )
     await run_video_job(
         job_id="job1",
         provider_id="p",
         model_slug="m",
         prompt="a cat",
         size=None,
+        aspect_ratio=None,
         seconds=None,
         input_reference=None,
         input_reference_content_type=None,

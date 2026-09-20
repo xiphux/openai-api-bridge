@@ -701,6 +701,7 @@ class FalBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         seconds: float | None = None,
         input_reference: bytes | None = None,
         input_reference_content_type: str | None = None,
@@ -920,6 +921,7 @@ class FalBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         mcfg = self._model_config(model_slug)
@@ -936,6 +938,7 @@ class FalBackend(Backend):
         prompt: str,
         images: list[InputImage],
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # A model listed as text-to-image may have its edits served by a

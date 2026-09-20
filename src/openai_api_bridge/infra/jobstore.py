@@ -20,6 +20,10 @@ class VideoJob:
     model: str
     prompt: str
     size: str | None
+    # The canonical aspect ratio this job renders at. Set from the request, then
+    # refined on completion to what the backend actually used — snapping means a
+    # model may render the nearest ratio it offers rather than the one asked for.
+    aspect_ratio: str | None
     seconds: float | None
     # **Always None.** The column exists and is read back here, but nothing
     # writes it: an image-to-video reference lives in memory for the life of
@@ -49,6 +53,7 @@ class JobStore:
             model=row["model"],
             prompt=row["prompt"],
             size=row["size"],
+            aspect_ratio=row["aspect_ratio"],
             seconds=row["seconds"],
             input_reference_file_id=row["input_reference_file_id"],
             file_id=row["file_id"],
@@ -66,6 +71,7 @@ class JobStore:
         model: str,
         prompt: str,
         size: str | None,
+        aspect_ratio: str | None,
         seconds: float | None,
     ) -> VideoJob:
         """Insert a queued job.
@@ -78,10 +84,10 @@ class JobStore:
         now = int(time.time())
         await self.db.execute(
             """INSERT INTO video_jobs (
-                   id, status, model, prompt, size, seconds,
+                   id, status, model, prompt, size, aspect_ratio, seconds,
                    created_at, updated_at
-               ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)""",
-            (job_id, model, prompt, size, seconds, now, now),
+               ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?)""",
+            (job_id, model, prompt, size, aspect_ratio, seconds, now, now),
         )
         job = await self.get(job_id)
         assert job is not None  # we just inserted it
@@ -100,6 +106,7 @@ class JobStore:
         file_id: str | None = None,
         error_message: str | None = None,
         progress_pct: int | None = None,
+        aspect_ratio: str | None = None,
     ) -> None:
         """Patch-style update. Only fields explicitly passed (not None) are written."""
         sets: list[str] = ["updated_at = ?"]
@@ -119,6 +126,9 @@ class JobStore:
         if progress_pct is not None:
             sets.append("progress_pct = ?")
             params.append(progress_pct)
+        if aspect_ratio is not None:
+            sets.append("aspect_ratio = ?")
+            params.append(aspect_ratio)
         params.append(job_id)
         await self.db.execute(
             f"UPDATE video_jobs SET {', '.join(sets)} WHERE id = ?",

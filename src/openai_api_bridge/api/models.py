@@ -14,6 +14,7 @@ from ..backends.base import Backend, ModelEntry
 from ..errors import BridgeError
 from ..infra.tasks import SingleFlight
 from ..resources import resources
+from ..util.aspect import advertised
 
 log = logging.getLogger(__name__)
 
@@ -155,5 +156,13 @@ async def list_models(request: Request) -> dict[str, Any]:
                 row["prompt_style"] = entry.prompt_style
             if entry.prompt_hint is not None:
                 row["prompt_hint"] = entry.prompt_hint
+            # Additive: the aspect ratios this model accepts, in the order a
+            # client should render them, plus the one it produces when a request
+            # names none. Omitted when the backend didn't say, which a client
+            # reads as "offer no selector" — never as "one fixed ratio".
+            if entry.aspect_ratios is not None:
+                row["aspect_ratios"] = advertised(entry.aspect_ratios)
+            if entry.aspect_ratio_default is not None:
+                row["aspect_ratio_default"] = entry.aspect_ratio_default
             out.append(row)
     return {"object": "list", "data": out}

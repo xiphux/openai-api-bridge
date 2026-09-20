@@ -323,10 +323,15 @@ entry so clients can build a useful picker without per-model hardcoding
 | `supports_tools` | `true` / `false`, omitted when unknown | OpenRouter only today, read from each model's advertised capabilities. Clients should treat *omitted* as "configure it yourself" |
 | `context_window` | max context size in tokens, omitted when unknown | OpenAI-passthrough upstreams that expose it: llama.cpp's `meta.n_ctx` (a loaded model) or router `--ctx-size`, vLLM's `max_model_len`. The bridge strips the `meta`/`status` blocks otherwise, so this is the only way the size survives the proxy. Clients use it for a "N / max tokens" budget |
 | `capabilities` | list of `{input}-to-{output}` operations, omitted when unknown | What a model actually accepts — `["text-to-image"]` vs `["text-to-image", "image-to-image"]`, or `["text-to-text", "image-to-text"]` for a vision chat model. A frontend uses it to enable or grey out image attachment per model. Read from each upstream's own metadata: fal's catalogue categories, ImageRouter's `inputs` map, OpenRouter's `architecture.input_modalities`, ComfyUI's `image_inputs` meta declaration, Venice's `type=image` / `type=inpaint` listings. **Always treat it as optional**: OpenAI-passthrough never has it, and every other backend omits it per-model whenever that model's upstream metadata is silent — an ImageRouter entry with no `inputs` map, say. Omission means "the upstream didn't say", never "accepts nothing" |
+| `aspect_ratios` / `aspect_ratio_default` | the ratios this model accepts, omitted when unknown | Image *and* video models. A list of `{value, label?}` in the order a client should render them — `[{"value": "16:9", "label": "Widescreen"}, …]` — plus the ratio the model produces when a request names none. A client shows these as a picker and sends the chosen `value` back as the request's `aspect_ratio`. ComfyUI: the workflow's `meta.json` (see the meta schema below); no other backend populates it yet. **A model advertising ratios has no pixel knob**: its megapixel budget is fixed upstream, so every listed ratio renders inside the VRAM the operator sized the graph for and `size` is ignored for it. Omission means "offer no selector", never "one fixed ratio". `value` is the ratio as the upstream spells it and is deliberately *not* reduced — `21:9` is a conventional name, not a fraction, and `7:3` would be unrecognisable |
 | `prompt_style` / `prompt_hint` | preferred prompt format + a freeform per-model nudge, omitted when unset | ComfyUI: the workflow's `meta.json` (see the meta schema below). Image and video models — a gateway-aware client uses them to rewrite a prompt into the model's preferred format before generation |
 
 Standard OpenAI clients ignore the extra fields; nothing nonstandard is
 *required* to use the bridge.
+
+`aspect_ratios` has a fuller, client-facing spec in
+[docs/aspect-ratios.md](docs/aspect-ratios.md) — the value grammar, the
+snapping rule and its echo, and how a frontend should build a picker from it.
 
 `capabilities` has a fuller, client-facing spec in
 [docs/model-capabilities.md](docs/model-capabilities.md) — the value grammar,
@@ -571,13 +576,59 @@ Only `positive_prompt_node` is required:
 | `positive_prompt_field` | `"text"` | Field name on that node |
 | `display_name` | the workflow filename | Human-readable name surfaced in `/v1/models` |
 | `image_inputs` | `[]` | Where attached input images land — each entry is `{node, field}` plus optional `format` (`"filename"`, the default, or `"list"`) and `multiple: true` to route all remaining images into one input |
-| `dimensions_node` / `width_field` / `height_field` | — / `"width"` / `"height"` | Node that receives the request's `size` |
+| `dimensions_node` / `width_field` / `height_field` | — / `"width"` / `"height"` | Node that receives the request's `size`. Mutually exclusive with `aspect_ratio_node` — declaring both logs a warning and the ratio wins |
+| `aspect_ratio_node` / `aspect_ratio_field` | — / `"aspect_ratio"` | Node that receives the request's `aspect_ratio` (a `ResolutionSelector`, `FluxResolutionNode`, …). Requires `aspect_ratios`; half a declaration warns and disables the selector |
+| `aspect_ratios` | — | The values that node accepts, **written exactly as the node spells them** — `["1:1 (Square)", "16:9 (Widescreen)"]`. The bridge derives the canonical ratio from each one's leading `W:H` token and advertises `{value, label}`, so a third-party node's own options (`"5:7 (Balanced Portrait)"`) work with no bridge change. Declared order is the order a client renders, and breaks ties when snapping. There's no deriving this from the graph — the graph holds the current *value*, never the node's menu |
 | `length_node` / `length_field` | — / `"value"` | Node that receives the frame count (video) |
 | `fps` | — | Enables OpenAI's `seconds` parameter: `seconds × fps` → frame count injected into `length_node` |
 | `seed_nodes` | all nodes with a `seed` / `noise_seed` field | Node IDs to randomize per request; list them explicitly to leave other seeds untouched |
 | `output_type` | auto-detected | `"image"` or `"video"`; auto-detection keys off the presence of `SaveVideo` / `VHS_VideoCombine` nodes — set explicitly to override |
 | `prompt_style` | — | Image or video models. The prompt FORMAT this model prefers, surfaced in `/v1/models` for a gateway-aware frontend's prompt-enhancement pass — image e.g. `"natural-language"`, `"booru-tags"`, `"keyword-soup"`, `"hybrid"`; video e.g. `"cinematic-prose"`, `"structured-cinematic"`. Passed through verbatim (not validated here). Omitted from the model row when unset |
 | `prompt_hint` | — | Image or video models. A freeform per-model nudge surfaced alongside `prompt_style` (e.g. a quality-tag prefix, a length cap, an audio-cue reminder). Omitted when unset |
+
+### Aspect ratios instead of pixel dimensions
+
+A workflow that sizes its output from a resolution node rather than a raw
+latent can expose that node instead of `dimensions_node`:
+
+```json
+{
+  "positive_prompt_node": "1",
+  "aspect_ratio_node": "115",
+  "aspect_ratios": [
+    "1:1 (Square)",
+    "2:3 (Portrait Photo)",
+    "3:2 (Photo)",
+    "9:16 (Portrait Widescreen)",
+    "16:9 (Widescreen)",
+    "21:9 (Ultrawide)"
+  ]
+}
+```
+
+Clients then see `aspect_ratios` on the model row and send
+`aspect_ratio: "16:9"` with the request; the bridge writes the matching
+literal into that node's field and leaves everything beside it — the
+megapixel budget, the rounding multiple — exactly as the graph was saved.
+
+Two consequences worth knowing:
+
+* **The size ceiling stays the operator's.** Because the pixel count never
+  leaves the workflow, no client can ask for an image large enough to OOM the
+  box; changing the ratio redistributes the same budget. This is why a ratio
+  workflow ignores `size` outright rather than honouring both.
+* **A ratio the workflow doesn't offer snaps to the nearest one it does**,
+  measured in log space, rather than returning a 400 or falling back to the
+  graph's default. A client holding one remembered preference across models
+  with different menus — or fanning one prompt out across several — would
+  otherwise get either an error or, worse, a portrait render for an ultrawide
+  request. The response echoes what was actually used: `aspect_ratio` on each
+  `data[]` entry for images, and on the job row for `/v1/videos`.
+
+The default advertised in `aspect_ratio_default` is read from the node's saved
+value in the graph, so it costs no meta field and can't drift from what the
+workflow really does. Like the rest of the meta it's captured at scan time —
+see `cache_workflows`.
 
 ## Tests
 

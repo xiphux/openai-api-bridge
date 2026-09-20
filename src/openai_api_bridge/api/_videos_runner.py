@@ -25,6 +25,7 @@ async def run_video_job(
     model_slug: str,
     prompt: str,
     size: str | None,
+    aspect_ratio: str | None,
     seconds: float | None,
     input_reference: bytes | None,
     input_reference_content_type: str | None,
@@ -47,6 +48,7 @@ async def run_video_job(
             model_slug=model_slug,
             prompt=prompt,
             size=size,
+            aspect_ratio=aspect_ratio,
             seconds=seconds,
             input_reference=input_reference,
             input_reference_content_type=input_reference_content_type,
@@ -61,7 +63,15 @@ async def run_video_job(
             prompt_excerpt=prompt,
             pinned=False,
         )
-        await jobstore.update(job_id, status="completed", file_id=file_id, progress_pct=100)
+        await jobstore.update(
+            job_id,
+            status="completed",
+            file_id=file_id,
+            progress_pct=100,
+            # What the backend actually rendered, which snapping means need not
+            # be what the request named. None leaves the requested value.
+            aspect_ratio=asset.aspect_ratio,
+        )
         log.info("Video job %s completed; file_id=%s", job_id, file_id)
     except asyncio.CancelledError:
         log.info("Video job %s cancelled; marking failed", job_id)

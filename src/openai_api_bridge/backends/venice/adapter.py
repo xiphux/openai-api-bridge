@@ -202,6 +202,7 @@ class VeniceBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         w, h = parse_size(size)
@@ -233,6 +234,7 @@ class VeniceBackend(Backend):
         prompt: str,
         images: list[InputImage],
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # Venice's /image/edit takes exactly one reference image. Reject extras
@@ -269,6 +271,7 @@ class VeniceBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         seconds: float | None = None,
         input_reference: bytes | None = None,
         input_reference_content_type: str | None = None,

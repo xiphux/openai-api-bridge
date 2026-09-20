@@ -317,7 +317,9 @@ async def test_fail_if_active_does_not_clobber_a_completed_job(jobstore: JobStor
     an unconditional write flipped a completed job to failed and orphaned
     its file while telling the client the render had failed.
     """
-    await jobstore.create(job_id="j1", model="p/m", prompt="x", size=None, seconds=None)
+    await jobstore.create(
+        job_id="j1", model="p/m", prompt="x", size=None, aspect_ratio=None, seconds=None
+    )
     await jobstore.update("j1", status="completed", file_id="f1", progress_pct=100)
 
     changed = await jobstore.fail_if_active("j1", "Cancelled by user")
@@ -330,7 +332,9 @@ async def test_fail_if_active_does_not_clobber_a_completed_job(jobstore: JobStor
 
 
 async def test_fail_if_active_transitions_an_active_job(jobstore: JobStore) -> None:
-    await jobstore.create(job_id="j2", model="p/m", prompt="x", size=None, seconds=None)
+    await jobstore.create(
+        job_id="j2", model="p/m", prompt="x", size=None, aspect_ratio=None, seconds=None
+    )
     await jobstore.update("j2", status="in_progress")
 
     changed = await jobstore.fail_if_active("j2", "Cancelled by user")
@@ -344,7 +348,9 @@ async def test_fail_if_active_transitions_an_active_job(jobstore: JobStore) -> N
 
 async def test_first_writer_wins_on_the_error_message(jobstore: JobStore) -> None:
     """The runner's CancelledError handler must not overwrite the canceller."""
-    await jobstore.create(job_id="j3", model="p/m", prompt="x", size=None, seconds=None)
+    await jobstore.create(
+        job_id="j3", model="p/m", prompt="x", size=None, aspect_ratio=None, seconds=None
+    )
     await jobstore.update("j3", status="in_progress")
 
     assert await jobstore.fail_if_active("j3", "Cancelled by user") is True

@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..errors import UnsupportedOperation
+from ..util.aspect import AspectRatio
 
 # Async callback invoked once when the upstream backend assigns a job/prompt id.
 # The bridge persists this so video jobs can be cross-referenced for debugging.
@@ -51,6 +52,16 @@ class ModelEntry:
     the difference from a failed request. A frontend can use this to enable or
     grey out image attachment per model.
 
+    ``aspect_ratios`` is a non-standard extension for image and video models:
+    the ratios this model will accept in the request's ``aspect_ratio`` field,
+    in the order a client should render them, each ``{"value": "16:9"}`` with an
+    optional human ``"label"``. ``None`` when the backend didn't say, which for
+    a client means "offer no selector" — never "only supports one". A model
+    advertising ratios has no pixel knob: its size budget is fixed upstream, so
+    a client can offer every listed ratio without being able to ask for an image
+    large enough to fail. ``aspect_ratio_default`` is the ratio the model
+    produces when a request names none.
+
     ``prompt_style`` and ``prompt_hint`` are non-standard extensions for image
     and video models, consumed by a gateway-aware frontend's prompt-enhancement
     pass. ``prompt_style`` is the prompt FORMAT this model prefers — for images
@@ -70,6 +81,8 @@ class ModelEntry:
     prompt_style: str | None = None
     prompt_hint: str | None = None
     capabilities: tuple[str, ...] | None = None
+    aspect_ratios: tuple[AspectRatio, ...] | None = None
+    aspect_ratio_default: str | None = None
 
 
 # Canonical ordering for capability strings, so the field is stable across
@@ -274,11 +287,19 @@ def disambiguate_display_names(
 
 @dataclass(frozen=True, slots=True)
 class GeneratedAsset:
-    """The result of any generation: bytes + content type + kind."""
+    """The result of any generation: bytes + content type + kind.
+
+    ``aspect_ratio`` is the canonical ratio the asset was actually rendered at,
+    when the backend knows it. It is reported per asset rather than per request
+    because that is where a client reads it — beside the url it belongs to —
+    and because snapping means it can differ from what was asked for. ``None``
+    from any backend that doesn't deal in ratios.
+    """
 
     data: bytes
     content_type: str
     kind: str  # "image" | "video"
+    aspect_ratio: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,6 +324,7 @@ class Backend(ABC):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         """Default: not supported. Override in backends that do text-to-image.
@@ -310,6 +332,14 @@ class Backend(ABC):
         Originally abstract — relaxed when the OpenAI-passthrough backend
         landed (chat/embedding upstreams have no image surface, but the
         Backend ABC is a single union of all backend capabilities).
+
+        ``size`` and ``aspect_ratio`` name the same thing two ways and a model
+        takes at most one of them: a backend advertising ``aspect_ratios`` for a
+        model has no pixel knob for it, and one that doesn't never sees the
+        field from a well-behaved client. So every backend accepts both and
+        ignores whichever it can't honour — silently, since arriving here means
+        a client sent a knob this model never offered, which is not an error
+        worth failing a generation over.
         """
         raise UnsupportedOperation("Image generation is not supported by this provider")
 
@@ -320,6 +350,7 @@ class Backend(ABC):
         prompt: str,
         images: list[InputImage],
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         """Default: not supported. Override in backends that do img2img.
@@ -341,6 +372,7 @@ class Backend(ABC):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         seconds: float | None = None,
         input_reference: bytes | None = None,
         input_reference_content_type: str | None = None,

@@ -135,6 +135,7 @@ class OpenRouterBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # OpenRouter doesn't support a server-side ``n`` for image output —
@@ -153,6 +154,7 @@ class OpenRouterBackend(Backend):
         prompt: str,
         images: list[InputImage],
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # Edit = generate with the input image(s) attached to the user message

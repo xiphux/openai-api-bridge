@@ -43,8 +43,11 @@ async def _render_assets(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for asset in assets:
+        # Non-standard, omitted when the backend didn't say. The ratio actually
+        # rendered, which snapping means need not be the one requested.
+        extra = {"aspect_ratio": asset.aspect_ratio} if asset.aspect_ratio else {}
         if response_format == "b64_json":
-            out.append({"b64_json": base64.b64encode(asset.data).decode("ascii")})
+            out.append({"b64_json": base64.b64encode(asset.data).decode("ascii"), **extra})
             continue
         file_id = await filestore.put(
             asset.data,
@@ -54,7 +57,7 @@ async def _render_assets(
             source_model=model_slug,
             prompt_excerpt=prompt,
         )
-        out.append({"url": _build_url(settings, file_id)})
+        out.append({"url": _build_url(settings, file_id), **extra})
     return out
 
 
@@ -68,6 +71,7 @@ async def images_generations(req: ImagesGenerationRequest, request: Request) -> 
         model_slug=model_slug,
         prompt=req.prompt,
         size=req.size,
+        aspect_ratio=req.aspect_ratio,
         n=req.n,
     )
 
@@ -98,6 +102,7 @@ async def images_edits(
     image_array: Annotated[list[UploadFile] | None, File(alias="image[]")] = None,
     n: Annotated[int, Form()] = 1,
     size: Annotated[str | None, Form()] = None,
+    aspect_ratio: Annotated[str | None, Form()] = None,
     response_format: Annotated[str, Form()] = "url",
 ) -> dict[str, Any]:
     # The same ceiling ImagesGenerationRequest applies on the JSON path, which
@@ -141,6 +146,7 @@ async def images_edits(
         prompt=prompt,
         images=images,
         size=size,
+        aspect_ratio=aspect_ratio,
         n=n,
     )
 

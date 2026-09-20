@@ -34,6 +34,13 @@ class ImagesGenerationRequest(_Permissive):
     prompt: str
     n: int = Field(default=1, ge=1, le=MAX_IMAGES_PER_REQUEST)
     size: str | None = None
+    # Non-standard, and declared rather than left to `extra` because this class
+    # *ignores* extras — an undeclared field would vanish here rather than reach
+    # the backend. The canonical ratio a client picked from the model's
+    # advertised `aspect_ratios` ("16:9"). Unvalidated on purpose: only the
+    # backend knows what a given model offers, and it snaps to the nearest
+    # rather than rejecting.
+    aspect_ratio: str | None = None
     response_format: Literal["url", "b64_json"] = "url"
 
 

@@ -196,6 +196,12 @@ _MIGRATIONS: list[tuple[int, str]] = [
         CREATE INDEX idx_jobs_status_updated ON video_jobs(status, updated_at);
         """,
     ),
+    (
+        2,
+        """
+        ALTER TABLE video_jobs ADD COLUMN aspect_ratio TEXT;
+        """,
+    ),
 ]
 
 

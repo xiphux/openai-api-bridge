@@ -98,6 +98,7 @@ class ImageRouterBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         # ImageRouter doesn't support n > 1 natively (its response is single-
@@ -120,6 +121,7 @@ class ImageRouterBackend(Backend):
         prompt: str,
         images: list[InputImage],
         size: str | None = None,
+        aspect_ratio: str | None = None,
         n: int = 1,
     ) -> list[GeneratedAsset]:
         async def one() -> GeneratedAsset:
@@ -140,6 +142,7 @@ class ImageRouterBackend(Backend):
         model_slug: str,
         prompt: str,
         size: str | None = None,
+        aspect_ratio: str | None = None,
         seconds: float | None = None,
         input_reference: bytes | None = None,
         input_reference_content_type: str | None = None,

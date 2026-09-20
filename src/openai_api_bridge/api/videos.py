@@ -40,6 +40,7 @@ def _video_to_dict(job: VideoJob) -> dict[str, Any]:
         "progress": job.progress_pct,
         "seconds": job.seconds,
         "size": job.size,
+        "aspect_ratio": job.aspect_ratio,
         "created_at": job.created_at,
         "completed_at": completed_at,
         "error": error,
@@ -52,6 +53,7 @@ async def videos_create(
     model: Annotated[str, Form()],
     prompt: Annotated[str, Form()],
     size: Annotated[str | None, Form()] = None,
+    aspect_ratio: Annotated[str | None, Form()] = None,
     seconds: Annotated[float | None, Form()] = None,
     input_reference: Annotated[
         UploadFile | None,
@@ -81,6 +83,7 @@ async def videos_create(
         model=model,
         prompt=prompt,
         size=size,
+        aspect_ratio=aspect_ratio,
         seconds=seconds,
     )
 
@@ -91,6 +94,7 @@ async def videos_create(
             model_slug=model_slug,
             prompt=prompt,
             size=size,
+            aspect_ratio=aspect_ratio,
             seconds=seconds,
             input_reference=input_ref_bytes,
             input_reference_content_type=input_ref_ct,
