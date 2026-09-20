@@ -368,21 +368,20 @@ def prepare_workflow(
         node_id = str(meta["aspect_ratio_node"])
         node = workflow.get(node_id)
         if not isinstance(node, dict):
-            # The scan validated this id against the graph, but the graph is
-            # re-read per request while the meta is cached — so an operator who
-            # renumbers the node mid-process lands here. Worth a warning rather
-            # than a silent no-op: the run still succeeds, at the graph's own
-            # saved ratio, while `effective_aspect_ratio` reports the snapped
-            # request. That divergence is otherwise invisible.
             # Missing, or present but not a node object. The scan validated this
             # id, but the graph is re-read per request while the meta is cached —
             # so an operator who renumbers or rewrites the node mid-process lands
             # here. Worth a warning rather than a silent no-op: the run still
             # succeeds, at the graph's own saved ratio, while
             # `effective_aspect_ratio` reports the snapped request. That
-            # divergence is otherwise invisible. Guarding the type as well as the
-            # membership keeps a malformed graph a warning rather than an
-            # AttributeError 500 — the seed loop above guards the same way.
+            # divergence is otherwise invisible.
+            #
+            # Guarding the type as well as the membership keeps a malformed graph
+            # a warning rather than an AttributeError 500. Note it stops one level
+            # short: a node that IS a dict whose `inputs` was rewritten to a
+            # non-dict still raises on the assignment below. That's pre-existing
+            # and matches the seed loop above, which indexes `node.get("inputs",
+            # {})` the same way.
             log.warning(
                 "Workflow %r: aspect_ratio_node %r is no longer a node in the graph; "
                 "rendering at the graph's saved ratio and reporting the requested one. "
