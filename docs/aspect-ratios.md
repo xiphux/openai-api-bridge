@@ -77,12 +77,15 @@ Hide the picker; don't grey it out, and don't assume 1:1.
 
 ### Send the `value` verbatim
 
-`POST /v1/images/generations` and `/v1/images/edits` take `aspect_ratio`
-alongside the standard fields; `POST /v1/videos` takes it as a form field.
+`POST /v1/images/generations` takes `aspect_ratio` in its JSON body:
 
 ```json
 { "model": "comfyui/ratio-t2i", "prompt": "a lighthouse", "aspect_ratio": "16:9" }
 ```
+
+`POST /v1/images/edits` and `POST /v1/videos` are multipart, so there it is a
+form field named `aspect_ratio` alongside the others. Sending it as JSON to
+either of those is silently ignored, the same as any other field would be.
 
 Only send it to a model that advertised ratios. A model that didn't will
 ignore it rather than erroring, so nothing breaks — but a generic
