@@ -213,14 +213,38 @@ def _resolve_aspect_ratios(
     default: str | None = None
     if graph is not None:
         node = graph.get(str(node_id))
-        current = node.get("inputs", {}).get(field) if isinstance(node, dict) else None
-        parsed = parse_aspect_ratio(current)
-        if parsed is None:
-            log.debug(
-                "%s: aspect_ratio_node %r has no readable %r value; advertising no default",
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or field not in inputs:
+            # A misdeclared field name is the one misconfiguration that would be
+            # wrong on EVERY request rather than an unlucky few: injection writes
+            # through `setdefault`, so naming an input the node doesn't have adds
+            # a key it ignores. Every render would then use the graph's own ratio
+            # while the response reported the request — and because the menu still
+            # advertises fine, the only symptom is that picking a shape does
+            # nothing. Disable instead, which at least fails the way a missing
+            # declaration does.
+            log.warning(
+                "%s: aspect_ratio_node %r has no %r input — check 'aspect_ratio_field'. "
+                "Writing it would add a key the node ignores, so the selector is disabled "
+                "rather than advertised and silently inert.",
                 filename,
                 node_id,
                 field,
+            )
+            return (), None
+        parsed = parse_aspect_ratio(inputs[field])
+        if parsed is None:
+            # The input exists, so injection still lands where it should — this
+            # only costs the advertised default. Usually means the input is wired
+            # from another node rather than holding a widget value, in which case
+            # injecting replaces that link, so it is worth saying out loud.
+            log.warning(
+                "%s: aspect_ratio_node %r's %r is %r, not a ratio — the selector still works "
+                "(an injected value replaces it) but no default is advertised.",
+                filename,
+                node_id,
+                field,
+                inputs[field],
             )
         else:
             default = parsed.value

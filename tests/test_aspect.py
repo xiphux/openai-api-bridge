@@ -283,6 +283,94 @@ def test_a_stale_node_id_disables_the_feature(
     assert "not in the graph" in caplog.text
 
 
+def test_a_misdeclared_field_name_disables_the_feature(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one misconfiguration that would be wrong on EVERY request.
+
+    Injection writes through ``setdefault``, so naming an input the node doesn't
+    have adds a key it ignores: every render would use the graph's own ratio while
+    the response reported the request, and the only symptom would be that picking
+    a shape does nothing. Disabling is the honest failure.
+    """
+    _write(
+        tmp_path,
+        {
+            "positive_prompt_node": "1",
+            "aspect_ratio_node": "5",
+            "aspect_ratio_field": "rateo",  # typo
+            "aspect_ratios": STOCK,
+        },
+        _ratio_graph(),
+    )
+    with caplog.at_level(logging.WARNING):
+        record = scan_workflows(tmp_path)["w"]
+    assert record.aspect_ratios == ()
+    assert record.aspect_ratio_default is None
+    assert "aspect_ratio_field" in caplog.text
+
+
+def test_a_wrong_node_with_no_matching_input_disables_the_feature(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same failure reached the other way: the node exists but isn't a resolution
+    node, so it has no ratio input to write."""
+    graph = _ratio_graph()
+    graph["7"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512}}
+    _write(
+        tmp_path,
+        {"positive_prompt_node": "1", "aspect_ratio_node": "7", "aspect_ratios": STOCK},
+        graph,
+    )
+    with caplog.at_level(logging.WARNING):
+        record = scan_workflows(tmp_path)["w"]
+    assert record.aspect_ratios == ()
+
+
+def test_an_unreadable_value_keeps_the_selector_but_advertises_no_default(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Distinct from a misdeclared field: the input EXISTS, so an injected value
+    still lands where it should — only the advertised default is lost.
+
+    This is what a wired input looks like (a ``[node, slot]`` link rather than a
+    widget value), and injecting over it replaces the link, so it warns.
+    """
+    _write(
+        tmp_path,
+        {"positive_prompt_node": "1", "aspect_ratio_node": "5", "aspect_ratios": STOCK},
+        {
+            "1": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}},
+            "5": {
+                "class_type": "ResolutionSelector",
+                "inputs": {"aspect_ratio": ["9", 0], "megapixels": 0.5, "multiple": 32},
+            },
+            "9": {"class_type": "PrimitiveString", "inputs": {"value": "16:9 (Widescreen)"}},
+        },
+    )
+    with caplog.at_level(logging.WARNING):
+        record = scan_workflows(tmp_path)["w"]
+    # Menu intact, no default.
+    assert [o.value for o in record.aspect_ratios] == [
+        "1:1",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:3",
+        "9:16",
+        "16:9",
+        "21:9",
+    ]
+    assert record.aspect_ratio_default is None
+    assert "not a ratio" in caplog.text
+
+    # And injection still reaches the node, replacing the link.
+    workflow = prepare_workflow(
+        record, read_graph_text(record), prompt_text="x", aspect_ratio="16:9"
+    )
+    assert workflow["5"]["inputs"]["aspect_ratio"] == "16:9 (Widescreen)"
+
+
 def test_declaring_both_knobs_warns_and_the_ratio_wins(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
