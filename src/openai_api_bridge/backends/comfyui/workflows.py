@@ -185,10 +185,23 @@ def _resolve_aspect_ratios(
         log.warning("%s: 'aspect_ratios' yielded no usable options; selector disabled", filename)
         return (), None
 
+    if graph is None:
+        # Everything below validates the declaration against the graph, so an
+        # unreadable one leaves us advertising a menu we never checked — the exact
+        # "advertised and silently inert" state the checks exist to prevent. The
+        # workflow is unusable regardless: `read_graph_text` fails the same way at
+        # generation time. (`_read_graph` has already said why it couldn't be read.)
+        log.warning(
+            "%s: declares aspect ratios but its graph could not be read, so the "
+            "declaration can't be checked; selector disabled",
+            filename,
+        )
+        return (), None
+
     # Nothing to inject into means the declaration is stale — a renumbered node,
     # usually, which is silent otherwise because ComfyUI ids aren't stable across
     # a re-export.
-    if graph is not None and str(node_id) not in graph:
+    if str(node_id) not in graph:
         log.warning(
             "%s: aspect_ratio_node %r is not in the graph; selector disabled",
             filename,
@@ -196,11 +209,37 @@ def _resolve_aspect_ratios(
         )
         return (), None
 
+    field = meta.get("aspect_ratio_field", "aspect_ratio")
+    node = graph.get(str(node_id))
+    inputs = node.get("inputs") if isinstance(node, dict) else None
+    if not isinstance(inputs, dict) or field not in inputs:
+        # A misdeclared field name is the one misconfiguration that would be wrong
+        # on EVERY request rather than an unlucky few: injection writes through
+        # `setdefault`, so naming an input the node doesn't have adds a key it
+        # ignores. Every render would then use the graph's own ratio while the
+        # response reported the request — and because the menu still advertises
+        # fine, the only symptom is that picking a shape does nothing. Disable
+        # instead, which at least fails the way a missing declaration does.
+        log.warning(
+            "%s: aspect_ratio_node %r has no %r input — check 'aspect_ratio_field'. "
+            "Writing it would add a key the node ignores, so the selector is disabled "
+            "rather than advertised and silently inert.",
+            filename,
+            node_id,
+            field,
+        )
+        return (), None
+
+    # Everything that could still disable the selector has now run, so from here
+    # the ratio really does win — which is what makes this warning safe to emit.
+    # Above the field check it was a lie: a workflow with both knobs AND a typo'd
+    # field name got told the ratio was honoured and `size` ignored, when the
+    # selector was about to be disabled and `size` was about to be honoured.
+    #
     # An aspect-ratio node computes the dimensions the graph then uses, so a
-    # workflow declaring both knobs has two writers for one value and the
-    # downstream one wins — which is whichever the graph happens to wire last.
-    # Prefer the ratio: it is the newer, more specific declaration, and it is
-    # the one a client is being told about.
+    # workflow declaring both knobs has two writers for one value. Prefer the
+    # ratio: it is the newer, more specific declaration, and it is the one a
+    # client is being told about.
     if meta.get("dimensions_node") is not None:
         log.warning(
             "%s: declares both 'aspect_ratio_node' and 'dimensions_node'. These set the same "
@@ -209,46 +248,22 @@ def _resolve_aspect_ratios(
             filename,
         )
 
-    field = meta.get("aspect_ratio_field", "aspect_ratio")
-    default: str | None = None
-    if graph is not None:
-        node = graph.get(str(node_id))
-        inputs = node.get("inputs") if isinstance(node, dict) else None
-        if not isinstance(inputs, dict) or field not in inputs:
-            # A misdeclared field name is the one misconfiguration that would be
-            # wrong on EVERY request rather than an unlucky few: injection writes
-            # through `setdefault`, so naming an input the node doesn't have adds
-            # a key it ignores. Every render would then use the graph's own ratio
-            # while the response reported the request — and because the menu still
-            # advertises fine, the only symptom is that picking a shape does
-            # nothing. Disable instead, which at least fails the way a missing
-            # declaration does.
-            log.warning(
-                "%s: aspect_ratio_node %r has no %r input — check 'aspect_ratio_field'. "
-                "Writing it would add a key the node ignores, so the selector is disabled "
-                "rather than advertised and silently inert.",
-                filename,
-                node_id,
-                field,
-            )
-            return (), None
-        parsed = parse_aspect_ratio(inputs[field])
-        if parsed is None:
-            # The input exists, so injection still lands where it should — this
-            # only costs the advertised default. Usually means the input is wired
-            # from another node rather than holding a widget value, in which case
-            # injecting replaces that link, so it is worth saying out loud.
-            log.warning(
-                "%s: aspect_ratio_node %r's %r is %r, not a ratio — the selector still works "
-                "(an injected value replaces it) but no default is advertised.",
-                filename,
-                node_id,
-                field,
-                inputs[field],
-            )
-        else:
-            default = parsed.value
-    return options, default
+    parsed = parse_aspect_ratio(inputs[field])
+    if parsed is None:
+        # The input exists, so injection still lands where it should — this only
+        # costs the advertised default. Usually means the input is wired from
+        # another node rather than holding a widget value, in which case injecting
+        # replaces that link, so it is worth saying out loud.
+        log.warning(
+            "%s: aspect_ratio_node %r's %r is %r, not a ratio — the selector still works "
+            "(an injected value replaces it) but no default is advertised.",
+            filename,
+            node_id,
+            field,
+            inputs[field],
+        )
+        return options, None
+    return options, parsed.value
 
 
 def read_graph_text(record: WorkflowRecord) -> str:
@@ -351,15 +366,25 @@ def prepare_workflow(
     if record.aspect_ratios:
         chosen = snap_aspect_ratio(aspect_ratio, record.aspect_ratios)
         node_id = str(meta["aspect_ratio_node"])
-        if node_id not in workflow:
+        node = workflow.get(node_id)
+        if not isinstance(node, dict):
             # The scan validated this id against the graph, but the graph is
             # re-read per request while the meta is cached — so an operator who
             # renumbers the node mid-process lands here. Worth a warning rather
             # than a silent no-op: the run still succeeds, at the graph's own
             # saved ratio, while `effective_aspect_ratio` reports the snapped
             # request. That divergence is otherwise invisible.
+            # Missing, or present but not a node object. The scan validated this
+            # id, but the graph is re-read per request while the meta is cached —
+            # so an operator who renumbers or rewrites the node mid-process lands
+            # here. Worth a warning rather than a silent no-op: the run still
+            # succeeds, at the graph's own saved ratio, while
+            # `effective_aspect_ratio` reports the snapped request. That
+            # divergence is otherwise invisible. Guarding the type as well as the
+            # membership keeps a malformed graph a warning rather than an
+            # AttributeError 500 — the seed loop above guards the same way.
             log.warning(
-                "Workflow %r: aspect_ratio_node %r is no longer in the graph; "
+                "Workflow %r: aspect_ratio_node %r is no longer a node in the graph; "
                 "rendering at the graph's saved ratio and reporting the requested one. "
                 "Restart to rescan, or set cache_workflows = false.",
                 record.slug,
@@ -367,7 +392,7 @@ def prepare_workflow(
             )
         elif chosen is not None:
             field = meta.get("aspect_ratio_field", "aspect_ratio")
-            workflow[node_id].setdefault("inputs", {})[field] = chosen.literal
+            node.setdefault("inputs", {})[field] = chosen.literal
     else:
         # Dimensions. Skipped entirely for a ratio workflow: the two would fight,
         # and the ratio node is downstream of nothing we could usefully set here.

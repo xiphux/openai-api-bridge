@@ -283,6 +283,85 @@ def test_a_stale_node_id_disables_the_feature(
     assert "not in the graph" in caplog.text
 
 
+def test_an_unreadable_graph_disables_the_feature(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every structural check runs against the graph, so an unreadable one leaves
+    the menu advertised but never validated — the exact state those checks exist
+    to prevent. Reachable only when `output_type` is declared, since otherwise
+    autodetection needs the same read and skips the workflow outright.
+    """
+    (tmp_path / "W.json").write_text("{ this is not json")
+    (tmp_path / "W.meta.json").write_text(
+        json.dumps(
+            {
+                "positive_prompt_node": "1",
+                "output_type": "image",
+                "aspect_ratio_node": "5",
+                "aspect_ratios": STOCK,
+            }
+        )
+    )
+    with caplog.at_level(logging.WARNING):
+        record = scan_workflows(tmp_path)["w"]
+    assert record.aspect_ratios == ()
+    assert record.aspect_ratio_default is None
+    assert "could not be read" in caplog.text
+
+
+def test_the_both_knobs_warning_does_not_fire_when_the_selector_is_disabled(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It claims the ratio won and `size` was ignored. Emitted before the checks
+    that can still disable, it said the opposite of what happens: the selector is
+    off and `size` is honoured after all.
+    """
+    graph = _ratio_graph()
+    graph["9"] = {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512}}
+    _write(
+        tmp_path,
+        {
+            "positive_prompt_node": "1",
+            "aspect_ratio_node": "5",
+            "aspect_ratio_field": "rateo",  # typo — disables
+            "aspect_ratios": STOCK,
+            "dimensions_node": "9",
+        },
+        graph,
+    )
+    with caplog.at_level(logging.WARNING):
+        record = scan_workflows(tmp_path)["w"]
+    assert record.aspect_ratios == ()
+    assert "aspect_ratio_field" in caplog.text
+    # The claim that would have been false.
+    assert "ignoring 'size'" not in caplog.text
+    # And `size` really is honoured, which is what the absent warning now matches.
+    workflow = prepare_workflow(
+        record, read_graph_text(record), prompt_text="x", width=1024, height=768
+    )
+    assert workflow["9"]["inputs"]["width"] == 1024
+
+
+def test_a_node_that_stops_being_an_object_warns_rather_than_raising(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The scan validated the node, but the graph is re-read per request while the
+    meta is cached. A node rewritten to a non-object between the two used to raise
+    an AttributeError mid-generation; it now degrades like a missing one.
+    """
+    _write(
+        tmp_path,
+        {"positive_prompt_node": "1", "aspect_ratio_node": "5", "aspect_ratios": STOCK},
+        _ratio_graph(),
+    )
+    record = scan_workflows(tmp_path)["w"]
+    broken = json.dumps({**json.loads(read_graph_text(record)), "5": "not a node"})
+    with caplog.at_level(logging.WARNING):
+        workflow = prepare_workflow(record, broken, prompt_text="x", aspect_ratio="16:9")
+    assert workflow["5"] == "not a node"
+    assert "no longer a node" in caplog.text
+
+
 def test_a_misdeclared_field_name_disables_the_feature(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
