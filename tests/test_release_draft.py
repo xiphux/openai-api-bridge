@@ -17,6 +17,7 @@ changelog entry that quietly omits it too.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -138,7 +139,9 @@ class TestDraftCommand:
         # ENDS at HEAD, and the untagged v99.0.0 is never handed to git as a
         # ref. The `previous..tag` spelling is pinned unconditionally by
         # test_draft_names_the_range_it_covers, which passes literals.
-        span = out.split()[3].rstrip(".")
+        match = re.search(r"DRAFT for (\S+?)\.\s", out)
+        assert match is not None, f"no DRAFT header in: {out[:80]!r}"
+        span = match.group(1)
         assert span.endswith("HEAD")
         assert "v99.0.0" not in span
 

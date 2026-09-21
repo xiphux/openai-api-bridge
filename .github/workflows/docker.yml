@@ -147,8 +147,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=publish
 
   # Create a GitHub Release whenever a v[0-9]+.[0-9]+.[0-9]+ tag is pushed,
-  # published rather
-  # than drafted: a draft is invisible to everyone but the maintainer, and
+  # published rather than drafted: a draft is invisible to everyone but the maintainer, and
   # twelve of them accumulated unnoticed behind that default.
   #
   # Notes come from CHANGELOG.md, via scripts/release_notes.py. NOT GitHub's

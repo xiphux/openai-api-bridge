@@ -9,8 +9,8 @@
 #     branches for SECURITY updates, which is why the exclusion stays.
 #   - Direct on every PR. Drives the PR checks UI.
 #   - Indirect via `workflow_call` from docker.yml on `main` pushes and
-#     `v[0-9]+.[0-9]+.[0-9]+` tags, so publishing is gated on exactly these jobs. Both of
-#     those re-check content that has already been checked -- the `main` push
+#     `v[0-9]+.[0-9]+.[0-9]+` tags, so publishing is gated on exactly these
+#     jobs. Both of those re-check content that has already been checked -- the `main` push
 #     re-runs what the pull request ran, and the tag re-runs what the `main`
 #     push ran over the same commit -- which is what `gate` below removes.
 #

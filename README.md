@@ -405,8 +405,8 @@ docker compose logs -f bridge
 
 The repo ships a GitHub Actions workflow (`.github/workflows/docker.yml`) that
 builds and publishes a multi-arch (amd64 + arm64) image to GitHub Container
-Registry on every push to `main` and on `v[0-9]+.[0-9]+.[0-9]+` tags, after the CI suite
-(below) passes. To pull it:
+Registry on every push to `main` and on `v[0-9]+.[0-9]+.[0-9]+` tags, after
+the CI suite (below) passes. To pull it:
 
 ```bash
 # in your .env
@@ -666,8 +666,8 @@ and ruff from `uv.lock`.
 | Docker image smoke | builds amd64 + arm64; boots amd64 and serves requests, including the OpenAI passthrough against a stub upstream over a real network (JSON, streaming, unreachable upstream); import-checks both from the image's own venv |
 | Secret scan | gitleaks over the tested commit's history |
 
-Pushing a `v[0-9]+.[0-9]+.[0-9]+` tag publishes a GitHub release once that suite passes. The
-notes are the tag's section of [`CHANGELOG.md`](CHANGELOG.md), rendered by
+Pushing a `v[0-9]+.[0-9]+.[0-9]+` tag publishes a GitHub release once that
+suite passes. The notes are the tag's section of [`CHANGELOG.md`](CHANGELOG.md), rendered by
 `scripts/release_notes.py`; a version with no section fails the release rather
 than publishing an empty one.
 
