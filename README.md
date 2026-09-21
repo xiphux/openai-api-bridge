@@ -681,7 +681,7 @@ renamed to `## vX.Y.Z` in the commit that bumps the version in `pyproject.toml`.
 The two alternatives were tried and are worse. GitHub's own generated notes
 list only pull requests, which misses nearly everything here — work lands as
 direct commits to `main`, and v0.6.0's generated notes named its two Dependabot
-PRs and none of its other 44 commits. Building them from the commits instead
+PRs and none of its other 42 commits. Building them from the commits instead
 describes how a release was built rather than what it delivered: v0.5.0 was 17
 separate `fal`-scoped commits for what a user experienced as one new backend.
 `scripts/release_notes.py <tag> --draft` still prints that grouping, as
