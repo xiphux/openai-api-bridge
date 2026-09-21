@@ -58,7 +58,10 @@ class GitError(RuntimeError):
 
 
 def git(*args: str) -> str:
-    result = subprocess.run(["git", *args], capture_output=True, text=True)
+    # cwd is this repository, not the caller's. CHANGELOG is already resolved
+    # against this file so the command works from anywhere; without pinning it
+    # here, git would answer for whatever repository the caller was standing in.
+    result = subprocess.run(["git", *args], capture_output=True, text=True, cwd=CHANGELOG.parent)
     if result.returncode != 0:
         # Without this, capture_output swallows git's own message and the
         # caller sees only a CalledProcessError with an exit status — most
@@ -252,6 +255,7 @@ def tag_exists(tag: str) -> bool:
             ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
             capture_output=True,
             text=True,
+            cwd=CHANGELOG.parent,
         )
     except OSError:
         return False
