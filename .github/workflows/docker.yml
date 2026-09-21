@@ -65,6 +65,23 @@ jobs:
         with:
           persist-credentials: false
 
+      # The one check that reads the TAG, and the reason it cannot live in
+      # ci.yml: `gate` there inherits a pass by CONTENT, and the same tree can
+      # be tagged anything, so a tag check behind it is meaningless -- on a tag
+      # whose commit already went green, every ci.yml job is skipped.
+      #
+      # The unit tests cover the realistic slip (bumping pyproject.toml without
+      # renaming `## Unreleased`) because they run on the main push and assert
+      # against pyproject's version. What nothing covered is the tag and the
+      # manifest DISAGREEING -- tagging v0.7.1 while pyproject says 0.7.0. That
+      # passes every check, inherits a green run, and the push below then moves
+      # `:latest` onto an image with no release to explain it.
+      - name: The tag has a changelog section
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 scripts/release_notes.py "$TAG" > /dev/null
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
@@ -88,8 +105,10 @@ jobs:
           #   - semver tag pushes (v1.2.3) -> :1.2.3, :1.2, :1, AND :latest
           #   - every build                -> :sha-abc1234 for traceability
           # `:latest` is implicitly applied by metadata-action's default
-          # flavor=latest=auto: it moves only on the highest semver tag, never
-          # on branch pushes. Matches the convention used by postgres/nginx/etc.
+          # flavor=latest=auto: it moves on ANY non-prerelease semver tag, never
+          # on branch pushes. Not "the highest" -- it does not compare against
+          # what is already in the registry, so a tag naming a LOWER version
+          # drags `:latest` backwards. Matches postgres/nginx/etc.
           # — pull `:main` if you want the HEAD-of-default-branch image instead.
           tags: |
             type=ref,event=branch
@@ -152,7 +171,12 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: python3 scripts/release_notes.py "$TAG" > "$RUNNER_TEMP/notes.md"
+        run: |
+          python3 scripts/release_notes.py "$TAG" > "$RUNNER_TEMP/notes.md"
+          # Belt and braces, as in glyphstream: the script already exits
+          # non-zero on a missing section, but nothing else checks the file it
+          # wrote, and an empty body_path publishes rather than fails.
+          test -s "$RUNNER_TEMP/notes.md"
 
       - name: Create release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
