@@ -222,11 +222,24 @@ def previous_version(text: str, tag: str) -> str | None:
 
 
 def tag_exists(tag: str) -> bool:
-    result = subprocess.run(
-        ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
-        capture_output=True,
-        text=True,
-    )
+    """Whether ``tag`` is a real ref here.
+
+    Any failure counts as "no", including git being absent entirely: this only
+    decides whether the notes link a compare view or the commit list, and
+    failing a release over a cosmetic lookup would be the worse trade. The
+    OSError arm matters because subprocess.run RAISES FileNotFoundError when
+    the binary is missing rather than returning a non-zero code -- which would
+    have crashed the release job, while the JS port silently returned false for
+    the same fault.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
     return result.returncode == 0
 
 
@@ -265,7 +278,15 @@ def subjects(previous: str | None, tag: str) -> list[str]:
     already listed, and says nothing the branch's own commits don't.
     """
     span = f"{previous}..{tag}" if previous else tag
-    return [s for s in git("log", "--no-merges", "--format=%s", span).splitlines() if s]
+    # --end-of-options: `span` is built from a hand-typed argument, and `git
+    # log` takes option-shaped operands (--output=<file> writes a file). No
+    # shell is involved and nothing automated passes --draft, so this is
+    # hygiene rather than a vulnerability -- but it costs one token.
+    return [
+        s
+        for s in git("log", "--no-merges", "--format=%s", "--end-of-options", span).splitlines()
+        if s
+    ]
 
 
 def classify(subject: str) -> tuple[str, str]:
