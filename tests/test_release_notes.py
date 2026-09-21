@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import release_notes as rn
 from release_notes import OTHER, classify, render_draft
 
 REPO = "xiphux/openai-api-bridge"
@@ -104,3 +105,34 @@ def test_draft_says_so_when_a_range_carries_nothing() -> None:
     a generation failure."""
     body = render_draft("v0.6.1", "v0.6.0", ["Version 0.6.1"])
     assert "No commits found for this range." in body
+
+
+class TestDraftCommand:
+    """`main()`'s --draft path, which nothing covered before.
+
+    The cases above all call render_draft directly with literal commit lists,
+    so main() and subjects() were never exercised and --draft shipped broken
+    for the one thing it is for: drafting a version that is not tagged yet.
+    """
+
+    def test_drafting_an_untagged_version_reads_the_range_from_head(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The docstring's own example. This raised `fatal: ambiguous argument`
+        # from git because previous..tag was handed over with tag not a ref.
+        assert rn.main(["v99.0.0", "--draft"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith("<!-- DRAFT")
+        assert "..HEAD." in out
+
+    def test_drafting_an_already_tagged_version_uses_that_tag(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        tags = rn.git("tag", "--list", "v[0-9]*.[0-9]*.[0-9]*").splitlines()
+        if not tags:
+            pytest.skip("no tags in this checkout (CI clones at depth 1)")
+        newest = tags[-1]
+        assert rn.main([newest, "--draft"]) == 0
+        out = capsys.readouterr().out
+        assert f"..{newest}." in out
+        assert "HEAD" not in out.splitlines()[0]

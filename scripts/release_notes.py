@@ -335,12 +335,25 @@ def main(argv: list[str]) -> int:
     previous = args.previous or previous_version(text, args.tag)
 
     if args.draft:
+        # A draft is written BEFORE the version is tagged -- that is the whole
+        # point of it, since the entry goes under `## Unreleased` and the
+        # version is not named until the bump commit. So `args.tag` is normally
+        # not a ref yet, and `previous..tag` handed straight to git failed with
+        # a raw `fatal: ambiguous argument` on the exact example the docstring
+        # gives. Read the range from HEAD when the target is not a ref, and drop
+        # a `previous` that was never tagged, as the notes path below does.
+        head = args.tag if tag_exists(args.tag) else "HEAD"
+        if previous and not tag_exists(previous):
+            previous = None
         try:
-            commits = subjects(previous, args.tag)
+            commits = subjects(previous, head)
         except GitError as e:
             print(str(e), file=sys.stderr)
             return 1
-        sys.stdout.write(render_draft(args.tag, previous, commits))
+        # `head`, not `args.tag`: render_draft rebuilds the span for its own
+        # header, so passing the tag would label the output with a range the
+        # commits did not come from.
+        sys.stdout.write(render_draft(head, previous, commits))
         return 0
 
     # A version listed in the changelog but never tagged has no compare
