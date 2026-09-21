@@ -14,9 +14,9 @@ publishing.
 ``--draft`` is the old behaviour of this script: group the tag's commit subjects
 by their conventional-commit prefix. It is scaffolding for writing a changelog
 entry by hand, never the published notes, because commit subjects cannot say
-what a release actually delivered. v0.5.0's generated notes listed nine separate
-``fal:`` commits -- schema introspection, retry cooldowns, key rejection -- for
-what a user experienced as one thing: a new fal.ai backend. Commits within a
+what a release actually delivered. v0.5.0's generated notes listed 17 separate
+``fal``-scoped commits -- schema introspection, retry cooldowns, key rejection --
+for what a user experienced as one thing: a new fal.ai backend. Commits within a
 release also net out against each other, so a fix to a bug introduced two
 commits earlier describes something no release ever carried.
 

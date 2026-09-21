@@ -126,8 +126,8 @@ jobs:
   #
   # Nor from the commits themselves, which that script used to read. Commit
   # subjects cannot distinguish what a release delivered from how it was built:
-  # v0.5.0's generated notes listed nine separate `fal:` commits for what a user
-  # experienced as one new backend, and a release's commits net out against each
+  # v0.5.0's generated notes listed 17 separate `fal`-scoped commits for what a
+  # user experienced as one new backend, and a release's commits net out against each
   # other, so a fix to a bug introduced two commits earlier described something
   # no release ever carried. `--draft` still prints that grouping, as scaffolding
   # for writing the entry by hand.
