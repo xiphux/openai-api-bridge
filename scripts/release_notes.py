@@ -44,18 +44,22 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 # runs from git or from a `sha-` image tag. Accepting the suffix meant ordering
 # it, and semver prerelease precedence is a surprising amount of machinery for
 # a shape nothing produces.
-_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+# re.ASCII throughout: Python's `\d` and `\s` are Unicode-aware by default,
+# so a version written with full-width digits parsed as a version here and
+# nowhere else, and NEL/FS counted as the whitespace after `##`. Both siblings
+# are ASCII-only, and agreeing matters more than either behaviour.
+_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$", re.ASCII)
 # The `{0,3}` matches the fence rule below, and CommonMark: an ATX heading may
 # carry up to three spaces of indent and still be a heading, which is how
 # GitHub renders it. Anchored at column 0, `  ## v1.0.0` rendered as a section
 # everywhere a reader looked while the parser read it as body text.
-_HEADING = re.compile(r"^ {0,3}##\s+(\S.*?)\s*$")
+_HEADING = re.compile(r"^ {0,3}##\s+(\S.*?)\s*$", re.ASCII)
 # A backtick fence's info string may not itself contain a backtick, so
 # ```text with `code` is prose to GitHub, not a fence opener.
 _FENCE = re.compile(r"^ {0,3}(?:(`{3,})([^`]*)|(~{3,})(.*))$")
 # `##v0.7.0` -- a heading that will never match _HEADING, so it joins the
 # section above instead of starting its own.
-_LOOSE_HEADING = re.compile(r"^ {0,3}##[^\s#]")
+_LOOSE_HEADING = re.compile(r"^ {0,3}##[^\s#]", re.ASCII)
 UNRELEASED = "Unreleased"
 
 
@@ -79,12 +83,34 @@ def git(*args: str) -> str:
 # ---------------------------------------------------------------- changelog
 
 
-def _fence_marker(line: str) -> str | None:
-    """The code-fence marker this line opens or closes with, if any."""
+def _fence_marker(line: str) -> tuple[str, str] | None:
+    """The fence marker this line carries and its info string, if it is one."""
     match = _FENCE.match(line)
     if not match:
         return None
-    return match.group(1) or match.group(3)
+    if match.group(1):
+        return match.group(1), match.group(2)
+    return match.group(3), match.group(4)
+
+
+def _next_fence(fence: str | None, line: str) -> tuple[str | None, bool]:
+    """The fence state after ``line``, and whether the line was a fence line.
+
+    Both scans over the file go through this, so they cannot disagree about
+    what is inside a fence -- which would make the lost-heading report describe
+    a different document from the one parse_changelog returned.
+    """
+    found = _fence_marker(line)
+    if found is None:
+        return fence, False
+    marker, info = found
+    if fence is None:
+        return marker, True
+    # A closer must use the same character, be at least as long, and carry
+    # nothing but whitespace after it: CommonMark allows an info string only on
+    # the opener, so ```bash inside an open block is content, not a closer.
+    closes = marker[0] == fence[0] and len(marker) >= len(fence) and info.strip() == ""
+    return (None if closes else fence), True
 
 
 def parse_changelog(text: str) -> list[tuple[str, str]]:
@@ -103,12 +129,8 @@ def parse_changelog(text: str) -> list[tuple[str, str]]:
     for line in text.split("\n"):
         # CommonMark allows up to three spaces of indent, and a closing fence
         # must use the same character and be at least as long as the opener.
-        token = _fence_marker(line)
-        if token is not None:
-            if fence is None:
-                fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
-                fence = None
+        fence, is_fence_line = _next_fence(fence, line)
+        if is_fence_line:
             if sections:
                 sections[-1][1].append(line)
             continue
@@ -145,13 +167,11 @@ def _lost_heading_problems(text: str) -> list[str]:
     opened_at = 0
 
     for number, line in enumerate(text.split("\n"), start=1):
-        token = _fence_marker(line)
-        if token is not None:
-            if fence is None:
-                fence = token
+        was_open = fence is not None
+        fence, is_fence_line = _next_fence(fence, line)
+        if is_fence_line:
+            if not was_open and fence is not None:
                 opened_at = number
-            elif token[0] == fence[0] and len(token) >= len(fence):
-                fence = None
             continue
         if fence is None and _LOOSE_HEADING.match(line):
             problems.append(
@@ -206,6 +226,12 @@ def validate(text: str) -> list[str]:
         # the empty notes this file exists to prevent.
         if not body:
             problems.append(f'"## {heading}" has no entries')
+
+    # The Rust port asserts this and these two did not, which is a divergence
+    # in a rule all three claim to share. A file holding only `## Unreleased`
+    # is structurally fine and still cannot produce a release.
+    if not seen:
+        problems.append("no released versions found")
 
     return problems
 

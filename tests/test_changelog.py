@@ -145,6 +145,65 @@ class TestParse:
         text = "# Changelog\n\n## v1.1.0\n\n```text with `code` inside\n\n- an entry\n"
         assert rn.validate(text) == []
 
+    def test_tracks_fences_identically_in_a_crlf_file(self) -> None:
+        # `text.split("\n")` leaves the `\r` on every line. The JS port's
+        # equivalent regex silently stopped matching any fence line in a CRLF
+        # file; this pins that this one does not.
+        lf = "\n".join(
+            [
+                "# Changelog",
+                "",
+                "## v1.0.0",
+                "",
+                "- shows a sample:",
+                "",
+                "```markdown",
+                "## v0.9.0",
+                "```",
+                "",
+                "- and a trailing entry",
+                "",
+                "## v0.9.0",
+                "",
+                "- old",
+                "",
+            ]
+        )
+        crlf = lf.replace("\n", "\r\n")
+        assert [h for h, _ in rn.parse_changelog(crlf)] == ["v1.0.0", "v0.9.0"]
+        assert [h for h, _ in rn.parse_changelog(crlf)] == [h for h, _ in rn.parse_changelog(lf)]
+        assert rn.validate(crlf) == []
+
+    def test_a_closing_fence_may_not_carry_an_info_string(self) -> None:
+        # CommonMark allows an info string only on the opener, so ```bash
+        # inside an open block is content rather than a closer.
+        text = "\n".join(
+            [
+                "# Changelog",
+                "",
+                "## v1.0.0",
+                "",
+                "```",
+                "code",
+                "```bash",
+                "## v0.5.0",
+                "```",
+                "",
+                "- a",
+                "",
+            ]
+        )
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
+
+    def test_rejects_a_file_with_no_released_versions(self) -> None:
+        # The Rust port asserted this and these did not.
+        assert "no released versions found" in rn.validate("# Changelog\n\n## Unreleased\n\n- a\n")
+
+    def test_full_width_digits_are_not_a_version(self) -> None:
+        # Python's `\d` is Unicode-aware by default; the siblings are ASCII.
+        problems = rn.validate("# Changelog\n\n## v\uff11.0.0\n\n- a\n")
+        assert any("neither" in p for p in problems)
+
     def test_a_tilde_fence_is_tracked_too(self) -> None:
         text = "# Changelog\n\n## v1.0.0\n\n~~~\n## v0.5.0\n~~~\n\n- after\n"
         assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
