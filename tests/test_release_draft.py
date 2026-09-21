@@ -128,7 +128,19 @@ class TestDraftCommand:
         assert rn.main(["v99.0.0", "--draft"]) == 0
         out = capsys.readouterr().out
         assert out.startswith("<!-- DRAFT")
-        assert "..HEAD." in out
+
+        # The header names the span. With tags present that is `v0.7.0..HEAD`;
+        # in a tagless checkout -- CI's depth-1 clone among them -- `previous`
+        # is dropped and it is a bare `HEAD`. Asserting `"..HEAD."` pinned the
+        # first shape only, so this passed locally and failed on every CI run.
+        #
+        # What holds in both, and is what this test is named for: the range
+        # ENDS at HEAD, and the untagged v99.0.0 is never handed to git as a
+        # ref. The `previous..tag` spelling is pinned unconditionally by
+        # test_draft_names_the_range_it_covers, which passes literals.
+        span = out.split()[3].rstrip(".")
+        assert span.endswith("HEAD")
+        assert "v99.0.0" not in span
 
     def test_drafting_an_already_tagged_version_uses_that_tag(
         self, capsys: pytest.CaptureFixture[str]
