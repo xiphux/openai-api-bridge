@@ -47,6 +47,9 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 _VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _HEADING = re.compile(r"^##\s+(\S.*?)\s*$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# `##v0.7.0` -- a heading that will never match _HEADING, so it joins the
+# section above instead of starting its own.
+_LOOSE_HEADING = re.compile(r"^##[^\s#]")
 UNRELEASED = "Unreleased"
 
 
@@ -110,9 +113,48 @@ def _version_key(heading: str) -> tuple[int, int, int] | None:
     return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
+def _lost_heading_problems(text: str) -> list[str]:
+    """Problems that make parse_changelog SILENTLY LOSE sections.
+
+    The section-based checks below cannot see these: they only ever examine the
+    sections that survived the parse. Both shapes here read as one enormous
+    section -- a code fence opened and never closed swallows every heading
+    beneath it, and a heading typed ``##v0.7.0`` never matches and joins the
+    section above. validate would then call the file well-formed, section_for
+    would return the whole back-catalogue as the release body, and the compare
+    link would quietly degrade to the full commit list. Nothing would fail.
+    """
+    problems: list[str] = []
+    fence: str | None = None
+    opened_at = 0
+
+    for number, line in enumerate(text.split("\n"), start=1):
+        marker = _FENCE.match(line)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+                opened_at = number
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            continue
+        if fence is None and _LOOSE_HEADING.match(line):
+            problems.append(
+                f'line {number}: "{line.strip()}" needs a space after "##" to be read as a heading'
+            )
+
+    if fence is not None:
+        problems.append(
+            f"the code fence opened on line {opened_at} is never closed, "
+            "so every heading below it was read as body text"
+        )
+    return problems
+
+
 def validate(text: str) -> list[str]:
     """Structural problems with the changelog. Empty means valid."""
-    problems: list[str] = []
+    # First, because these make the section list itself untrustworthy.
+    problems = _lost_heading_problems(text)
     first_line = text.split("\n")[0] if text else ""
     if not re.match(r"^#\s+Changelog\s*$", first_line):
         problems.append('the first line must be "# Changelog"')

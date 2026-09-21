@@ -165,6 +165,44 @@ class TestValidate:
         text = "# Release notes\n\n## v0.1.0\n\n- a\n"
         assert 'the first line must be "# Changelog"' in rn.validate(text)
 
+    def test_reports_an_unclosed_code_fence(self) -> None:
+        # The worst shape: without this the parse yields ONE section holding
+        # the whole back-catalogue, validate calls it well-formed, and the
+        # release publishes the entire history as its body.
+        text = "\n".join(
+            [
+                "# Changelog",
+                "",
+                "## v1.1.0",
+                "",
+                "- shows a sample:",
+                "",
+                "```toml",
+                "key = 1",
+                "",
+                "## v1.0.0",
+                "",
+                "- old",
+                "",
+            ]
+        )
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.1.0"]
+        expected = (
+            "the code fence opened on line 7 is never closed, "
+            "so every heading below it was read as body text"
+        )
+        assert expected in rn.validate(text)
+
+    def test_reports_a_heading_with_no_space_after_the_hashes(self) -> None:
+        # Same failure, different typo: `##v1.0.0` never matches, so it joins
+        # the section above instead of starting its own.
+        text = "# Changelog\n\n## v1.1.0\n\n- new\n\n##v1.0.0\n\n- old\n"
+        expected = 'line 7: "##v1.0.0" needs a space after "##" to be read as a heading'
+        assert expected in rn.validate(text)
+
+    def test_does_not_report_a_balanced_fence(self) -> None:
+        assert rn.validate("# Changelog\n\n## v1.0.0\n\n```\nx\n```\n\n- a\n") == []
+
     def test_rejects_a_file_with_no_sections(self) -> None:
         assert 'no "## " release sections found' in rn.validate("# Changelog\n\nnothing\n")
 
