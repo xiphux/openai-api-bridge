@@ -661,16 +661,31 @@ and ruff from `uv.lock`.
 |---|---|
 | Lint + format + type-check | pre-commit (ruff, file hygiene) and `mypy src` |
 | Tests | `pytest --cov`: fails on any warning, and below the branch-coverage floor in `pyproject.toml` |
-| Workflow + Dockerfile lint | actionlint, zizmor, hadolint |
+| Workflow + Dockerfile lint | actionlint, zizmor, hadolint, and `CHANGELOG.md`'s structure |
 | Dependency audit | `pip-audit` over the production (`--no-dev`) lock |
 | Docker image smoke | builds amd64 + arm64; boots amd64 and serves requests, including the OpenAI passthrough against a stub upstream over a real network (JSON, streaming, unreachable upstream); import-checks both from the image's own venv |
 | Secret scan | gitleaks over the tested commit's history |
 
-Pushing a `v*.*.*` tag publishes a GitHub release once that suite passes, with
-notes built from the commits in the tag by `scripts/release_notes.py`, grouped
-by their conventional-commit prefix. GitHub's own generated notes list only
-pull requests, which would miss nearly everything here — work lands as direct
-commits to `main`.
+Pushing a `v*.*.*` tag publishes a GitHub release once that suite passes. The
+notes are the tag's section of [`CHANGELOG.md`](CHANGELOG.md), rendered by
+`scripts/release_notes.py`; a version with no section fails the release rather
+than publishing an empty one.
+
+**A change anyone can notice — an endpoint, a payload field, a backend, a
+behaviour change, a bug fix, a config key — adds a line to `## Unreleased` in
+the same commit.** Internal work does not: refactors, tests, dependency bumps,
+CI. Neither do fixes to problems introduced earlier in the same unreleased
+version, since no release carried the bug. At release, `## Unreleased` is
+renamed to `## vX.Y.Z` in the commit that bumps the version in `pyproject.toml`.
+
+The two alternatives were tried and are worse. GitHub's own generated notes
+list only pull requests, which misses nearly everything here — work lands as
+direct commits to `main`, and v0.6.0's generated notes named its two Dependabot
+PRs and none of its other 44 commits. Building them from the commits instead
+describes how a release was built rather than what it delivered: v0.5.0 was 17
+separate `fal`-scoped commits for what a user experienced as one new backend.
+`scripts/release_notes.py <tag> --draft` still prints that grouping, as
+scaffolding to condense by hand — never the entry itself.
 
 Renovate proposes GitHub Actions, `uv` and pre-commit updates, each release
 held back a week, and merges a PR once CI is green if every update in it is a
