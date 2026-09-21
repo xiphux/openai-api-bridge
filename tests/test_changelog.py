@@ -194,13 +194,22 @@ class TestCommittedChangelog:
         assert tags - documented == set()
 
     def test_has_an_entry_for_the_current_project_version(self) -> None:
-        # The version in pyproject.toml is the one the next tag will carry, so
-        # it is either already written up or still sitting under Unreleased.
+        # Exactly the check docker.yml's release job runs, rather than a weaker
+        # restatement of it: section_for also rejects a section that exists but
+        # is empty, and raises GitError naming the fix.
+        #
+        # This holds continuously because the version here moves only at
+        # release -- the `Version X.Y.Z` commit IS the tagged commit -- so
+        # between releases pyproject.toml names the last RELEASED version,
+        # whose section exists. A pending `## Unreleased` above it is
+        # irrelevant, since this asks whether the section exists at all, not
+        # where it sits. The window where it fails is the one commit that bumps
+        # the version without renaming Unreleased, which is the mistake worth
+        # catching.
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         version = next(
             line.split("=", 1)[1].strip().strip('"')
             for line in pyproject.splitlines()
             if line.startswith("version =")
         )
-        headings = [h for h, _ in rn.parse_changelog(self.text)]
-        assert f"v{version}" in headings or headings[0] == "Unreleased"
+        rn.section_for(self.text, f"v{version}")
