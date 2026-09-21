@@ -309,7 +309,7 @@ class TestSectionFor:
     def test_raises_for_a_missing_version_and_names_the_fix(self) -> None:
         with pytest.raises(rn.GitError, match=r'no "## v0\.3\.0" section'):
             rn.section_for(VALID, "v0.3.0")
-        with pytest.raises(rn.GitError, match=r'Rename "## Unreleased"'):
+        with pytest.raises(rn.GitError, match=r'Add one below "## Unreleased"'):
             rn.section_for(VALID, "v0.3.0")
 
     def test_raises_for_an_empty_section(self) -> None:

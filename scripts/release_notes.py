@@ -253,7 +253,8 @@ def section_for(text: str, tag: str) -> str:
             return body
     raise GitError(
         f'CHANGELOG.md has no "## {tag}" section. '
-        f'Rename "## {UNRELEASED}" to "## {tag}" before tagging.'
+        f'Add one below "## {UNRELEASED}", holding the entries that were '
+        f"under it, before tagging."
     )
 
 
