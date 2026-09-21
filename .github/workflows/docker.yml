@@ -79,11 +79,20 @@ jobs:
       # manifest DISAGREEING -- tagging v0.7.1 while pyproject says 0.7.0. That
       # passes every check, inherits a green run, and the push below then moves
       # `:latest` onto an image with no release to explain it.
-      - name: The tag has a changelog section
+      - name: The tag matches this commit and has a changelog section
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           TAG: ${{ github.ref_name }}
-        run: python3 scripts/release_notes.py "$TAG" > /dev/null
+        run: |
+          # Forward: the tag names a version the changelog documents.
+          python3 scripts/release_notes.py "$TAG" > /dev/null
+          # Backward, which the forward check alone does not cover: the tag is
+          # the version this commit actually IS. Without it, force-moving an
+          # already-released tag onto a new commit finds that version's old
+          # section, passes, and metadata-action's latest=auto then drags
+          # `:latest` backwards onto it while the release body is rewritten.
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          test "v$version" = "$TAG"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0

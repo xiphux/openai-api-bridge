@@ -183,3 +183,44 @@ class TestReleaseBodyPlatforms:
         named = sorted(re.findall(r"`([^`]+)`", line.group(1)))
 
         assert named == built
+
+
+class TestTagCheckBeforePush:
+    """The tag check in docker.yml is the only thing standing between a bad tag
+    and GHCR, and it is the one guard `gate` can never cover: gate inherits a
+    pass by CONTENT, and the same tree can be tagged anything.
+
+    foundry pins its equivalent hand edit with a test. These assertions are the
+    same idea -- that the step still exists in the job that pushes, and still
+    runs before anything reaches the registry.
+    """
+
+    def _steps(self) -> list[dict[str, Any]]:
+        jobs: dict[str, Any] = yaml.safe_load((WORKFLOWS / "docker.yml").read_text())["jobs"]
+        steps: list[dict[str, Any]] = jobs["build-and-push"]["steps"]
+        return steps
+
+    def test_the_pushing_job_checks_the_tag(self) -> None:
+        steps = self._steps()
+        check = next(
+            (i for i, s in enumerate(steps) if "release_notes.py" in (s.get("run") or "")),
+            -1,
+        )
+        assert check > -1, "a step running release_notes.py in build-and-push"
+        assert "pyproject.toml" in steps[check]["run"], "it must also check the manifest version"
+
+    def test_the_check_runs_before_the_push_and_the_login(self) -> None:
+        steps = self._steps()
+        check = next(i for i, s in enumerate(steps) if "release_notes.py" in (s.get("run") or ""))
+        push = next(
+            (i for i, s in enumerate(steps) if "build-push-action" in (s.get("uses") or "")),
+            -1,
+        )
+        login = next(
+            (i for i, s in enumerate(steps) if "login-action" in (s.get("uses") or "")),
+            -1,
+        )
+        assert push > -1
+        assert check < push
+        if login > -1:
+            assert check < login
