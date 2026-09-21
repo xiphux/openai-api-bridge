@@ -20,6 +20,7 @@ goes red under `continue-on-error`, so a check of either shape would sail
 straight past that guarantee.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -155,3 +156,30 @@ def test_caller_grants_the_scope_the_gate_declares() -> None:
     # the whole file before any job runs -- not a quiet downgrade. Both halves
     # must agree, and only this asserts the caller's half.
     assert load("docker.yml")["tests"]["permissions"]["actions"] == "read"
+
+
+class TestReleaseBodyPlatforms:
+    """The release body names the architectures the image is built for, and so
+    does docker.yml -- in two files, with nothing tying them together.
+
+    Adding or dropping a platform is exactly the change that edits the workflow
+    and forgets the prose, and the result is a published release telling people
+    to pull an architecture that was never built.
+    """
+
+    def test_the_rendered_body_names_every_platform_the_build_produces(self) -> None:
+        jobs: dict[str, Any] = yaml.safe_load((WORKFLOWS / "docker.yml").read_text())["jobs"]
+        platforms_line = next(
+            step["with"]["platforms"]
+            for step in jobs["build-and-push"]["steps"]
+            if isinstance(step.get("with"), dict) and "platforms" in step["with"]
+        )
+        built = sorted(p.strip() for p in platforms_line.split(","))
+        assert built
+
+        script = (Path(__file__).resolve().parents[1] / "scripts" / "release_notes.py").read_text()
+        line = re.search(r'"Multi-arch: (.+?)\.",', script)
+        assert line is not None, "the Multi-arch line in render()"
+        named = sorted(re.findall(r"`([^`]+)`", line.group(1)))
+
+        assert named == built
