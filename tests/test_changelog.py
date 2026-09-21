@@ -199,6 +199,14 @@ class TestParse:
         # The Rust port asserted this and these did not.
         assert "no released versions found" in rn.validate("# Changelog\n\n## Unreleased\n\n- a\n")
 
+    def test_a_non_ascii_space_after_the_hashes_is_still_a_heading(self) -> None:
+        # `\s` is Unicode in JS and `char::is_whitespace` is Unicode in Rust, so
+        # both siblings read this as a heading. An earlier revision put re.ASCII
+        # on the heading patterns and left this port standing alone.
+        text = "# Changelog\n\n## v1.0.0\n\n- a\n\n##\u00a0v0.5.0\n\n- b\n"
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0", "v0.5.0"]
+        assert rn.validate(text) == []
+
     def test_full_width_digits_are_not_a_version(self) -> None:
         # Python's `\d` is Unicode-aware by default; the siblings are ASCII.
         problems = rn.validate("# Changelog\n\n## v\uff11.0.0\n\n- a\n")

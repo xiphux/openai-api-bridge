@@ -45,22 +45,29 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 # runs from git or from a `sha-` image tag. Accepting the suffix meant ordering
 # it, and semver prerelease precedence is a surprising amount of machinery for
 # a shape nothing produces.
-# re.ASCII throughout: Python's `\d` and `\s` are Unicode-aware by default,
-# so a version written with full-width digits parsed as a version here and
-# nowhere else, and NEL/FS counted as the whitespace after `##`. Both siblings
-# are ASCII-only, and agreeing matters more than either behaviour.
+# re.ASCII on the VERSION pattern only. Python's `\d` is Unicode-aware by
+# default, so a version written with full-width digits parsed as a version here
+# and nowhere else -- JS `\d` is ASCII and Rust's `u64::from_str` is ASCII, so
+# this is a real parity fix.
+#
+# Deliberately NOT on the heading patterns, though an earlier revision put it
+# there on the same reasoning. `\s` is the opposite case: JS `\s` and Rust's
+# `char::is_whitespace` are BOTH Unicode, so a non-breaking space after `##` is
+# a heading in both siblings. Making Python ASCII-only there left it standing
+# alone -- creating the divergence the flag was added to remove. Checked in all
+# three rather than assumed.
 _VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$", re.ASCII)
 # The `{0,3}` matches the fence rule below, and CommonMark: an ATX heading may
 # carry up to three spaces of indent and still be a heading, which is how
 # GitHub renders it. Anchored at column 0, `  ## v1.0.0` rendered as a section
 # everywhere a reader looked while the parser read it as body text.
-_HEADING = re.compile(r"^ {0,3}##\s+(\S.*?)\s*$", re.ASCII)
+_HEADING = re.compile(r"^ {0,3}##\s+(\S.*?)\s*$")
 # A backtick fence's info string may not itself contain a backtick, so
 # ```text with `code` is prose to GitHub, not a fence opener.
 _FENCE = re.compile(r"^ {0,3}(?:(`{3,})([^`]*)|(~{3,})(.*))$")
 # `##v0.7.0` -- a heading that will never match _HEADING, so it joins the
 # section above instead of starting its own.
-_LOOSE_HEADING = re.compile(r"^ {0,3}##[^\s#]", re.ASCII)
+_LOOSE_HEADING = re.compile(r"^ {0,3}##[^\s#]")
 UNRELEASED = "Unreleased"
 
 
