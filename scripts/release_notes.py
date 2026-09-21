@@ -39,8 +39,12 @@ from pathlib import Path
 
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
-# `## vX.Y.Z`, with an optional prerelease suffix.
-_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
+# `## vX.Y.Z` exactly. Prereleases are NOT supported, deliberately: this
+# project has never shipped one and does not intend to -- anything unreleased
+# runs from git or from a `sha-` image tag. Accepting the suffix meant ordering
+# it, and semver prerelease precedence is a surprising amount of machinery for
+# a shape nothing produces.
+_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 _HEADING = re.compile(r"^##\s+(\S.*?)\s*$")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 UNRELEASED = "Unreleased"
@@ -99,42 +103,11 @@ def parse_changelog(text: str) -> list[tuple[str, str]]:
     return [(heading, "\n".join(body).strip()) for heading, body in sections]
 
 
-# One prerelease identifier, normalised so Python can order a mixed list: a
-# numeric identifier ranks below an alphanumeric one, numerics compare
-# numerically, and the rest compare as text.
-_Identifier = tuple[int, int, str]
-
-
-def _identifiers(prerelease: str) -> tuple[_Identifier, ...]:
-    parts: list[_Identifier] = []
-    for part in prerelease.split("."):
-        if part.isdigit():
-            parts.append((0, int(part), ""))
-        else:
-            parts.append((1, 0, part))
-    return tuple(parts)
-
-
-def _version_key(heading: str) -> tuple[int, int, int, int, tuple[_Identifier, ...]] | None:
-    """Sortable key for a `vX.Y.Z` heading, prerelease suffix included.
-
-    The suffix used to be parsed and then discarded, so `## v1.0.0` above
-    `## v1.0.0-rc.1` compared EQUAL and a correctly ordered file was reported
-    as out of order -- while the regex above and test_accepts_a_prerelease_version
-    both advertised that prereleases are supported.
-
-    The fourth element carries semver's rule that a release outranks its own
-    prereleases (1 beats 0); the fifth orders prereleases among themselves,
-    where a longer identifier list wins an otherwise-tied comparison.
-    """
+def _version_key(heading: str) -> tuple[int, int, int] | None:
     match = _VERSION.match(heading)
     if not match:
         return None
-    core = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    prerelease = match.group(4)
-    if prerelease is None:
-        return (*core, 1, ())
-    return (*core, 0, _identifiers(prerelease))
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
 
 
 def validate(text: str) -> list[str]:
