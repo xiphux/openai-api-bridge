@@ -42,6 +42,7 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 # `## vX.Y.Z`, with an optional prerelease suffix.
 _VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
 _HEADING = re.compile(r"^##\s+(\S.*?)\s*$")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 UNRELEASED = "Unreleased"
 
 
@@ -63,11 +64,34 @@ def git(*args: str) -> str:
 
 
 def parse_changelog(text: str) -> list[tuple[str, str]]:
-    """The file's ``## `` sections as (heading, body), in file order."""
+    """The file's ``## `` sections as (heading, body), in file order.
+
+    Headings are not recognised inside a fenced code block. An entry showing a
+    markdown or YAML sample can legitimately contain a line starting ``## ``,
+    and treating it as a section boundary either invents a bogus version or --
+    when the fenced line happens to look like one -- silently truncates the
+    real section's body at that point and publishes half the notes.
+    """
     sections: list[tuple[str, list[str]]] = []
+    # The open fence's marker, or None outside one.
+    fence: str | None = None
+
     for line in text.split("\n"):
+        # CommonMark allows up to three spaces of indent, and a closing fence
+        # must use the same character and be at least as long as the opener.
+        marker = _FENCE.match(line)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            if sections:
+                sections[-1][1].append(line)
+            continue
+
         # `^##\s` cannot match `### `: the third `#` is not whitespace.
-        heading = _HEADING.match(line)
+        heading = _HEADING.match(line) if fence is None else None
         if heading:
             sections.append((heading.group(1), []))
         elif sections:

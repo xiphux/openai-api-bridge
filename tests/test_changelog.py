@@ -79,6 +79,57 @@ class TestParse:
     def test_preamble_above_the_first_heading_is_dropped(self) -> None:
         assert not any("Prose above" in body for _, body in rn.parse_changelog(VALID))
 
+    def test_a_heading_inside_a_fenced_block_is_not_a_section(self) -> None:
+        # The dangerous shape: a fenced line that looks like a version. Before
+        # fence tracking this passed validation AND truncated v1.0.0's body at
+        # the fence, so the published notes silently lost everything below it.
+        text = "\n".join(
+            [
+                "# Changelog",
+                "",
+                "## v1.0.0",
+                "",
+                "- shows a sample:",
+                "",
+                "```markdown",
+                "## v0.95.0",
+                "```",
+                "",
+                "- and a trailing entry",
+                "",
+                "## v0.9.0",
+                "",
+                "- old",
+                "",
+            ]
+        )
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0", "v0.9.0"]
+        assert rn.validate(text) == []
+        assert "and a trailing entry" in rn.section_for(text, "v1.0.0")
+
+    def test_a_fence_closes_only_on_a_long_enough_marker_of_the_same_character(self) -> None:
+        text = "\n".join(
+            [
+                "# Changelog",
+                "",
+                "## v1.0.0",
+                "",
+                "````",
+                "```",
+                "## v0.5.0",
+                "````",
+                "",
+                "- after",
+                "",
+            ]
+        )
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
+        assert "- after" in rn.section_for(text, "v1.0.0")
+
+    def test_a_tilde_fence_is_tracked_too(self) -> None:
+        text = "# Changelog\n\n## v1.0.0\n\n~~~\n## v0.5.0\n~~~\n\n- after\n"
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
+
 
 class TestValidate:
     def test_accepts_a_well_formed_file(self) -> None:
