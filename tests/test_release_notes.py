@@ -1,9 +1,13 @@
-"""The release-notes generator: how commit subjects become the published notes.
+"""The commit-subject grouping behind ``release_notes.py --draft``.
 
-The notes are what the release page says shipped, and nothing else reports a
-mistake here — a miscategorised or dropped commit just isn't mentioned. These
-pin the classification and the rendering; the git plumbing around them is
-exercised by running the script against this repo's real tags.
+This is no longer what gets published — release notes come from CHANGELOG.md,
+and tests/test_changelog.py covers that path. What survives here is the
+scaffolding: given a tag range, group its commits by conventional-commit prefix
+so a changelog entry can be condensed from them by hand.
+
+It is still worth pinning. A miscategorised or dropped commit is invisible —
+nothing else reports it — and a draft that quietly omits a feature is a
+changelog entry that quietly omits it too.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from release_notes import OTHER, classify, previous_tag, render
+from release_notes import OTHER, classify, render_draft
 
 REPO = "xiphux/openai-api-bridge"
 
@@ -54,21 +58,7 @@ def test_a_breaking_change_is_marked() -> None:
     assert text.startswith("**Breaking** — ")
 
 
-@pytest.mark.parametrize(
-    ("tag", "expected"),
-    [
-        ("v0.6.0", "v0.5.1"),
-        ("v0.1.0", None),  # the first release compares against nothing
-        ("v0.7.0", "v0.6.0"),  # not yet tagged: the newest below it
-        ("v0.5.2", "v0.5.1"),  # a patch that skipped a minor still lands right
-    ],
-)
-def test_previous_tag(tag: str, expected: str | None) -> None:
-    tags = ["v0.1.0", "v0.2.0", "v0.5.0", "v0.5.1", "v0.6.0"]
-    assert previous_tag(tag, tags) == expected
-
-
-def test_render_groups_in_section_order_and_keeps_every_commit() -> None:
+def test_draft_groups_in_section_order_and_keeps_every_commit() -> None:
     commits = [
         "Version 0.6.0",  # dropped: the tag says this
         "ci: pin actions",
@@ -77,33 +67,40 @@ def test_render_groups_in_section_order_and_keeps_every_commit() -> None:
         "fix: two",
         "feat(scope): three",
     ]
-    body = render("v0.6.0", "v0.5.1", REPO, commits)
+    body = render_draft("v0.6.0", "v0.5.1", commits)
 
     assert body.index("🚀 Features") < body.index("🐛 Bug fixes") < body.index("⚙️ CI & build")
     assert body.index("⚙️ CI & build") < body.index(OTHER)
     assert "* one" in body and "* **scope**: three" in body
     assert "* two" in body
     assert "* Older style commit" in body
-    assert "Version 0.6.0" not in body.split("## What's changed")[1]
+    assert "Version 0.6.0" not in body
     # No empty headings for sections nothing landed in.
     assert "📝 Documentation" not in body
 
 
-def test_render_names_the_images_and_the_compare_link() -> None:
-    body = render("v0.6.0", "v0.5.1", REPO, ["feat: one"])
-
-    assert f"docker pull ghcr.io/{REPO}:0.6.0" in body
-    assert f"docker pull ghcr.io/{REPO}:latest" in body
-    assert body.rstrip().endswith(f"https://github.com/{REPO}/compare/v0.5.1...v0.6.0")
+def test_draft_names_the_range_it_covers() -> None:
+    body = render_draft("v0.6.0", "v0.5.1", ["feat: one"])
+    assert "v0.5.1..v0.6.0" in body
 
 
-def test_render_links_to_the_commit_list_for_a_first_release() -> None:
-    body = render("v0.1.0", None, REPO, ["Initial commit"])
-    assert body.rstrip().endswith(f"https://github.com/{REPO}/commits/v0.1.0")
+def test_draft_names_the_tag_alone_for_a_first_release() -> None:
+    body = render_draft("v0.1.0", None, ["Initial commit"])
+    assert "DRAFT for v0.1.0." in body
 
 
-def test_render_says_so_when_a_release_carries_nothing() -> None:
-    """A retag with no new commits still needs a body; an empty one reads as
+def test_draft_is_marked_as_something_to_condense_by_hand() -> None:
+    """The draft is scaffolding. Published verbatim it would reintroduce
+    exactly the noise the changelog exists to keep out, so the instruction
+    travels with the output rather than living only in CLAUDE.md."""
+    body = render_draft("v0.6.0", "v0.5.1", ["feat: one"])
+    assert body.startswith("<!-- DRAFT")
+    assert "condense" in body.lower()
+    assert "same unreleased version" in body
+
+
+def test_draft_says_so_when_a_range_carries_nothing() -> None:
+    """A retag with no new commits still needs output; an empty one reads as
     a generation failure."""
-    body = render("v0.6.1", "v0.6.0", REPO, ["Version 0.6.1"])
-    assert "No changes recorded for this release." in body
+    body = render_draft("v0.6.1", "v0.6.0", ["Version 0.6.1"])
+    assert "No commits found for this range." in body

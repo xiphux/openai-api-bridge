@@ -161,3 +161,30 @@ unreviewed. Keep that in mind when touching CI:
   objects handed to **bridge code** are `httpx2`. Only `httpx` is a dev dep,
   kept purely so respx has something to build mocks with; `httpx2` is a
   production dependency in `[project.dependencies]` that every backend imports.
+- **`CHANGELOG.md` is part of the change, not part of the release.** A commit
+  that adds, changes or fixes something an operator or an API client can notice
+  edits `## Unreleased` in the *same commit*. GitHub release notes are generated
+  from that file and nothing else (`scripts/release_notes.py`, run by
+  docker.yml), so an entry written later is an entry that was forgotten — and a
+  version with no section fails the release outright.
+
+  What earns a line: endpoint and payload changes, new or changed backends,
+  behaviour changes, bug fixes, and anything that changes what an operator
+  configures or how the image runs. What does not: refactors, tests, deps, CI,
+  docs, and internal work nobody can perceive. Nor **fixes to problems
+  introduced earlier in the same unreleased version** — no release carried the
+  bug, so to a user the fix is not a change. A feature built over twenty commits
+  gets *one* entry, written from the caller's side: v0.5.0's fal.ai backend was
+  nine commits and is one line here.
+
+  Keep entries to a line or two — the changelog says what arrived, the README
+  says how it works. Subheadings are `### Added`, `### Changed`, `### Fixed`,
+  `### Security`.
+
+  `## Unreleased` is renamed to `## vX.Y.Z` when the version in `pyproject.toml`
+  is bumped. Don't name the version any earlier — whether a release ends up a
+  patch or a minor depends on what lands before it.
+
+  `python scripts/release_notes.py <tag> --draft` prints the range's commits
+  grouped by prefix. That is scaffolding to condense by hand, never the entry
+  itself.

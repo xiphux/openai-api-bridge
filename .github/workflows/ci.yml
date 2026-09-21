@@ -338,6 +338,15 @@ jobs:
           ghcr.io/hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
           hadolint Dockerfile
 
+      # CHANGELOG.md is the sole source of release notes, so a malformed one is
+      # a release that publishes nothing. Checks the structure only (headings
+      # are Unreleased or vX.Y.Z, newest first, no released version left empty);
+      # whether an entry is WORTH writing is a review question, not a CI one.
+      # Lives here rather than in `static` because it needs no uv sync.
+      - name: Changelog
+        if: ${{ !cancelled() }}
+        run: python3 scripts/release_notes.py --validate
+
   # A known vulnerability in anything the image ships fails the run, so an
   # auto-merged update can't bring one in unnoticed — and neither can an
   # advisory published against something already locked, which holds every

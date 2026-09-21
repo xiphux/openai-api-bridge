@@ -119,10 +119,18 @@ jobs:
   # than drafted: a draft is invisible to everyone but the maintainer, and
   # twelve of them accumulated unnoticed behind that default.
   #
-  # Notes come from scripts/release_notes.py, which reads the commits in the
-  # tag. NOT GitHub's `generate_release_notes`, which lists pull requests only:
-  # work here lands as direct commits to main, so v0.6.0's generated notes
-  # named the two Dependabot PRs in it and none of the other 42 commits.
+  # Notes come from CHANGELOG.md, via scripts/release_notes.py. NOT GitHub's
+  # `generate_release_notes`, which lists pull requests only: work here lands as
+  # direct commits to main, so v0.6.0's generated notes named the two Dependabot
+  # PRs in it and none of the other 42 commits.
+  #
+  # Nor from the commits themselves, which that script used to read. Commit
+  # subjects cannot distinguish what a release delivered from how it was built:
+  # v0.5.0's generated notes listed nine separate `fal:` commits for what a user
+  # experienced as one new backend, and a release's commits net out against each
+  # other, so a fix to a bug introduced two commits earlier described something
+  # no release ever carried. `--draft` still prints that grouping, as scaffolding
+  # for writing the entry by hand.
   create-release:
     needs: build-and-push
     if: startsWith(github.ref, 'refs/tags/v')
@@ -138,7 +146,8 @@ jobs:
           fetch-depth: 0 # full history + tags, so the notes can diff against the prior tag
 
       # No dependencies: the script is standard library only, so this needs no
-      # uv sync. It fails the job rather than publishing an empty release.
+      # uv sync. It exits non-zero when the tag has no CHANGELOG.md section, so
+      # a release that would say nothing fails here instead of publishing.
       - name: Build release notes
         env:
           TAG: ${{ github.ref_name }}
