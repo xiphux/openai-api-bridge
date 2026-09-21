@@ -175,7 +175,7 @@ unreviewed. Keep that in mind when touching CI:
   introduced earlier in the same unreleased version** — no release carried the
   bug, so to a user the fix is not a change. A feature built over twenty commits
   gets *one* entry, written from the caller's side: v0.5.0's fal.ai backend was
-  nine commits and is one line here.
+  17 commits and is one line here.
 
   Keep entries to a line or two — the changelog says what arrived, the README
   says how it works. Subheadings are `### Added`, `### Changed`, `### Fixed`,
