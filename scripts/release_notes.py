@@ -45,11 +45,17 @@ CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 # it, and semver prerelease precedence is a surprising amount of machinery for
 # a shape nothing produces.
 _VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
-_HEADING = re.compile(r"^##\s+(\S.*?)\s*$")
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# The `{0,3}` matches the fence rule below, and CommonMark: an ATX heading may
+# carry up to three spaces of indent and still be a heading, which is how
+# GitHub renders it. Anchored at column 0, `  ## v1.0.0` rendered as a section
+# everywhere a reader looked while the parser read it as body text.
+_HEADING = re.compile(r"^ {0,3}##\s+(\S.*?)\s*$")
+# A backtick fence's info string may not itself contain a backtick, so
+# ```text with `code` is prose to GitHub, not a fence opener.
+_FENCE = re.compile(r"^ {0,3}(?:(`{3,})([^`]*)|(~{3,})(.*))$")
 # `##v0.7.0` -- a heading that will never match _HEADING, so it joins the
 # section above instead of starting its own.
-_LOOSE_HEADING = re.compile(r"^##[^\s#]")
+_LOOSE_HEADING = re.compile(r"^ {0,3}##[^\s#]")
 UNRELEASED = "Unreleased"
 
 
@@ -73,6 +79,14 @@ def git(*args: str) -> str:
 # ---------------------------------------------------------------- changelog
 
 
+def _fence_marker(line: str) -> str | None:
+    """The code-fence marker this line opens or closes with, if any."""
+    match = _FENCE.match(line)
+    if not match:
+        return None
+    return match.group(1) or match.group(3)
+
+
 def parse_changelog(text: str) -> list[tuple[str, str]]:
     """The file's ``## `` sections as (heading, body), in file order.
 
@@ -89,9 +103,8 @@ def parse_changelog(text: str) -> list[tuple[str, str]]:
     for line in text.split("\n"):
         # CommonMark allows up to three spaces of indent, and a closing fence
         # must use the same character and be at least as long as the opener.
-        marker = _FENCE.match(line)
-        if marker:
-            token = marker.group(1)
+        token = _fence_marker(line)
+        if token is not None:
             if fence is None:
                 fence = token
             elif token[0] == fence[0] and len(token) >= len(fence):
@@ -132,9 +145,8 @@ def _lost_heading_problems(text: str) -> list[str]:
     opened_at = 0
 
     for number, line in enumerate(text.split("\n"), start=1):
-        marker = _FENCE.match(line)
-        if marker:
-            token = marker.group(1)
+        token = _fence_marker(line)
+        if token is not None:
             if fence is None:
                 fence = token
                 opened_at = number
@@ -360,7 +372,9 @@ def render_draft(tag: str, previous: str | None, commits: list[str]) -> str:
 
 
 def render(tag: str, previous: str | None, repo: str, entries: str) -> str:
-    version = tag.lstrip("v")
+    # removeprefix, not lstrip: lstrip strips a character SET, so "vv1.0.0"
+    # would become "1.0.0". Unreachable today, wrong regardless.
+    version = tag.removeprefix("v")
     image = f"ghcr.io/{repo}"
     compare = (
         f"https://github.com/{repo}/compare/{previous}...{tag}"

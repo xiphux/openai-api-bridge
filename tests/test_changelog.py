@@ -126,6 +126,25 @@ class TestParse:
         assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
         assert "- after" in rn.section_for(text, "v1.0.0")
 
+    def test_reads_a_heading_indented_up_to_three_spaces(self) -> None:
+        # CommonMark and GitHub both treat this as a heading. Anchored at
+        # column 0 it rendered as a section everywhere a reader looked while
+        # the parser read it as body text.
+        text = "# Changelog\n\n## v1.1.0\n\n- new\n\n  ## v1.0.0\n\n- old\n"
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.1.0", "v1.0.0"]
+        assert rn.validate(text) == []
+
+    def test_does_not_read_a_four_space_indented_line_as_a_heading(self) -> None:
+        # Four spaces is an indented code block, which is why the limit is three.
+        text = "# Changelog\n\n## v1.0.0\n\n    ## v0.9.0\n\n- a\n"
+        assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
+
+    def test_a_backtick_info_string_containing_a_backtick_is_not_a_fence(self) -> None:
+        # CommonMark forbids it, so GitHub renders this as prose. Treating it
+        # as a fence made validate reject a file that is fine.
+        text = "# Changelog\n\n## v1.1.0\n\n```text with `code` inside\n\n- an entry\n"
+        assert rn.validate(text) == []
+
     def test_a_tilde_fence_is_tracked_too(self) -> None:
         text = "# Changelog\n\n## v1.0.0\n\n~~~\n## v0.5.0\n~~~\n\n- after\n"
         assert [h for h, _ in rn.parse_changelog(text)] == ["v1.0.0"]
