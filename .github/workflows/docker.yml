@@ -137,7 +137,8 @@ jobs:
           cache-from: type=gha,scope=publish
           cache-to: type=gha,mode=max,scope=publish
 
-  # Create a GitHub Release whenever a v*.*.* tag is pushed, published rather
+  # Create a GitHub Release whenever a v[0-9]+.[0-9]+.[0-9]+ tag is pushed,
+  # published rather
   # than drafted: a draft is invisible to everyone but the maintainer, and
   # twelve of them accumulated unnoticed behind that default.
   #

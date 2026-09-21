@@ -24,8 +24,9 @@ Why not GitHub's ``generate_release_notes``: it lists *pull requests* only. This
 repo's work lands as direct commits to main -- v0.6.0 held 44 commits and 2
 Dependabot PRs, and the generated notes named the 2.
 
-Standard library only, so the release and infra jobs can run it straight from a
-checkout with no ``uv sync``.
+Standard library only, so every job that runs it can do so straight from a
+checkout with no ``uv sync``. Stated as a property rather than a list: this
+named two jobs until a third call site was added and nobody updated it.
 """
 
 from __future__ import annotations
