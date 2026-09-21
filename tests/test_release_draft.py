@@ -1,9 +1,14 @@
 """The commit-subject grouping behind ``release_notes.py --draft``.
 
-This is no longer what gets published — release notes come from CHANGELOG.md,
-and tests/test_changelog.py covers that path. What survives here is the
-scaffolding: given a tag range, group its commits by conventional-commit prefix
-so a changelog entry can be condensed from them by hand.
+Named for the draft, not for release notes: what gets PUBLISHED comes from
+CHANGELOG.md and is covered by tests/test_changelog.py. The file kept its old
+name for one commit after the change that moved the notes onto the changelog,
+which left the obvious place to look when release notes come out wrong holding
+only the scaffolding path.
+
+What survives here is that scaffolding: given a tag range, group its commits by
+conventional-commit prefix so a changelog entry can be condensed from them by
+hand.
 
 It is still worth pinning. A miscategorised or dropped commit is invisible —
 nothing else reports it — and a draft that quietly omits a feature is a
