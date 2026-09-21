@@ -120,6 +120,25 @@ class TestValidate:
     def test_accepts_a_prerelease_version(self) -> None:
         assert rn.validate("# Changelog\n\n## v1.0.0-rc.1\n\n- a\n") == []
 
+    def test_accepts_a_release_above_its_own_prereleases(self) -> None:
+        # The suffix used to be parsed and then thrown away, so these compared
+        # equal and a correctly ordered file was reported as out of order.
+        text = (
+            "# Changelog\n\n## v1.0.0\n\n- final\n"
+            "\n## v1.0.0-rc.2\n\n- rc2\n\n## v1.0.0-rc.1\n\n- rc1\n"
+        )
+        assert rn.validate(text) == []
+
+    def test_rejects_a_prerelease_listed_above_its_own_release(self) -> None:
+        text = "# Changelog\n\n## v1.0.0-rc.1\n\n- rc\n\n## v1.0.0\n\n- final\n"
+        expected = '"## v1.0.0" is not below the version above it (newest first)'
+        assert expected in rn.validate(text)
+
+    def test_orders_prerelease_identifiers_by_precedence_not_as_text(self) -> None:
+        # rc.10 outranks rc.9 numerically; a text sort would disagree.
+        text = "# Changelog\n\n## v1.0.0-rc.10\n\n- ten\n\n## v1.0.0-rc.9\n\n- nine\n"
+        assert rn.validate(text) == []
+
 
 class TestSectionFor:
     def test_returns_only_that_version(self) -> None:
@@ -152,6 +171,13 @@ class TestPreviousVersion:
 
     def test_finds_the_newest_version_below_an_untagged_version(self) -> None:
         assert rn.previous_version(VALID, "v0.3.0") == "v0.2.0"
+
+    def test_treats_a_release_as_newer_than_its_own_prerelease(self) -> None:
+        text = (
+            "# Changelog\n\n## v1.0.0\n\n- final\n\n## v1.0.0-rc.1\n\n- rc\n\n## v0.9.0\n\n- old\n"
+        )
+        assert rn.previous_version(text, "v1.0.0") == "v1.0.0-rc.1"
+        assert rn.previous_version(text, "v1.0.0-rc.1") == "v0.9.0"
 
 
 class TestRender:

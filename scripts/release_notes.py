@@ -40,7 +40,7 @@ from pathlib import Path
 CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 # `## vX.Y.Z`, with an optional prerelease suffix.
-_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?$")
+_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$")
 _HEADING = re.compile(r"^##\s+(\S.*?)\s*$")
 UNRELEASED = "Unreleased"
 
@@ -75,11 +75,42 @@ def parse_changelog(text: str) -> list[tuple[str, str]]:
     return [(heading, "\n".join(body).strip()) for heading, body in sections]
 
 
-def _version_key(heading: str) -> tuple[int, int, int] | None:
+# One prerelease identifier, normalised so Python can order a mixed list: a
+# numeric identifier ranks below an alphanumeric one, numerics compare
+# numerically, and the rest compare as text.
+_Identifier = tuple[int, int, str]
+
+
+def _identifiers(prerelease: str) -> tuple[_Identifier, ...]:
+    parts: list[_Identifier] = []
+    for part in prerelease.split("."):
+        if part.isdigit():
+            parts.append((0, int(part), ""))
+        else:
+            parts.append((1, 0, part))
+    return tuple(parts)
+
+
+def _version_key(heading: str) -> tuple[int, int, int, int, tuple[_Identifier, ...]] | None:
+    """Sortable key for a `vX.Y.Z` heading, prerelease suffix included.
+
+    The suffix used to be parsed and then discarded, so `## v1.0.0` above
+    `## v1.0.0-rc.1` compared EQUAL and a correctly ordered file was reported
+    as out of order -- while the regex above and test_accepts_a_prerelease_version
+    both advertised that prereleases are supported.
+
+    The fourth element carries semver's rule that a release outranks its own
+    prereleases (1 beats 0); the fifth orders prereleases among themselves,
+    where a longer identifier list wins an otherwise-tied comparison.
+    """
     match = _VERSION.match(heading)
     if not match:
         return None
-    return (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    core = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    prerelease = match.group(4)
+    if prerelease is None:
+        return (*core, 1, ())
+    return (*core, 0, _identifiers(prerelease))
 
 
 def validate(text: str) -> list[str]:
