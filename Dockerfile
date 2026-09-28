@@ -7,7 +7,7 @@
 # watchfiles) ships a musllinux wheel, so `uv sync` pulls pre-built
 # wheels and never has to compile from source.
 
-FROM python:3.12-alpine AS builder
+FROM python:3.14-alpine AS builder
 
 # uv ships as a statically-linked musl binary in the scratch image, so
 # the same artifact runs on alpine just as it would on glibc — no need
@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 
-FROM python:3.12-alpine AS runtime
+FROM python:3.14-alpine AS runtime
 
 # sqlite CLI for ad-hoc inspection of the state.db (file metadata, job
 # tracking, eviction queue). ~1.5 MB and doesn't run unless invoked —
