@@ -73,6 +73,22 @@ dev = [
 # Neither is visible any other way: an unused package still installs, still
 # ships in the image, and Dependabot goes on proposing updates for it, while an
 # undeclared import works right up until whatever was pulling it in stops.
+[tool.uv]
+# Supply-chain cooldown for everything uv resolves, transitive dependencies
+# included: a version uploaded less than this long ago is never chosen.
+# Renovate's minimumReleaseAge delays only the packages it proposes; this
+# covers what they pull in, and the weekly lockFileMaintenance PR that
+# re-resolves the whole lockfile. uv records the cutoff in uv.lock, so CI's
+# `uv sync --locked` fails on a lock written without it.
+#
+# Keep it at or below the shortest age .github/renovate.json5 asks for (7
+# days), or Renovate's own PRs cannot resolve. Three days, as the pnpm
+# repositories use. A security fix younger than this can't be locked either,
+# though Renovate raises those immediately: for an urgent one, give the package
+# a shorter window in `exclude-newer-package` (e.g. `{ name = "1 hour" }`) with
+# a note, and remove it once that version is three days old.
+exclude-newer = "3 days"
+
 [tool.deptry]
 # scripts/ is not run against this project's environment: what remains there
 # (release_notes.py) is invoked with `uv run --no-project`, supplying its

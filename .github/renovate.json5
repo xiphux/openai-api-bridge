@@ -65,6 +65,21 @@
 	// finds these.
 	labels: ['dependencies'],
 
+	// Weekly, re-resolve the whole lockfile within the ranges already declared.
+	// Renovate otherwise updates only what pyproject.toml names, so a transitive
+	// dependency moves only when something above it does -- and the audit job
+	// fails every PR on an advisory against one, the way mysteryd8podcast sat
+	// on a vulnerable brace-expansion for 15 days after the fixed release. uv's
+	// `exclude-newer` (pyproject.toml) holds what this pulls in to a cooldown,
+	// which Renovate's own setting does not reach. CI gates it like any other
+	// update, so it merges unattended. Mondays, for a whole day rather than the
+	// default few hours, so a job is sure to land in it.
+	lockFileMaintenance: {
+		enabled: true,
+		automerge: true,
+		schedule: ['* * * * 1'],
+	},
+
 	packageRules: [
 		{
 			// pyproject.toml states floors (`ruff>=0.16.2`), and uv.lock states

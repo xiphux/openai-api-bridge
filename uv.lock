@@ -6,6 +6,10 @@ resolution-markers = [
     "python_full_version < '3.15'",
 ]
 
+[options]
+exclude-newer = "2026-09-27T23:05:04.508214Z"
+exclude-newer-span = "P3D"
+
 [[package]]
 name = "aiosqlite"
 version = "0.22.1"
