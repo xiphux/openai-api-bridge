@@ -32,6 +32,7 @@ jobs:
   cleanup:
     name: Prune old commit images
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       # Pinned to a full commit SHA, not a floating tag: this action has
       # destructive permissions (deletes registry packages), so a hijacked
