@@ -121,10 +121,15 @@ unreviewed. Keep that in mind when touching CI:
   commit and a baseline — the last commit CI passed on the target branch,
   on a pull request as well as a push (`scripts/audit-baseline.sh`, so
   a push of several commits can't slip one in) — and fails only on an
-  advisory the commit adds; one already on the baseline is a warning.
-  Failing on those blocked every PR, related or not, and deadlocked two that
-  each fixed one. That job checks out with `fetch-depth: 0` and has
-  `actions: read` for the lookup. A reviewed, unreachable advisory
+  advisory the commit adds (by package and id, so one the baseline had
+  against another package does not vouch for it); one already on the
+  baseline is a warning. Failing on those blocked every PR, related or not,
+  and deadlocked two that each fixed one. That job checks out with
+  `fetch-depth: 0`, has `actions: read` for the lookup, and never defers to
+  `gate`: an audit's answer changes while the content stands still. The
+  report must cover every requirement exported without a marker, so a
+  `--dry-run` or a report that skips packages fails rather than reading as
+  clean. A reviewed, unreachable advisory
   is an `--ignore-vuln <ID>` argument to the script, with its reason.
 - Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
   via `docker run` are pinned by digest. zizmor/hadolint exceptions go in

@@ -39,7 +39,11 @@ def load(name: str) -> dict[str, Any]:
 
 
 CI_JOBS = load("ci.yml")
-CHECKS = [name for name in CI_JOBS if name != "gate"]
+# The one exception runs the other way: the dependency audit never skips,
+# because its answer changes while the content stands still. It carries no
+# condition at all, and that is pinned too (see ci.yml).
+NEVER_SKIPS = ["audit"]
+CHECKS = [name for name in CI_JOBS if name != "gate" and name not in NEVER_SKIPS]
 GATE = CI_JOBS["gate"]
 SCRIPT = next(s for s in GATE["steps"] if s.get("id") == "inherit")["run"]
 
@@ -48,6 +52,12 @@ def test_has_check_jobs_to_guard() -> None:
     # Without this the suite passes vacuously if the jobs are renamed or the
     # `jobs:` key changes shape -- green from a rule matching nothing.
     assert CHECKS
+
+
+@pytest.mark.parametrize("name", NEVER_SKIPS)
+def test_always_runs(name: str) -> None:
+    assert "if" not in CI_JOBS[name]
+    assert CI_JOBS[name].get("continue-on-error", False) is False
 
 
 @pytest.mark.parametrize("name", CHECKS)

@@ -16,11 +16,15 @@
 #   on the tip's parent and only warn.
 # - Not the target branch's tip on a pull request. That tip can be a direct
 #   push whose run failed on an advisory; comparing against it, the PR would
-#   pass, its merge would inherit that pass through `gate` without auditing,
-#   and the merge would become the baseline. Against the last green state,
-#   every PR fails while the branch carries an advisory nothing has passed,
-#   until it is fixed or ignored -- which is also why a merge that inherits a
-#   PR's pass is a sound baseline in turn.
+#   pass on it. Against the last green state, every PR fails while the branch
+#   carries an advisory nothing has passed, until it is fixed or ignored.
+#
+# The audit job itself never inherits a pass through `gate`, unlike the
+# other checks: its answer changes without the content changing, as
+# advisories are published, and a PR's pass says nothing about the tree its
+# merge actually has when main moved underneath it. So every push is audited
+# against its own baseline, and a green run here always means an audit
+# passed on that commit.
 #
 # A candidate counts only if it is an ancestor of the target branch's tip as
 # this run sees it (HEAD^1, the merge commit's first parent, on a pull
@@ -124,5 +128,5 @@ if [ "$target" != "$AUDIT_DEFAULT_BRANCH" ]; then
     result "$found_sha" "no successful run on $target is an ancestor; comparing against the last successful run on $AUDIT_DEFAULT_BRANCH that is: $found_url ($found_sha)"
   fi
 fi
-echo "::warning title=Audit baseline::no successful run on $target or $AUDIT_DEFAULT_BRANCH is an ancestor of this commit, so there is no baseline: every high or critical advisory counts as new"
+echo "::warning title=Audit baseline::no successful run on $target or $AUDIT_DEFAULT_BRANCH is an ancestor of this commit, so there is no baseline: everything the audit finds counts as new"
 echo "sha=" >> "${GITHUB_OUTPUT:?}"

@@ -368,10 +368,18 @@ jobs:
   # with `--require-hashes` resolves nothing, so it checks exactly uv.lock.
   # The runner's own python3 runs the script, which uses only the standard
   # library; uv runs pip-audit.
+  #
+  # Unlike every other check here it never defers to `gate`. An inherited
+  # pass vouches for content, and the audit's answer changes while the
+  # content stands still, as advisories are published -- so a tag inheriting
+  # main's pass would ship one released since. The pull request's run also
+  # audited GitHub's merge with main as it was then; a direct push reverting
+  # a fix in between leaves the merge's tree identical to the branch's and the
+  # advisory back in it, and that merge would become the audit's next
+  # baseline without ever having been audited. It installs nothing, so it is
+  # cheap to run every time.
   audit:
     name: Dependency audit
-    needs: gate
-    if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

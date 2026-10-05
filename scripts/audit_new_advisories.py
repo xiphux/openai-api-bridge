@@ -14,11 +14,13 @@ scripts/audit-baseline.sh: the last commit a successful CI run passed on the
 target branch, on a pull request as well as a push, so a push of several
 commits, a run that failed and was followed by another, or a pull request
 onto a tip that failed, cannot pass an advisory nothing compared against a
-state without it. Unset (a local run), the baseline is HEAD's first parent; set but
-empty, there is none and every advisory counts as new. Advisories are compared
-by id: a routine update that moves a package already flagged does not count
-as new. (An id that covered two packages would be masked on the second; no
-such advisory has been seen in this lock.)
+state without it. Unset (a local run), the baseline is HEAD's first parent --
+outside CI only: in CI an unset $AUDIT_BASE means the step lost it, and fails
+rather than quietly comparing against the parent. Set but empty, there is no
+baseline and every advisory counts as new. Advisories are compared by package
+and id: a routine update that moves a package already flagged does not count
+as new, and an advisory the baseline had against one package does not vouch
+for another it now reaches.
 
 Each side is audited the same way the job always has: the production
 dependencies exported from its own uv.lock (`uv export --no-dev`), checked
@@ -29,8 +31,12 @@ maintenance still surface them. Dependencies pip-audit could not audit at all
 are printed as warnings too, as its own table used to show them.
 
 The report has to be what this reads: a `dependencies` list whose entries each
-carry `vulns` or a `skip_reason`. Anything else -- a newer pip-audit that
-renamed a field, a format override -- fails, rather than reading as clean.
+carry `vulns` or a `skip_reason`, and that covers every requirement exported
+without an environment marker (pip-audit drops the ones whose marker does not
+match this platform -- `sys_platform == 'win32'` and the like). Anything else
+-- a newer pip-audit that renamed a field, a format override, `--dry-run`,
+which writes an empty report and exits 0 -- fails, rather than reading as
+clean.
 
 The pip-audit to run comes from $PIP_AUDIT (e.g. `pip-audit@2.10.1`), and any
 arguments are passed to both audits -- `--ignore-vuln <ID>` for an advisory
@@ -46,6 +52,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,8 +62,10 @@ from pathlib import Path
 from typing import Any
 
 # Flags that would change the report's format or where it is written, which
-# would leave this reading something it does not understand.
-REFUSED = ("-f", "--format", "-o", "--output")
+# would leave this reading something it does not understand, or (--dry-run)
+# leave it empty. The coverage check in audit() is what catches a report that
+# skips requirements by any other route.
+REFUSED = ("-f", "--format", "-o", "--output", "--dry-run")
 
 
 @dataclass
@@ -70,8 +79,26 @@ class Advisory:
 
 @dataclass
 class Report:
-    advisories: dict[str, Advisory] = field(default_factory=dict)
+    # Keyed by (package, advisory id): an advisory against one package does
+    # not vouch for another it reaches.
+    advisories: dict[tuple[str, str], Advisory] = field(default_factory=dict)
     skipped: list[str] = field(default_factory=list)
+    packages: set[str] = field(default_factory=set)
+
+
+def canonical(name: str) -> str:
+    """A package name as PEP 503 compares them."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def unmarked_requirements(requirements: str) -> set[str]:
+    """The packages a `uv export` lists without an environment marker."""
+    names = set()
+    for line in requirements.splitlines():
+        match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*==[^;]*$", line.rstrip(" \\"))
+        if match:
+            names.add(canonical(match.group(1)))
+    return names
 
 
 def run(
@@ -98,6 +125,7 @@ def parse(report: Any, tree: Path) -> Report:
     for dependency in report["dependencies"]:
         if not isinstance(dependency, dict) or "name" not in dependency:
             raise RuntimeError(f"pip-audit's report in {tree} has an unreadable dependency")
+        parsed.packages.add(canonical(dependency["name"]))
         if "skip_reason" in dependency:
             parsed.skipped.append(f"{dependency['name']}: {dependency['skip_reason']}")
             continue
@@ -108,7 +136,7 @@ def parse(report: Any, tree: Path) -> Report:
             )
         for vuln in vulns:
             advisory = parsed.advisories.setdefault(
-                vuln["id"],
+                (canonical(dependency["name"]), vuln["id"]),
                 Advisory(
                     vuln["id"],
                     dependency["name"],
@@ -147,10 +175,16 @@ def audit(tree: Path, pip_audit: str, extra: list[str]) -> Report:
             raise RuntimeError(
                 f"pip-audit produced no report in {tree}:\n{result.stderr.strip()}"
             ) from error
+        missing = unmarked_requirements(requirements.read_text()) - report.packages
     if result.returncode not in (0, 1) or (result.returncode == 1) != bool(report.advisories):
         raise RuntimeError(
             f"pip-audit exited {result.returncode} with {len(report.advisories)} "
             f"advisories read in {tree}:\n{result.stderr.strip()}"
+        )
+    if missing:
+        raise RuntimeError(
+            f"pip-audit's report in {tree} leaves out {len(missing)} exported "
+            f"requirement(s): {', '.join(sorted(missing))}"
         )
     return report
 
@@ -162,6 +196,14 @@ def baseline() -> str:
         if base:
             git("rev-parse", "--verify", "--quiet", f"{base}^{{commit}}")
         return base
+    # In CI the baseline comes from scripts/audit-baseline.sh, always, even
+    # when it is empty. Unset there means the step lost it -- a rename, a
+    # dropped `env:` -- and the parent is the comparison that let a push of
+    # several commits through, so refuse rather than fall back to it.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        raise RuntimeError(
+            "AUDIT_BASE is not set: in CI it must come from scripts/audit-baseline.sh"
+        )
     try:
         return git("rev-parse", "--verify", "--quiet", "HEAD^1^{commit}")
     except RuntimeError:
