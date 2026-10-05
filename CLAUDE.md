@@ -117,6 +117,12 @@ unreviewed. Keep that in mind when touching CI:
   environment, so project dependencies do not govern it), and
   python-multipart is ignored for DEP002 (FastAPI parses multipart with it but
   nothing imports the name).
+- pip-audit runs through `scripts/audit_new_advisories.py`, which audits the
+  commit and its first parent and fails only on an advisory the commit adds;
+  one already on the base is a warning. Failing on those blocked every PR,
+  related or not, and deadlocked two that each fixed one. That job checks
+  out with `fetch-depth: 2` for the parent. A reviewed, unreachable advisory
+  is an `--ignore-vuln <ID>` argument to the script, with its reason.
 - Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
   via `docker run` are pinned by digest. zizmor/hadolint exceptions go in
   `.github/zizmor.yml` / `.hadolint.yaml` with a reason, never silenced inline.

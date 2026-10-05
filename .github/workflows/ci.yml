@@ -347,19 +347,24 @@ jobs:
         if: ${{ !cancelled() }}
         run: python3 scripts/release_notes.py --validate
 
-  # A known vulnerability in anything the image ships fails the run, so an
-  # auto-merged update can't bring one in unnoticed — and neither can an
-  # advisory published against something already locked, which holds every
-  # Dependabot PR until it's dealt with, on purpose. (The PR that bumps the
-  # affected package past the fix passes, since it's audited on its own tree.)
+  # A known vulnerability a change ADDS to anything the image ships fails the
+  # run, so an auto-merged update can't bring one in unnoticed. One already on
+  # the base — published against something already locked, often before any
+  # fix exists — is printed as a warning instead: failing on those held every
+  # PR, related or not, and deadlocked two PRs that each fixed one, since each
+  # still carried the other's. scripts/audit_new_advisories.py audits both
+  # HEAD and its first parent and compares, hence `fetch-depth: 2` below.
   #
   # --no-dev because dev dependencies never reach the image. pip-audit has no
-  # severity threshold, so this fails on any advisory with a known ID; if one
-  # is reviewed and found unreachable here, add `--ignore-vuln <ID>` below with
-  # the reasoning beside it, rather than dropping the job.
+  # severity threshold, so any advisory with a known ID counts; if one is
+  # reviewed and found unreachable here, add `--ignore-vuln <ID>` to the
+  # script's arguments below with the reasoning beside it, rather than
+  # dropping the job.
   #
   # Audits the exported, hash-pinned lock, not an environment: `--disable-pip`
   # with `--require-hashes` resolves nothing, so it checks exactly uv.lock.
+  # The runner's own python3 runs the script, which uses only the standard
+  # library; uv runs pip-audit.
   audit:
     name: Dependency audit
     needs: gate
@@ -370,21 +375,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The parent commit too: the audit compares against it.
+          fetch-depth: 2
 
       # No cache: nothing is installed but pip-audit itself.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false
 
-      - name: Export production dependencies
-        run: uv export --frozen --no-dev --no-emit-project --format requirements-txt -o "$RUNNER_TEMP/requirements.txt"
-
-      # Pinned; bump by hand (Dependabot doesn't see a uvx version).
+      # The script exports each side's production dependencies itself.
       - name: pip-audit
-        run: >-
-          uvx pip-audit@2.10.1
-          -r "$RUNNER_TEMP/requirements.txt"
-          --require-hashes --disable-pip --progress-spinner off
+        env:
+          # Pinned; bump by hand (Renovate doesn't see a uvx version).
+          PIP_AUDIT: pip-audit@2.10.1
+        run: python3 scripts/audit_new_advisories.py
 
   # Build the runtime image and boot it. Every other job runs a full dev install
   # on glibc; the image installs `--no-dev` on Alpine/musl. A runtime import of
