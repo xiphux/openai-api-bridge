@@ -45,7 +45,9 @@ jobs:
     permissions:
       contents: read
       # The called workflow's `gate` declares `actions: read` to look up
-      # earlier runs, and a called workflow is CAPPED by the calling job. A
+      # earlier runs, and so does the job running its dependency audit, to
+      # find the baseline it compares against (scripts/audit-baseline.sh). A
+      # called workflow is CAPPED by the calling job. A
       # declared permission the caller does not grant is not a silent
       # downgrade -- it is a hard validation error, "the nested job 'gate' is
       # requesting 'actions: read', but is only allowed 'actions: none'",

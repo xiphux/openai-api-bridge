@@ -1,100 +1,128 @@
 #!/usr/bin/env bash
 # Prints the commit the dependency audit compares HEAD against: the last state
-# of this branch that CI is known to have passed. The audit fails only on
-# advisories HEAD has that this commit did not, so what it is matters as much
-# as the audit does.
+# of the target branch that CI passed. The audit fails only on advisories HEAD
+# has that this commit did not, so what it is matters as much as the audit
+# does.
 #
-# - On a pull request: HEAD's first parent. actions/checkout checks out
-#   GitHub's merge commit, whose first parent is the target branch, so that
-#   is "the base without this change", and branch protection keeps it current.
+# It is the head of the last SUCCESSFUL run, on the target branch, of one of
+# the workflows in $AUDIT_WORKFLOWS (comma-separated workflow file names: the
+# ones whose push runs include the audit), excluding pull-request runs. The
+# target branch is the branch pushed to; on a pull request, the branch it
+# merges into; for a tag, the default branch. The same rule for every event is
+# what makes a pass mean the same thing everywhere:
 #
-# - Otherwise -- a push, a dispatch, a release tag: the head commit of the
-#   last SUCCESSFUL run, on this branch, of one of the workflows in
-#   $AUDIT_WORKFLOWS (comma-separated workflow file names: the ones whose push
-#   runs include the audit). For a tag, the default branch's. Not HEAD's first
-#   parent: a push of several commits runs CI once, on the tip, so an advisory
-#   from an earlier commit in it would already be on the tip's parent and only
-#   warn. Not the commit before the push either: a run that failed on an
-#   advisory, or was cancelled by the next push, would have the next push
-#   compare against its commits and pass them. Against the last green state,
-#   an advisory introduced since keeps failing until it is fixed or ignored.
+# - Not HEAD's first parent on a push. A push of several commits runs CI once,
+#   on the tip, so an advisory from an earlier commit in it would already be
+#   on the tip's parent and only warn.
+# - Not the target branch's tip on a pull request. That tip can be a direct
+#   push whose run failed on an advisory; comparing against it, the PR would
+#   pass, its merge would inherit that pass through `gate` without auditing,
+#   and the merge would become the baseline. Against the last green state,
+#   every PR fails while the branch carries an advisory nothing has passed,
+#   until it is fixed or ignored -- which is also why a merge that inherits a
+#   PR's pass is a sound baseline in turn.
 #
-#   Only a run whose head commit is HEAD or an ancestor of it counts, so a
-#   re-run of an old commit cannot stand in. If none is found -- a new
-#   branch, runs past their retention, a force-push that rewrote what passed
-#   -- it falls back to the commit before the push, then to HEAD's first
-#   parent, and says so.
+# A candidate counts only if it is an ancestor of the target branch's tip as
+# this run sees it (HEAD^1, the merge commit's first parent, on a pull
+# request) and, on a push, is not HEAD itself: a re-run of a green commit must
+# not compare against itself, since that audit could never fail. A candidate
+# no longer in this clone -- a force-push rewrote it -- is skipped.
 #
-# - Outside GitHub Actions: HEAD's first parent, for a local run.
-#
-# Prints nothing for a root commit, which has nothing to compare against.
-# How it got there goes to stderr. A failed API call fails the script: an
+# With none on the target branch, the default branch's runs are searched the
+# same way: where a new branch forked off is a sound baseline. With none
+# there either, there is no baseline, and the audit counts every advisory as
+# new -- the old fail-on-any gate, for the case where nothing can vouch for
+# the starting point. A failed API call or git error fails the script: an
 # unknown baseline is not a reason to assume a recent one.
 #
-# Needs a full-history checkout (`fetch-depth: 0`) to find older commits, and
-# `actions: read` for the run lookup, with GH_TOKEN, GITHUB_REPOSITORY,
-# GITHUB_REF_NAME and GITHUB_REF_TYPE (set by Actions), AUDIT_WORKFLOWS,
-# AUDIT_BEFORE (github.event.before) and AUDIT_DEFAULT_BRANCH
-# (github.event.repository.default_branch).
+# Outside GitHub Actions, for a local run: HEAD's first parent.
+#
+# In Actions it writes `sha=<commit>` (empty for none) to $GITHUB_OUTPUT and
+# reports its choice as a workflow notice; otherwise it prints the commit. It
+# needs a full-history checkout (`fetch-depth: 0`) and `actions: read`, with
+# GH_TOKEN, AUDIT_WORKFLOWS and AUDIT_DEFAULT_BRANCH
+# (github.event.repository.default_branch) set, and GITHUB_REPOSITORY,
+# GITHUB_EVENT_NAME, GITHUB_REF_NAME, GITHUB_REF_TYPE and GITHUB_BASE_REF as
+# Actions sets them.
 set -euo pipefail
 
-say() { echo "audit baseline: $1" >&2; }
-
-first_parent() {
+if [ "${GITHUB_ACTIONS:-}" != true ]; then
   if git rev-parse --verify --quiet 'HEAD^1^{commit}'; then
-    return
+    exit 0
   fi
   if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-    say "HEAD's parent is not in this shallow clone"
+    echo "audit baseline: HEAD's parent is not in this shallow clone" >&2
     exit 1
   fi
-  say "HEAD is a root commit; there is nothing to compare against"
-}
-
-if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${GITHUB_EVENT_NAME:-}" = pull_request ]; then
-  say "HEAD's first parent (${GITHUB_EVENT_NAME:-a local run})"
-  first_parent
-  exit 0
+  exit 0 # A root commit: there is nothing to compare against.
 fi
 
-: "${GH_TOKEN:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_REF_NAME:?}" "${AUDIT_WORKFLOWS:?}"
+: "${GH_TOKEN:?}" "${GITHUB_REPOSITORY:?}" "${GITHUB_EVENT_NAME:?}" "${AUDIT_WORKFLOWS:?}" "${AUDIT_DEFAULT_BRANCH:?}"
+
+result() { # sha, then the notice saying how it was chosen
+  echo "::notice title=Audit baseline::$2"
+  echo "sha=$1" >> "${GITHUB_OUTPUT:?}"
+  exit 0
+}
+
 if [ "$(git rev-parse --is-shallow-repository)" = true ]; then
-  say "this clone is shallow: the audit job needs \`fetch-depth: 0\` to reach older commits"
+  echo "::error title=Audit baseline::this clone is shallow: the audit job needs \`fetch-depth: 0\` to reach older commits"
   exit 1
 fi
 
-branch=$GITHUB_REF_NAME
-if [ "${GITHUB_REF_TYPE:-branch}" = tag ]; then
-  branch=${AUDIT_DEFAULT_BRANCH:?}
+if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+  target=${GITHUB_BASE_REF:?}
+  tip=$(git rev-parse --verify 'HEAD^1^{commit}')
+  head=""
+elif [ "${GITHUB_REF_TYPE:-branch}" = tag ]; then
+  target=$AUDIT_DEFAULT_BRANCH
+  tip=$(git rev-parse --verify 'HEAD^{commit}')
+  head=$tip
+else
+  target=${GITHUB_REF_NAME:?}
+  tip=$(git rev-parse --verify 'HEAD^{commit}')
+  head=$tip
 fi
 
-# Collected before the loop below breaks out of it, so a failed lookup fails
-# the script rather than being lost in a pipeline.
-runs=""
-IFS=',' read -r -a workflows <<< "$AUDIT_WORKFLOWS"
-for workflow in "${workflows[@]}"; do
-  runs+=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
-    -f branch="$branch" -f status=success -f per_page=50 \
-    --jq '.workflow_runs[] | select(.event != "pull_request") | "\(.created_at) \(.head_sha) \(.html_url)"')
-  runs+=$'\n'
-done
+# Sets found_sha and found_url to the newest successful non-PR run on $1
+# whose head is an ancestor of $tip (and is not HEAD itself, on a push), or
+# leaves them empty. Not called through $(...): a subshell there does not
+# inherit `set -e`, and a failed lookup has to stop the script.
+found_sha="" found_url=""
+last_green() {
+  local branch=$1 runs="" workflow sha url status
+  local -a workflows
+  # Collected before the loop below breaks out of it, so a failed lookup fails
+  # the script rather than being lost in a pipeline.
+  IFS=',' read -r -a workflows <<< "$AUDIT_WORKFLOWS"
+  for workflow in "${workflows[@]}"; do
+    runs+=$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs" \
+      -f branch="$branch" -f status=success -f per_page=100 \
+      --jq '.workflow_runs[] | select(.event != "pull_request") | "\(.created_at) \(.head_sha) \(.html_url)"')
+    runs+=$'\n'
+  done
+  while read -r _ sha url; do
+    [ -n "$sha" ] && [ "$sha" != "$head" ] || continue
+    git cat-file -e "$sha^{commit}" 2> /dev/null || continue
+    status=0
+    git merge-base --is-ancestor "$sha" "$tip" || status=$?
+    case $status in
+      0) found_sha=$sha found_url=$url; return ;;
+      1) ;;
+      *) echo "::error title=Audit baseline::git merge-base failed for $sha"; exit 1 ;;
+    esac
+  done < <(printf '%s' "$runs" | sort -r)
+}
 
-while read -r _ sha url; do
-  [ -n "$sha" ] || continue
-  if git merge-base --is-ancestor "$sha" HEAD 2> /dev/null; then
-    say "the last successful run on $branch, $url ($sha)"
-    echo "$sha"
-    exit 0
+last_green "$target"
+if [ -n "$found_sha" ]; then
+  result "$found_sha" "comparing against the last successful run on $target: $found_url ($found_sha)"
+fi
+if [ "$target" != "$AUDIT_DEFAULT_BRANCH" ]; then
+  last_green "$AUDIT_DEFAULT_BRANCH"
+  if [ -n "$found_sha" ]; then
+    result "$found_sha" "no successful run on $target is an ancestor; comparing against the last successful run on $AUDIT_DEFAULT_BRANCH that is: $found_url ($found_sha)"
   fi
-done < <(printf '%s' "$runs" | sort -r)
-
-before=${AUDIT_BEFORE:-}
-if [ -n "$before" ] && [ "$before" != 0000000000000000000000000000000000000000 ] &&
-  git cat-file -e "$before^{commit}" 2> /dev/null; then
-  say "no earlier successful run on $branch is an ancestor of HEAD; using the commit before this push ($before)"
-  echo "$before"
-  exit 0
 fi
-
-say "no earlier successful run on $branch, and no commit before this push; using HEAD's first parent"
-first_parent
+echo "::warning title=Audit baseline::no successful run on $target or $AUDIT_DEFAULT_BRANCH is an ancestor of this commit, so there is no baseline: every high or critical advisory counts as new"
+echo "sha=" >> "${GITHUB_OUTPUT:?}"

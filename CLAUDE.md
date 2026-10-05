@@ -118,8 +118,8 @@ unreviewed. Keep that in mind when touching CI:
   python-multipart is ignored for DEP002 (FastAPI parses multipart with it but
   nothing imports the name).
 - pip-audit runs through `scripts/audit_new_advisories.py`, which audits the
-  commit and a baseline — the target branch on a pull request, the last
-  commit CI passed on that branch on a push (`scripts/audit-baseline.sh`, so
+  commit and a baseline — the last commit CI passed on the target branch,
+  on a pull request as well as a push (`scripts/audit-baseline.sh`, so
   a push of several commits can't slip one in) — and fails only on an
   advisory the commit adds; one already on the baseline is a warning.
   Failing on those blocked every PR, related or not, and deadlocked two that

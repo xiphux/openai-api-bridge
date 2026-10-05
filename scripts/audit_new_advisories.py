@@ -10,11 +10,11 @@ what it changes, so that is what this asks.
 
 It audits HEAD and a baseline commit and fails only on advisories HEAD has
 that the baseline does not. The baseline is $AUDIT_BASE, which CI sets from
-scripts/audit-baseline.sh: on a pull request, the merge commit's first parent
-(the target branch); on a push, the last commit a successful CI run passed on
-that branch, so a push of several commits, or a run that failed and was
-followed by another, cannot pass an advisory nothing compared against a state
-without it. Unset (a local run), the baseline is HEAD's first parent; set but
+scripts/audit-baseline.sh: the last commit a successful CI run passed on the
+target branch, on a pull request as well as a push, so a push of several
+commits, a run that failed and was followed by another, or a pull request
+onto a tip that failed, cannot pass an advisory nothing compared against a
+state without it. Unset (a local run), the baseline is HEAD's first parent; set but
 empty, there is none and every advisory counts as new. Advisories are compared
 by id: a routine update that moves a package already flagged does not count
 as new. (An id that covered two packages would be masked on the second; no
@@ -34,8 +34,12 @@ renamed a field, a format override -- fails, rather than reading as clean.
 
 The pip-audit to run comes from $PIP_AUDIT (e.g. `pip-audit@2.10.1`), and any
 arguments are passed to both audits -- `--ignore-vuln <ID>` for an advisory
-reviewed and found unreachable, with the reason beside it in ci.yml. Arguments
-that change the report's format or destination are refused.
+reviewed and found unreachable, with the reason beside it in ci.yml. They go
+before this script's own `--format json --output <file>`, and argparse keeps
+the last value given, so it is that order which guarantees the report this
+reads; the refusal of -f/--format/-o/--output below is a clearer error for the
+obvious spellings, not the guarantee (an abbreviation such as `--form` would
+get past it, and lose to the later flag all the same).
 """
 
 from __future__ import annotations
