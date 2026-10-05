@@ -58,7 +58,8 @@ FAKES = {
     "uvx": "\n".join(
         [
             'echo "uvx $*" >> "${FAKE_LOG:-/dev/null}"',
-            'for a; do [ "$prev" = --output ] && out=$a; prev=$a; done',
+            'for a; do [ "$prev" = --output ] && out=$a; [ "$prev" = -r ] && req=$a; prev=$a; done',
+            '[ -n "${FAKE_REQS:-}" ] && cp "$req" "$FAKE_REQS"',
             'cp audit-report.json "$out"',
             'if [ -n "${FAKE_RC:-}" ]; then exit "$FAKE_RC"; fi',
             "grep -q '\"id\"' audit-report.json && exit 1",
@@ -265,9 +266,23 @@ class TestAudit:
         repo.commit(report(), "tip")
         status, out = run_audit(repo, fake_bin)
         assert status == 1
-        # The one with a marker pip-audit may drop on this platform is not
-        # held against it.
-        assert "leaves out 1 exported requirement(s): left-out" in out
+        # Markers are stripped, so the win32-only one must be audited too.
+        assert "leaves out 2 exported requirement(s): colorama, left-out" in out
+
+    def test_audits_every_locked_package_whatever_its_marker(
+        self, repo: Repo, fake_bin: Path, tmp_path: Path
+    ) -> None:
+        # pip-audit drops a requirement whose marker is false where it runs:
+        # on the runner's Python and architecture, not the image's.
+        requirements = (
+            "pkg==1.0 ; python_full_version >= '3.13' \\\n    --hash=sha256:aa\n"
+            "other==2.0 ; platform_machine == 'aarch64'\n"
+        )
+        repo.commit(report(packages=("pkg", "other")), "base", requirements)
+        repo.commit(report(packages=("pkg", "other")), "tip")
+        seen = tmp_path / "requirements.txt"
+        assert run_audit(repo, fake_bin, FAKE_REQS=str(seen))[0] == 0
+        assert seen.read_text() == "pkg==1.0 \\\n    --hash=sha256:aa\nother==2.0\n"
 
     def test_accepts_a_report_that_covers_every_requirement(
         self, repo: Repo, fake_bin: Path
@@ -301,7 +316,7 @@ class TestAudit:
             assert f"pip-audit exited {rc}" in out
 
     @pytest.mark.parametrize(
-        "flag", ["--format", "--format=markdown", "-f", "--output=x", "-o", "--dry-run"]
+        "flag", ["--format", "--format=markdown", "-f", "--output=x", "-o", "--dry-run", "-d"]
     )
     def test_refuses_flags_that_would_move_reshape_or_empty_the_report(
         self, repo: Repo, fake_bin: Path, flag: str
@@ -587,6 +602,12 @@ class TestWiring:
     baseline = next(step for step in steps if step.get("id") == "audit-baseline")
     audit = next(step for step in steps if step.get("name") == "pip-audit")
     callers = callers_of_ci()
+
+    def test_reports_under_the_name_branch_protection_requires(self) -> None:
+        # The required check is matched by this name. A required check that is
+        # never reported is never waited for: renamed, merges would stop
+        # waiting on the audit with nothing going red to say so.
+        assert self.job["name"] == "Dependency audit"
 
     def test_never_skips_and_never_fails_quietly(self) -> None:
         for key in ("if", "needs", "continue-on-error"):

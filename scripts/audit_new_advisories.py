@@ -31,12 +31,14 @@ maintenance still surface them. Dependencies pip-audit could not audit at all
 are printed as warnings too, as its own table used to show them.
 
 The report has to be what this reads: a `dependencies` list whose entries each
-carry `vulns` or a `skip_reason`, and that covers every requirement exported
-without an environment marker (pip-audit drops the ones whose marker does not
-match this platform -- `sys_platform == 'win32'` and the like). Anything else
--- a newer pip-audit that renamed a field, a format override, `--dry-run`,
-which writes an empty report and exits 0 -- fails, rather than reading as
-clean.
+carry `vulns` or a `skip_reason`, and that covers every requirement exported.
+Environment markers are stripped from the export first: pip-audit drops a
+requirement whose marker is false where it runs, and it runs on the CI
+runner's Python and architecture, not the image's, so a dependency only for
+Python 3.13+ or only for aarch64 would otherwise ship unaudited. Anything
+that still leaves a requirement out -- a newer pip-audit that renamed a
+field, a format override, `--dry-run`, which writes an empty report and
+exits 0 -- fails, rather than reading as clean.
 
 The pip-audit to run comes from $PIP_AUDIT (e.g. `pip-audit@2.10.1`), and any
 arguments are passed to both audits -- `--ignore-vuln <ID>` for an advisory
@@ -65,7 +67,7 @@ from typing import Any
 # would leave this reading something it does not understand, or (--dry-run)
 # leave it empty. The coverage check in audit() is what catches a report that
 # skips requirements by any other route.
-REFUSED = ("-f", "--format", "-o", "--output", "--dry-run")
+REFUSED = ("-f", "--format", "-o", "--output", "--dry-run", "-d")
 
 
 @dataclass
@@ -91,14 +93,30 @@ def canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def unmarked_requirements(requirements: str) -> set[str]:
-    """The packages a `uv export` lists without an environment marker."""
-    names = set()
+REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+?)(\s*;[^\\]*)?(\s*\\)?$")
+
+
+def without_markers(requirements: str) -> str:
+    """A `uv export` with every environment marker removed.
+
+    pip-audit drops a requirement whose marker is false for the interpreter
+    it runs on, and it runs on the CI runner's Python and architecture, not
+    the image's: a dependency only for Python 3.13+, or only for aarch64,
+    would ship unaudited. Auditing every locked package, wherever it would
+    install, can only add findings.
+    """
+    lines = []
     for line in requirements.splitlines():
-        match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*==[^;]*$", line.rstrip(" \\"))
-        if match:
-            names.add(canonical(match.group(1)))
-    return names
+        match = REQUIREMENT.match(line)
+        if match and match[3]:
+            line = f"{match[1]}=={match[2]}{' ' + match[4].strip() if match[4] else ''}"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def exported_requirements(requirements: str) -> set[str]:
+    """Every package a `uv export` lists."""
+    return {canonical(m[1]) for line in requirements.splitlines() if (m := REQUIREMENT.match(line))}
 
 
 def run(
@@ -160,6 +178,7 @@ def audit(tree: Path, pip_audit: str, extra: list[str]) -> Report:
         )  # fmt: skip
         if export.returncode != 0:
             raise RuntimeError(f"uv export in {tree}: {export.stderr.strip()}")
+        requirements.write_text(without_markers(requirements.read_text()))
         result = run(
             "uvx", pip_audit, "-r", str(requirements),
             "--require-hashes", "--disable-pip", "--progress-spinner", "off",
@@ -175,7 +194,7 @@ def audit(tree: Path, pip_audit: str, extra: list[str]) -> Report:
             raise RuntimeError(
                 f"pip-audit produced no report in {tree}:\n{result.stderr.strip()}"
             ) from error
-        missing = unmarked_requirements(requirements.read_text()) - report.packages
+        missing = exported_requirements(requirements.read_text()) - report.packages
     if result.returncode not in (0, 1) or (result.returncode == 1) != bool(report.advisories):
         raise RuntimeError(
             f"pip-audit exited {result.returncode} with {len(report.advisories)} "

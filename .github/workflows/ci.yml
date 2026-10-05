@@ -372,12 +372,19 @@ jobs:
   # Unlike every other check here it never defers to `gate`. An inherited
   # pass vouches for content, and the audit's answer changes while the
   # content stands still, as advisories are published -- so a tag inheriting
-  # main's pass would ship one released since. The pull request's run also
+  # main's pass would ship one released since against what the last change
+  # added, which no earlier audit could have seen. (One against something
+  # locked before that only warns, on a tag as on main: a release is held to
+  # the same standard as the branch.) The pull request's run also
   # audited GitHub's merge with main as it was then; a direct push reverting
   # a fix in between leaves the merge's tree identical to the branch's and the
   # advisory back in it, and that merge would become the audit's next
   # baseline without ever having been audited. It installs nothing, so it is
   # cheap to run every time.
+  #
+  # Branch protection requires it by its name, "Dependency audit". Renaming
+  # it means updating the required checks, or merges stop waiting for it with
+  # nothing going red to say so.
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
