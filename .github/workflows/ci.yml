@@ -352,8 +352,11 @@ jobs:
   # the base — published against something already locked, often before any
   # fix exists — is printed as a warning instead: failing on those held every
   # PR, related or not, and deadlocked two PRs that each fixed one, since each
-  # still carried the other's. scripts/audit_new_advisories.py audits both
-  # HEAD and its first parent and compares, hence `fetch-depth: 2` below.
+  # still carried the other's. scripts/audit_new_advisories.py audits HEAD
+  # and a baseline and compares: the target branch on a pull request, and on
+  # a push the last commit CI passed on that branch, so a push of several
+  # commits cannot slip one in (scripts/audit-baseline.sh; hence
+  # `fetch-depth: 0` below).
   #
   # --no-dev because dev dependencies never reach the image. pip-audit has no
   # severity threshold, so any advisory with a known ID counts; if one is
@@ -371,21 +374,41 @@ jobs:
     if: ${{ !cancelled() && needs.gate.outputs.passed != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # scripts/audit-baseline.sh looks up the last successful run.
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # The parent commit too: the audit compares against it.
-          fetch-depth: 2
+          # Full history: the audit compares against the last commit CI passed
+          # on this branch, which can be any number of commits back.
+          fetch-depth: 0
 
       # No cache: nothing is installed but pip-audit itself.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: false
 
+      # What the audit compares against: on a pull request the target branch,
+      # on a push the last commit CI passed on this branch. See
+      # scripts/audit-baseline.sh.
+      - name: Find the audit baseline
+        id: audit-baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_WORKFLOWS: ci.yml,docker.yml
+          AUDIT_BEFORE: ${{ github.event.before }}
+          AUDIT_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          sha=$(scripts/audit-baseline.sh)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       # The script exports each side's production dependencies itself.
       - name: pip-audit
         env:
+          AUDIT_BASE: ${{ steps.audit-baseline.outputs.sha }}
           # Pinned; bump by hand (Renovate doesn't see a uvx version).
           PIP_AUDIT: pip-audit@2.10.1
         run: python3 scripts/audit_new_advisories.py
