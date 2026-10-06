@@ -382,9 +382,10 @@ jobs:
   # baseline without ever having been audited. It installs nothing, so it is
   # cheap to run every time.
   #
-  # Branch protection requires it by its name, "Dependency audit". Renaming
-  # it means updating the required checks, or merges stop waiting for it with
-  # nothing going red to say so.
+  # It must be a required status check, by its name, "Dependency audit", for a
+  # red audit to block a merge: as a job of its own, no other required check
+  # covers it. Renaming it means updating the required checks with it, since a
+  # required check that never reports blocks every merge until they are.
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest

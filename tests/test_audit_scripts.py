@@ -59,7 +59,7 @@ FAKES = {
         [
             'echo "uvx $*" >> "${FAKE_LOG:-/dev/null}"',
             'for a; do [ "$prev" = --output ] && out=$a; [ "$prev" = -r ] && req=$a; prev=$a; done',
-            '[ -n "${FAKE_REQS:-}" ] && cp "$req" "$FAKE_REQS"',
+            '[ -n "${FAKE_REQS:-}" ] && { cat "$req"; echo "--- end of pass"; } >> "$FAKE_REQS"',
             'cp audit-report.json "$out"',
             'if [ -n "${FAKE_RC:-}" ]; then exit "$FAKE_RC"; fi',
             "grep -q '\"id\"' audit-report.json && exit 1",
@@ -120,11 +120,12 @@ def fake_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def report(
     *vulns: str, packages: tuple[str, ...] = ("pkg",), skipped: str | None = None
 ) -> dict[str, Any]:
-    """A pip-audit report: each of `packages` with each of `vulns`."""
+    """A pip-audit report: each of `packages` -- `name`, at 1.0, or
+    `name==version` -- with each of `vulns`."""
     dependencies: list[dict[str, Any]] = [
         {
-            "name": package,
-            "version": "1.0",
+            "name": package.split("==")[0],
+            "version": package.split("==")[1] if "==" in package else "1.0",
             "vulns": [
                 {"id": v, "fix_versions": ["2.0"], "description": f"{v} desc"} for v in vulns
             ],
@@ -267,7 +268,7 @@ class TestAudit:
         status, out = run_audit(repo, fake_bin)
         assert status == 1
         # Markers are stripped, so the win32-only one must be audited too.
-        assert "leaves out 2 exported requirement(s): colorama, left-out" in out
+        assert "leaves out 2 exported requirement(s): colorama==0.4.6, left-out==2.0" in out
 
     def test_audits_every_locked_package_whatever_its_marker(
         self, repo: Repo, fake_bin: Path, tmp_path: Path
@@ -278,18 +279,78 @@ class TestAudit:
             "pkg==1.0 ; python_full_version >= '3.13' \\\n    --hash=sha256:aa\n"
             "other==2.0 ; platform_machine == 'aarch64'\n"
         )
-        repo.commit(report(packages=("pkg", "other")), "base", requirements)
-        repo.commit(report(packages=("pkg", "other")), "tip")
+        repo.commit(report(packages=("pkg", "other==2.0")), "base", requirements)
+        repo.commit(report(packages=("pkg", "other==2.0")), "tip")
         seen = tmp_path / "requirements.txt"
         assert run_audit(repo, fake_bin, FAKE_REQS=str(seen))[0] == 0
-        assert seen.read_text() == "pkg==1.0 \\\n    --hash=sha256:aa\nother==2.0\n"
+        head = seen.read_text().split("--- end of pass\n")[0]
+        assert head == "pkg==1.0 \\\n    --hash=sha256:aa\nother==2.0\n"
+
+    def test_audits_a_package_locked_at_two_versions_in_separate_passes(
+        self, repo: Repo, fake_bin: Path, tmp_path: Path
+    ) -> None:
+        # uv locks a package twice when the lock forks by Python version; with
+        # the markers gone, pip-audit refuses a file that names it twice.
+        requirements = (
+            "urllib3==1.26.0 ; python_full_version < '3.13' \\\n    --hash=sha256:aa\n"
+            "urllib3==2.6.3 ; python_full_version >= '3.13' \\\n    --hash=sha256:bb\n"
+            "pkg==1.0\n"
+        )
+        both = report(packages=("urllib3==1.26.0", "urllib3==2.6.3", "pkg"))
+        repo.commit(both, "base", requirements)
+        repo.commit(both, "tip")
+        seen = tmp_path / "requirements.txt"
+        assert run_audit(repo, fake_bin, FAKE_REQS=str(seen))[0] == 0
+        first, second = seen.read_text().split("--- end of pass\n")[:2]
+        assert first == "urllib3==1.26.0 \\\n    --hash=sha256:aa\npkg==1.0\n"
+        assert second == "urllib3==2.6.3 \\\n    --hash=sha256:bb\n"
+
+    def test_requires_each_version_of_a_package_to_be_covered(
+        self, repo: Repo, fake_bin: Path
+    ) -> None:
+        requirements = "urllib3==1.26.0 ; python_full_version < '3.13'\nurllib3==2.6.3\n"
+        one = report(packages=("urllib3==2.6.3",))
+        repo.commit(one, "base", requirements)
+        repo.commit(one, "tip")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 1
+        assert "leaves out 1 exported requirement(s): urllib3==1.26.0" in out
+
+    def test_counts_a_requirement_pinned_by_url(self, repo: Repo, fake_bin: Path) -> None:
+        # pip-audit cannot audit one, but has to say so: left out, it fails.
+        requirements = "pkg @ https://example.test/pkg-1.0.tar.gz ; sys_platform == 'win32'\n"
+        repo.commit(report(packages=()), "base", requirements)
+        repo.commit(report(packages=()), "tip")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 1
+        assert "leaves out 1 exported requirement(s): pkg" in out
+        repo.commit(report(packages=(), skipped="pkg"), "now reported as skipped")
+        status, out = run_audit(repo, fake_bin, AUDIT_BASE="")
+        assert status == 0, out
+        assert "::warning title=Not audited::pkg: not on PyPI" in out
+
+    def test_fails_closed_on_a_requirement_it_cannot_read(self, repo: Repo, fake_bin: Path) -> None:
+        repo.commit(report(), "base", "@@ not a requirement\n")
+        repo.commit(report(), "tip")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 1
+        assert "cannot read the exported requirement '@@ not a requirement'" in out
+
+    def test_escapes_what_it_prints_into_workflow_commands(
+        self, repo: Repo, fake_bin: Path
+    ) -> None:
+        repo.commit(report(), "base")
+        repo.commit(report("PYSEC-100%\r::error::forged"), "adds one")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 1
+        assert "::error title=New advisory::PYSEC-100%25%0D::error::forged" in out
 
     def test_accepts_a_report_that_covers_every_requirement(
         self, repo: Repo, fake_bin: Path
     ) -> None:
         requirements = "pkg==1.0 \\\n    --hash=sha256:aa\nother==2.0\n"
-        repo.commit(report(packages=("pkg", "other")), "base", requirements)
-        repo.commit(report(packages=("pkg", "other")), "tip")
+        repo.commit(report(packages=("pkg", "other==2.0")), "base", requirements)
+        repo.commit(report(packages=("pkg", "other==2.0")), "tip")
         assert run_audit(repo, fake_bin)[0] == 0
 
     @pytest.mark.parametrize(
@@ -604,9 +665,9 @@ class TestWiring:
     callers = callers_of_ci()
 
     def test_reports_under_the_name_branch_protection_requires(self) -> None:
-        # The required check is matched by this name. A required check that is
-        # never reported is never waited for: renamed, merges would stop
-        # waiting on the audit with nothing going red to say so.
+        # Branch protection requires the audit by this name for a red audit to
+        # block a merge, and a rename has to be matched there: a required check
+        # that is never reported blocks every merge until it is.
         assert self.job["name"] == "Dependency audit"
 
     def test_never_skips_and_never_fails_quietly(self) -> None:

@@ -85,7 +85,18 @@ class Report:
     # not vouch for another it reaches.
     advisories: dict[tuple[str, str], Advisory] = field(default_factory=dict)
     skipped: list[str] = field(default_factory=list)
-    packages: set[str] = field(default_factory=set)
+    # (canonical name, version) of every dependency the report covers; the
+    # version is None for one pip-audit skipped without one.
+    packages: set[tuple[str, str | None]] = field(default_factory=set)
+
+    def merge(self, other: Report) -> None:
+        for key, advisory in other.advisories.items():
+            mine = self.advisories.setdefault(key, advisory)
+            if mine is not advisory:
+                mine.versions |= advisory.versions
+                mine.fixes |= advisory.fixes
+        self.skipped.extend(other.skipped)
+        self.packages |= other.packages
 
 
 def canonical(name: str) -> str:
@@ -93,30 +104,66 @@ def canonical(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+?)(\s*;[^\\]*)?(\s*\\)?$")
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+PIN = re.compile(r"==([^\s\\]+)")
 
 
-def without_markers(requirements: str) -> str:
-    """A `uv export` with every environment marker removed.
+@dataclass
+class Requirement:
+    name: str
+    version: str | None  # None for one pinned by URL rather than version
+    lines: list[str]
 
-    pip-audit drops a requirement whose marker is false for the interpreter
-    it runs on, and it runs on the CI runner's Python and architecture, not
-    the image's: a dependency only for Python 3.13+, or only for aarch64,
-    would ship unaudited. Auditing every locked package, wherever it would
-    install, can only add findings.
+
+def requirements_of(export: str) -> list[Requirement]:
+    """The requirements a `uv export` lists, each with its continuation lines.
+
+    Every line that is not blank, a comment, an option or an indented
+    continuation starts one, and has to name a package: one this cannot read
+    fails the audit rather than going unaudited. Environment markers are
+    removed. pip-audit drops a requirement whose marker is false for the
+    interpreter it runs on, and it runs on the CI runner's Python and
+    architecture, not the image's: a dependency only for Python 3.13+, or only
+    for aarch64, would ship unaudited. Auditing every locked package, wherever
+    it would install, can only add findings.
     """
-    lines = []
-    for line in requirements.splitlines():
-        match = REQUIREMENT.match(line)
-        if match and match[3]:
-            line = f"{match[1]}=={match[2]}{' ' + match[4].strip() if match[4] else ''}"
-        lines.append(line)
-    return "\n".join(lines) + "\n"
+    found: list[Requirement] = []
+    for line in export.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[0].isspace() or line.startswith("-"):
+            if line[0].isspace() and found:
+                found[-1].lines.append(line)
+            continue
+        name = NAME.match(line)
+        if not name:
+            raise RuntimeError(f"cannot read the exported requirement {line!r}")
+        requirement, marked, marker = line.partition(";")
+        if marked:  # Keep the continuation the marker was in front of.
+            continued = marker.rstrip().endswith("\\")
+            line = requirement.rstrip() + (" \\" if continued else "")
+        pin = PIN.search(requirement)
+        found.append(Requirement(canonical(name[0]), pin[1] if pin else None, [line]))
+    return found
 
 
-def exported_requirements(requirements: str) -> set[str]:
-    """Every package a `uv export` lists."""
-    return {canonical(m[1]) for line in requirements.splitlines() if (m := REQUIREMENT.match(line))}
+def passes(requirements: list[Requirement]) -> list[str]:
+    """Requirements files with no package named twice in any one.
+
+    Stripping markers can leave a package locked at two versions -- uv forks
+    the lock by Python version -- and pip-audit refuses a file that names it
+    twice. So the first of each name goes in the first file, the second in the
+    next, and so on.
+    """
+    files: list[list[str]] = []
+    seen: dict[str, int] = {}
+    for requirement in requirements:
+        index = seen.get(requirement.name, 0)
+        seen[requirement.name] = index + 1
+        if index == len(files):
+            files.append([])
+        files[index].extend(requirement.lines)
+    return ["\n".join(lines) + "\n" for lines in files]
 
 
 def run(
@@ -143,7 +190,7 @@ def parse(report: Any, tree: Path) -> Report:
     for dependency in report["dependencies"]:
         if not isinstance(dependency, dict) or "name" not in dependency:
             raise RuntimeError(f"pip-audit's report in {tree} has an unreadable dependency")
-        parsed.packages.add(canonical(dependency["name"]))
+        parsed.packages.add((canonical(dependency["name"]), dependency.get("version")))
         if "skip_reason" in dependency:
             parsed.skipped.append(f"{dependency['name']}: {dependency['skip_reason']}")
             continue
@@ -169,41 +216,57 @@ def parse(report: Any, tree: Path) -> Report:
 def audit(tree: Path, pip_audit: str, extra: list[str]) -> Report:
     """Known vulnerabilities in the production dependencies of `tree`, by id."""
     with tempfile.TemporaryDirectory() as tmp:
-        requirements = Path(tmp) / "requirements.txt"
-        report_path = Path(tmp) / "report.json"
+        exported = Path(tmp) / "exported.txt"
         export = run(
             "uv", "export", "--frozen", "--no-dev", "--no-emit-project",
-            "--format", "requirements-txt", "-o", str(requirements),
+            "--format", "requirements-txt", "-o", str(exported),
             cwd=tree,
         )  # fmt: skip
         if export.returncode != 0:
             raise RuntimeError(f"uv export in {tree}: {export.stderr.strip()}")
-        requirements.write_text(without_markers(requirements.read_text()))
-        result = run(
-            "uvx", pip_audit, "-r", str(requirements),
-            "--require-hashes", "--disable-pip", "--progress-spinner", "off",
-            *extra, "--format", "json", "--output", str(report_path),
-            cwd=tree,
-        )  # fmt: skip
-        # pip-audit exits 1 when it finds anything and 0 when it does not.
-        # Anything else, or a report it could not write -- PyPI or the
-        # advisory service down, a bad lock -- is an error, and must fail.
-        try:
-            report = parse(json.loads(report_path.read_text()), tree)
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            raise RuntimeError(
-                f"pip-audit produced no report in {tree}:\n{result.stderr.strip()}"
-            ) from error
-        missing = exported_requirements(requirements.read_text()) - report.packages
+        requirements = requirements_of(exported.read_text())
+        report = Report()
+        for index, content in enumerate(passes(requirements) or [""]):
+            report.merge(audit_pass(tree, Path(tmp), index, content, pip_audit, extra))
+    missing = sorted(
+        f"{r.name}=={r.version}" if r.version else r.name
+        for r in requirements
+        if (r.name, r.version) not in report.packages and (r.name, None) not in report.packages
+    )
+    if missing:
+        raise RuntimeError(
+            f"pip-audit's report in {tree} leaves out {len(missing)} exported "
+            f"requirement(s): {', '.join(missing)}"
+        )
+    return report
+
+
+def audit_pass(
+    tree: Path, tmp: Path, index: int, content: str, pip_audit: str, extra: list[str]
+) -> Report:
+    """One pip-audit run, over one requirements file."""
+    requirements = tmp / f"requirements-{index}.txt"
+    report_path = tmp / f"report-{index}.json"
+    requirements.write_text(content)
+    result = run(
+        "uvx", pip_audit, "-r", str(requirements),
+        "--require-hashes", "--disable-pip", "--progress-spinner", "off",
+        *extra, "--format", "json", "--output", str(report_path),
+        cwd=tree,
+    )  # fmt: skip
+    # pip-audit exits 1 when it finds anything and 0 when it does not.
+    # Anything else, or a report it could not write -- PyPI or the
+    # advisory service down, a bad lock -- is an error, and must fail.
+    try:
+        report = parse(json.loads(report_path.read_text()), tree)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            f"pip-audit produced no report in {tree}:\n{result.stderr.strip()}"
+        ) from error
     if result.returncode not in (0, 1) or (result.returncode == 1) != bool(report.advisories):
         raise RuntimeError(
             f"pip-audit exited {result.returncode} with {len(report.advisories)} "
             f"advisories read in {tree}:\n{result.stderr.strip()}"
-        )
-    if missing:
-        raise RuntimeError(
-            f"pip-audit's report in {tree} leaves out {len(missing)} exported "
-            f"requirement(s): {', '.join(sorted(missing))}"
         )
     return report
 
@@ -245,6 +308,11 @@ def audit_baseline(base: str, pip_audit: str, extra: list[str]) -> Report:
         shutil.rmtree(tree, ignore_errors=True)
 
 
+def escape(text: object) -> str:
+    """Text for a workflow command, which would read %, CR and LF as its own."""
+    return str(text).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
 def describe(advisory: Advisory) -> str:
     fixed = ", ".join(sorted(advisory.fixes)) or "no fixed version"
     installed = ", ".join(sorted(advisory.versions))
@@ -268,14 +336,14 @@ def main() -> int:
     added = [a for key, a in head.advisories.items() if key not in parent]
     existing = [a for key, a in head.advisories.items() if key in parent]
     for skipped in head.skipped:
-        print(f"::warning title=Not audited::{skipped}")
+        print(f"::warning title=Not audited::{escape(skipped)}")
     for advisory in existing:
         print(
-            f"::warning title=Existing advisory::{describe(advisory)} "
+            f"::warning title=Existing advisory::{escape(describe(advisory))} "
             "-- already on the baseline commit, so not failing this run"
         )
     for advisory in added:
-        print(f"::error title=New advisory::{describe(advisory)}")
+        print(f"::error title=New advisory::{escape(describe(advisory))}")
     against = (
         f" against {base[:12]}" if base else " (no baseline commit: every advisory counts as new)"
     )
@@ -289,5 +357,5 @@ if __name__ == "__main__":
     except RuntimeError as error:
         # Every failure fails the gate: a report that could not be produced
         # proves nothing about the lock.
-        print(f"::error title=Audit failed::{error}")
+        print(f"::error title=Audit failed::{escape(error)}")
         sys.exit(1)
