@@ -105,7 +105,7 @@ def canonical(name: str) -> str:
 
 
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-PIN = re.compile(r"==([^\s\\]+)")
+PIN = re.compile(r"(?:\[[^\]]*\])?\s*===?\s*([^\s\\]+)")
 
 
 @dataclass
@@ -115,7 +115,7 @@ class Requirement:
     lines: list[str]
 
 
-def requirements_of(export: str) -> list[Requirement]:
+def requirements_of(export: str, editable: list[str]) -> list[Requirement]:
     """The requirements a `uv export` lists, each with its continuation lines.
 
     Every line that is not blank, a comment, an option or an indented
@@ -126,10 +126,19 @@ def requirements_of(export: str) -> list[Requirement]:
     architecture, not the image's: a dependency only for Python 3.13+, or only
     for aarch64, would ship unaudited. Auditing every locked package, wherever
     it would install, can only add findings.
+
+    An editable line (`-e ./member`, a workspace member) is a local package
+    pip-audit cannot audit: it is returned in `editable`, to be reported as
+    not audited, rather than read. A git or path dependency has no hashes, so
+    pip-audit refuses it and the audit fails until it is removed or pinned
+    from an index -- as it did before this compared anything.
     """
     found: list[Requirement] = []
     for line in export.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(("-e ", "--editable")):
+            editable.append(line.rstrip(" \\"))
             continue
         if line[0].isspace() or line.startswith("-"):
             if line[0].isspace() and found:
@@ -142,7 +151,7 @@ def requirements_of(export: str) -> list[Requirement]:
         if marked:  # Keep the continuation the marker was in front of.
             continued = marker.rstrip().endswith("\\")
             line = requirement.rstrip() + (" \\" if continued else "")
-        pin = PIN.search(requirement)
+        pin = PIN.match(requirement, name.end())
         found.append(Requirement(canonical(name[0]), pin[1] if pin else None, [line]))
     return found
 
@@ -224,14 +233,21 @@ def audit(tree: Path, pip_audit: str, extra: list[str]) -> Report:
         )  # fmt: skip
         if export.returncode != 0:
             raise RuntimeError(f"uv export in {tree}: {export.stderr.strip()}")
-        requirements = requirements_of(exported.read_text())
+        editable: list[str] = []
+        requirements = requirements_of(exported.read_text(), editable)
         report = Report()
+        report.skipped.extend(
+            f"{line}: an editable local package, not audited" for line in editable
+        )
         for index, content in enumerate(passes(requirements) or [""]):
             report.merge(audit_pass(tree, Path(tmp), index, content, pip_audit, extra))
     missing = sorted(
         f"{r.name}=={r.version}" if r.version else r.name
         for r in requirements
-        if (r.name, r.version) not in report.packages and (r.name, None) not in report.packages
+        if (r.name, r.version) not in report.packages
+        and (r.name, None) not in report.packages
+        # A URL pin has no version to match: any entry for the name covers it.
+        and not (r.version is None and any(name == r.name for name, _ in report.packages))
     )
     if missing:
         raise RuntimeError(
@@ -355,7 +371,7 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except RuntimeError as error:
-        # Every failure fails the gate: a report that could not be produced
+        # Every failure fails the audit: a report that could not be produced
         # proves nothing about the lock.
         print(f"::error title=Audit failed::{escape(error)}")
         sys.exit(1)

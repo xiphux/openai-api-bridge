@@ -340,10 +340,40 @@ class TestAudit:
         self, repo: Repo, fake_bin: Path
     ) -> None:
         repo.commit(report(), "base")
-        repo.commit(report("PYSEC-100%\r::error::forged"), "adds one")
+        repo.commit(report("PYSEC-100%\r\n::error::forged"), "adds one")
         status, out = run_audit(repo, fake_bin)
         assert status == 1
-        assert "::error title=New advisory::PYSEC-100%25%0D::error::forged" in out
+        assert "::error title=New advisory::PYSEC-100%25%0D%0A::error::forged" in out
+
+    def test_covers_a_package_pip_audit_skipped_without_a_version(
+        self, repo: Repo, fake_bin: Path
+    ) -> None:
+        # One not on PyPI -- a private index -- is reported skipped, with no
+        # version: its name alone has to cover it, or it fails for good.
+        requirements = "private-pkg==1.0 \\\n    --hash=sha256:aa\n"
+        repo.commit(report(packages=(), skipped="private-pkg"), "base", requirements)
+        repo.commit(report(packages=(), skipped="private-pkg"), "tip")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 0, out
+        assert "::warning title=Not audited::private-pkg: not on PyPI" in out
+
+    def test_reports_an_editable_member_as_not_audited(self, repo: Repo, fake_bin: Path) -> None:
+        requirements = "-e ./member\npkg==1.0\n"
+        repo.commit(report(), "base", requirements)
+        repo.commit(report(), "tip")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 0, out
+        assert "::warning title=Not audited::-e ./member: an editable local package" in out
+
+    def test_reads_pins_with_extras_and_arbitrary_equality(
+        self, repo: Repo, fake_bin: Path
+    ) -> None:
+        requirements = "pkg[extra]==1.0\nother===2.0.post1\n"
+        both = report(packages=("pkg", "other==2.0.post1"))
+        repo.commit(both, "base", requirements)
+        repo.commit(both, "tip")
+        status, out = run_audit(repo, fake_bin)
+        assert status == 0, out
 
     def test_accepts_a_report_that_covers_every_requirement(
         self, repo: Repo, fake_bin: Path

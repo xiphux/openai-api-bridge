@@ -118,19 +118,21 @@ unreviewed. Keep that in mind when touching CI:
   python-multipart is ignored for DEP002 (FastAPI parses multipart with it but
   nothing imports the name).
 - pip-audit runs through `scripts/audit_new_advisories.py`, which audits the
-  commit and a baseline — the last commit CI passed on the target branch,
-  on a pull request as well as a push (`scripts/audit-baseline.sh`, so
-  a push of several commits can't slip one in) — and fails only on an
-  advisory the commit adds (by package and id, so one the baseline had
-  against another package does not vouch for it); one already on the
-  baseline is a warning. Failing on those blocked every PR, related or not,
-  and deadlocked two that each fixed one. That job checks out with
-  `fetch-depth: 0`, has `actions: read` for the lookup, and never defers to
-  `gate`: an audit's answer changes while the content stands still. The
-  report must cover every requirement exported without a marker, so a
-  `--dry-run` or a report that skips packages fails rather than reading as
-  clean. A reviewed, unreachable advisory
-  is an `--ignore-vuln <ID>` argument to the script, with its reason.
+  commit and a baseline — the last commit CI passed on the target branch, on
+  a pull request as well as a push (`scripts/audit-baseline.sh`, so a push of
+  several commits can't slip one in) — and fails only on an advisory the
+  commit adds (by package and id, so one the baseline had against another
+  package does not vouch for it); one already on the baseline is a warning.
+  Failing on those blocked every PR, related or not, and deadlocked two that
+  each fixed one. That job checks out with `fetch-depth: 0`, has
+  `actions: read` for the lookup, and never defers to `gate`: an audit's
+  answer changes while the content stands still. Markers are stripped from
+  the export, and a package locked at several versions is audited in
+  separate passes, so every locked package is audited whatever platform it
+  is for; the report must cover each one, so a `--dry-run` or a report that
+  skips packages fails rather than reading as clean. A reviewed, unreachable
+  advisory is an `--ignore-vuln <ID>` argument to the script, with its
+  reason.
 - Actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; images run
   via `docker run` are pinned by digest. zizmor/hadolint exceptions go in
   `.github/zizmor.yml` / `.hadolint.yaml` with a reason, never silenced inline.
