@@ -155,7 +155,7 @@
 		},
 		{
 			matchUpdateTypes: ['minor'],
-			matchCurrentVersion: '/^0\\./',
+			matchCurrentVersion: '/^v?0\\./',
 			automerge: false,
 		},
 		{
@@ -164,7 +164,7 @@
 			// than merely installed by it.
 			matchPackageNames: ['fastapi', 'uvicorn', 'aiosqlite', 'respx', 'ruff'],
 			matchUpdateTypes: ['minor'],
-			matchCurrentVersion: '/^0\\./',
+			matchCurrentVersion: '/^v?0\\./',
 			automerge: true,
 		},
 		{
@@ -289,7 +289,8 @@
 			// runs (its `version:` input, tracked as the zizmor image) is in the
 			// group above. The action is 0.x, so the exclusion would send it to
 			// Sunday, a day after a version it may not know yet, so it is kept
-			// with the group.
+			// with the group. A minor of it does not auto-merge (it is 0.x), so one
+			// holds the group for review.
 			groupName: 'github actions',
 			matchPackageNames: ['zizmorcore/zizmor-action'],
 			matchUpdateTypes: ['minor', 'patch', 'digest'],
