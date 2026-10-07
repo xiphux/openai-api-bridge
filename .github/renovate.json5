@@ -13,10 +13,8 @@
 	// widening for uv_build has no resolved version, so Dependabot re-submitted
 	// it as a new PR on every run and ignored `@dependabot rebase` entirely.
 	//
-	// .github/workflows/renovate-nudge.yml is the one workaround Renovate needs:
-	// jobs are scheduled every four hours on this plan, and a merge it makes
-	// enqueues no job of its own, so nothing would rebase the PRs each merge
-	// leaves behind.
+	// Updates arrive on a weekly timetable rather than as they are released:
+	// see `schedule` below and the groups in packageRules.
 	$schema: 'https://docs.renovatebot.com/renovate-schema.json',
 
 	extends: ['config:recommended'],
@@ -50,6 +48,41 @@
 	// indefinitely.
 	prConcurrentLimit: 5,
 
+	// The weekly timetable, and the slot for anything the groups in
+	// packageRules do not claim: Sunday, 00:00-05:59 UTC. Each group has a day
+	// of its own --
+	//
+	//   Mon  lock file maintenance     Thu  test and build
+	//   Tue  aws                       Fri  production dependencies
+	//   Wed  lint and format           Sat  github actions
+	//   Sun  everything else: majors, 0.x packages, pnpm, images
+	//
+	// -- the same days in every repository that has the group. This is where
+	// the CI minutes go: before it, every release that cleared the cooldown
+	// was a pull request of its own, and the AWS SDK, which publishes almost
+	// daily, opened ten to twelve in 19 days in each repository using it.
+	// Replayed against ten days of real updates, this timetable raises about
+	// 60% fewer pull requests, and every one saved is a CI run (and, where
+	// the default branch deploys, a deploy).
+	//
+	// A day per group rather than one weekly slot for all of them, because of
+	// the up-to-date rule in branch protection: open together, every merge
+	// would put the others behind and re-run their CI, so six pull requests
+	// would cost 6+5+4+3+2+1 runs. Spread out, one is usually open at a time.
+	//
+	// Six hours, because Mend's free plan runs Renovate about every four, so a
+	// slot always holds a run. Wider would let more runs fall in it, and each
+	// can open another pull request for releases that aged in the meantime.
+	// Outside its slot a branch is still rebased and updated
+	// (`updateNotScheduled`), so nothing already open waits for next week. To
+	// take something early, tick it under "Awaiting Schedule" on the
+	// dependency dashboard.
+	//
+	// Nothing hurries Renovate between its runs any more. A workflow used to
+	// wake it after every merge so the next pull request rebased in minutes
+	// rather than hours; with one or two open a week, hours are fine.
+	schedule: ['* 0-5 * * 0'],
+
 	automergeStrategy: 'merge',
 	// GitHub's own auto-merge, so a PR lands the moment its checks pass. This is
 	// a public repository, so branch protection with required checks is
@@ -72,12 +105,12 @@
 	// on a vulnerable brace-expansion for 15 days after the fixed release. uv's
 	// `exclude-newer` (pyproject.toml) holds what this pulls in to a cooldown,
 	// which Renovate's own setting does not reach. CI gates it like any other
-	// update, so it merges unattended. Mondays, for a whole day rather than the
-	// default few hours, so a job is sure to land in it.
+	// update, so it merges unattended. Monday's slot in the timetable (see
+	// `schedule`).
 	lockFileMaintenance: {
 		enabled: true,
 		automerge: true,
-		schedule: ['* * * * 1'],
+		schedule: ['* 0-5 * * 1'],
 	},
 
 	packageRules: [
@@ -159,25 +192,149 @@
 			automerge: false,
 		},
 
-		// The test mocking stack moves together, so CI never sees half a family
-		// bumped: pytest-httpx2 registers respx's httpcore2 mocker, and respx
-		// still builds its mocks from httpx v1 types (see the DEFAULT_MOCKER
-		// note in tests/conftest.py). Narrow on purpose -- a group is held if
-		// any member is.
+		// The groups, each in its slot in the timetable (see `schedule`). Later
+		// rules win, so the ones matching by name take packages out of the two
+		// that match by dependency type. Lists are the same in every repository,
+		// names it does not use included, so a package lands in the same group
+		// wherever it turns up.
+		//
+		// Every group leaves out 0.x packages (the negated matchCurrentVersion).
+		// A 0.x minor does not auto-merge (see above), and a group auto-merges
+		// only if every update in it does, so one would hold its whole group
+		// open; left out, a 0.x package raises its own pull request on Sunday.
+		//
+		// The cost of batching: an update that fails CI holds the rest of its
+		// group until it is fixed, or excluded by a rule of its own. Majors are
+		// never grouped, and a security fix ignores all of this -- Renovate
+		// applies `vulnerabilityAlerts` after these rules, and with `force`.
+		//
+		// Two rules after these are this repository's own: the 0.x packages whose
+		// minors do auto-merge here go back into their groups, and the respx
+		// family keeps its lockstep group, in the test and build slot.
 		{
+			groupName: 'production dependencies',
+			// npm and Cargo; pep621.
+			matchDepTypes: ['dependencies', 'project.dependencies'],
+			matchUpdateTypes: ['minor', 'patch'],
+			matchCurrentVersion: '!/^v?0\\./',
+			schedule: ['* 0-5 * * 5'],
+		},
+		{
+			groupName: 'test and build',
+			// npm; Cargo; pep621's [dependency-groups], extras and build backend.
+			matchDepTypes: [
+				'devDependencies',
+				'dev-dependencies',
+				'build-dependencies',
+				'dependency-groups',
+				'project.optional-dependencies',
+				'build-system.requires',
+			],
+			matchUpdateTypes: ['minor', 'patch'],
+			matchCurrentVersion: '!/^v?0\\./',
+			schedule: ['* 0-5 * * 4'],
+		},
+		{
+			groupName: 'lint and format',
+			matchPackageNames: [
+				'eslint',
+				'eslint-*',
+				'@eslint/**',
+				'@*/eslint-*',
+				'typescript-eslint',
+				'@typescript-eslint/**',
+				'globals',
+				'prettier',
+				'prettier-*',
+				'knip',
+				'lint-staged',
+				'husky',
+				'publint',
+				'ruff',
+				'deptry',
+				'pre-commit',
+				'pre-commit/pre-commit-hooks',
+			],
+			matchUpdateTypes: ['minor', 'patch'],
+			matchCurrentVersion: '!/^v?0\\./',
+			schedule: ['* 0-5 * * 3'],
+		},
+		{
+			groupName: 'aws',
+			matchPackageNames: [
+				'@aws-sdk/**',
+				'aws-cdk',
+				'aws-cdk-lib',
+				'cdk-nag',
+				'aws-xray-sdk-core',
+				'@types/aws-lambda',
+				'aws-ses-v2-local',
+				'amazon/dynamodb-local',
+				'boto3',
+				'botocore',
+			],
+			matchUpdateTypes: ['minor', 'patch'],
+			matchCurrentVersion: '!/^v?0\\./',
+			schedule: ['* 0-5 * * 2'],
+		},
+		{
+			groupName: 'github actions',
+			matchManagers: ['github-actions'],
+			matchUpdateTypes: ['minor', 'patch', 'digest'],
+			matchCurrentVersion: '!/^v?0\\./',
+			schedule: ['* 0-5 * * 6'],
+		},
+		{
+			// zizmor-action runs only zizmor versions it knows, and the version it
+			// runs (its `version:` input, tracked as the zizmor image) is in the
+			// group above. The action is 0.x, so the exclusion would send it to
+			// Sunday, a day after a version it may not know yet, so it is kept
+			// with the group.
+			groupName: 'github actions',
+			matchPackageNames: ['zizmorcore/zizmor-action'],
+			matchUpdateTypes: ['minor', 'patch', 'digest'],
+			schedule: ['* 0-5 * * 6'],
+		},
+		{
+			// The ZERO_X_MINOR_OK packages above, back in their groups. The
+			// timetable leaves 0.x packages out only because their minors do not
+			// auto-merge, and these do -- without this, most of this
+			// repository's runtime dependencies would each raise a pull request
+			// of their own on Sunday.
+			groupName: 'production dependencies',
+			matchPackageNames: ['fastapi', 'uvicorn', 'aiosqlite'],
+			matchUpdateTypes: ['minor', 'patch'],
+			schedule: ['* 0-5 * * 5'],
+		},
+		{
+			groupName: 'lint and format',
+			matchPackageNames: ['ruff'],
+			matchUpdateTypes: ['minor', 'patch'],
+			schedule: ['* 0-5 * * 3'],
+		},
+		{
+			// The test mocking stack moves together, so CI never sees half a
+			// family bumped: pytest-httpx2 registers respx's httpcore2 mocker,
+			// and respx still builds its mocks from httpx v1 types (see the
+			// DEFAULT_MOCKER note in tests/conftest.py). A group of its own
+			// rather than part of test and build: httpx is 0.x and its minors do
+			// not auto-merge, so it holds this group open, and only this one.
+			// After the groups above, so it takes pytest-httpx2 out of test and
+			// build; in that group's slot.
 			groupName: 'respx',
 			matchUpdateTypes: ['minor', 'patch'],
 			matchPackageNames: ['respx', 'httpx', 'pytest-httpx2'],
+			schedule: ['* 0-5 * * 4'],
 		},
 
 		{
 			// The Dockerfile's base image, which Dependabot was never configured
 			// to watch here -- Renovate's dockerfile manager is on by default,
 			// so this is new coverage rather than a port. Both stages pin
-			// python:3.12-alpine; a patch or minor of that tag merges on a green
-			// CI run like anything else, and the image smoke job in ci.yml is
-			// what judges it. A major (3.13) is held, as majors are everywhere
-			// here.
+			// python's alpine image; a patch or minor of that tag merges on a
+			// green CI run like anything else, and the image smoke job in ci.yml
+			// is what judges it. A major is held, as majors are everywhere here.
+			// Ungrouped, so it waits for Sunday's slot.
 			matchManagers: ['dockerfile'],
 			commitMessagePrefix: 'ci:',
 		},

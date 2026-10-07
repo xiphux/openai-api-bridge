@@ -152,8 +152,9 @@ unreviewed. Keep that in mind when touching CI:
   `ruff>=0.16.2`, so almost nothing would be proposed, and the pre-commit
   manager is off by default, so `.pre-commit-config.yaml`'s `rev:` pins would
   quietly stop moving.
-- `renovate-nudge.yml` wakes Renovate after a push: a merge it performs enqueues
-  no job of its own, and the scheduled run is four-hourly.
+- Updates come on a weekly timetable, each group in a slot on its own day (see
+  `schedule` in `renovate.json5`); nothing wakes Renovate between its
+  four-hourly runs, so a rebase after a merge waits for the next one.
 - A new runtime dependency with a native extension should get real work in
   `tests/image-smoke/smoke.py` — that's the only check of the `--no-dev`
   Alpine install.
