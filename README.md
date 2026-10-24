@@ -685,10 +685,8 @@ with its own native versions rather than the pinned Python ones.
 |---|---|
 | Lint + format + type-check | prek (ruff, file hygiene) and `mypy src tests` |
 | Tests | `pytest --cov`: fails on any warning, and below the branch-coverage floor in `pyproject.toml` |
-| Workflow + Dockerfile lint | actionlint, zizmor, hadolint, and `CHANGELOG.md`'s structure |
-| Dependency audit | `pip-audit` over the production (`--no-dev`) lock |
+| Checks | the install-free checks, in one job since each takes seconds and Actions bills every job as at least a minute: `pip-audit` over the production (`--no-dev`) lock; actionlint, zizmor, hadolint, and `CHANGELOG.md`'s structure; gitleaks over the tested commit's history. Unlike the others it never skips when `gate` finds the content already passed, since an audit's answer changes as advisories are published |
 | Docker image smoke | builds amd64 + arm64; boots amd64 and serves requests, including the OpenAI passthrough against a stub upstream over a real network (JSON, streaming, unreachable upstream); import-checks both from the image's own venv |
-| Secret scan | gitleaks over the tested commit's history |
 
 Pushing a `v[0-9]+.[0-9]+.[0-9]+` tag publishes a GitHub release once that
 suite passes. The notes are the tag's section of [`CHANGELOG.md`](CHANGELOG.md), rendered by

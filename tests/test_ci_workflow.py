@@ -39,10 +39,11 @@ def load(name: str) -> dict[str, Any]:
 
 
 CI_JOBS = load("ci.yml")
-# The one exception runs the other way: the dependency audit never skips,
-# because its answer changes while the content stands still. It carries no
-# condition at all, and that is pinned too (see ci.yml).
-NEVER_SKIPS = ["audit"]
+# The one exception runs the other way: the `checks` job, which carries the
+# dependency audit, never skips, because an audit's answer changes while the
+# content stands still. It carries no condition at all, and that is pinned too
+# (see ci.yml).
+NEVER_SKIPS = ["checks"]
 CHECKS = [name for name in CI_JOBS if name != "gate" and name not in NEVER_SKIPS]
 GATE = CI_JOBS["gate"]
 SCRIPT = next(s for s in GATE["steps"] if s.get("id") == "inherit")["run"]

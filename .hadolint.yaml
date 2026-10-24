@@ -1,4 +1,4 @@
-# hadolint (Dockerfile linter) — run by the `infra` job in ci.yml. Rules
+# hadolint (Dockerfile linter) — run by the `checks` job in ci.yml. Rules
 # ignored repo-wide are ones that don't fit this image; one-off exceptions are
 # inline `# hadolint ignore=` pragmas next to the instruction they excuse.
 failure-threshold: warning

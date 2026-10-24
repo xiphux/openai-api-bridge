@@ -682,13 +682,13 @@ class TestWiring:
     None of these fails visibly when it goes missing -- a dropped AUDIT_BASE
     quietly falls back to comparing against HEAD's parent, and a workflow in
     AUDIT_WORKFLOWS that goes green without auditing makes every commit it
-    passes a baseline -- so each is pinned. So is the audit job's
+    passes a baseline -- so each is pinned. So is the `checks` job's
     independence from `gate`: advisories are published while content stands
     still, and a merge that inherited a pull request's pass would become a
     baseline nothing audited.
     """
 
-    job = jobs("ci.yml")["audit"]
+    job = jobs("ci.yml")["checks"]
     steps: list[dict[str, Any]] = job["steps"]
     baseline = next(step for step in steps if step.get("id") == "audit-baseline")
     audit = next(step for step in steps if step.get("name") == "pip-audit")
@@ -698,7 +698,7 @@ class TestWiring:
         # Branch protection requires the audit by this name for a red audit to
         # block a merge, and a rename has to be matched there: a required check
         # that is never reported blocks every merge until it is.
-        assert self.job["name"] == "Dependency audit"
+        assert self.job["name"] == "Checks"
 
     def test_never_skips_and_never_fails_quietly(self) -> None:
         for key in ("if", "needs", "continue-on-error"):

@@ -1,4 +1,4 @@
-# zizmor (GitHub Actions security linter) — run by the `infra` job in ci.yml.
+# zizmor (GitHub Actions security linter) — run by the `checks` job in ci.yml.
 # Every exception below is a finding that was read and judged, not silenced to
 # get green. Add a new one only with the same kind of reason next to it.
 rules:
