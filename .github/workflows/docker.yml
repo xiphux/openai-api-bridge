@@ -56,7 +56,7 @@ jobs:
 
   build-and-push:
     needs: tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The two-architecture build, arm64 under QEMU; generous, but not GitHub's
     # 6-hour default for a hung push or build.
     timeout-minutes: 60
@@ -167,7 +167,7 @@ jobs:
   create-release:
     needs: build-and-push
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write # required to create the release object

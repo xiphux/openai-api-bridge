@@ -1,0 +1,10 @@
+# actionlint configuration — run by the `checks` job in ci.yml.
+self-hosted-runner:
+  # Not self-hosted: these are GitHub-hosted runners, newer than the label list
+  # built into actionlint 1.7.12, which rejects them as unknown
+  # (rhysd/actionlint#682). Upstream has had no release since March 2026, so
+  # this vouches for them until one does; delete it then. It names only the
+  # labels actionlint lacks, so a typo in any other runs-on still fails.
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
