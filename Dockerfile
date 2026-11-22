@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.28
+# syntax=docker/dockerfile:1.29
 #
 # Multi-stage build using uv. Builder installs deps + the package into a
 # venv; runtime copies the venv into a fresh image. Both stages run on
